@@ -23,6 +23,14 @@ interface Dataset {
   format: string
   created_at: number
   selected: boolean
+  max_samples?: number | null // null or 0 = all
+}
+
+interface DatasetInfo {
+  subsets: string[]
+  splits: { [subset: string]: { [split: string]: number } }
+  isPrivate: boolean
+  error?: string
 }
 
 interface Props {
@@ -61,18 +69,88 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange }: Prop
   const [registerPath, setRegisterPath] = useState('')
   const [registerSubset, setRegisterSubset] = useState('')
   const [registerSplit, setRegisterSplit] = useState('train')
+  const [registerMaxSamples, setRegisterMaxSamples] = useState<string>('')
   const [isRegistering, setIsRegistering] = useState(false)
   const [registerError, setRegisterError] = useState('')
+  
+  // Dataset info from API
+  const [datasetInfo, setDatasetInfo] = useState<DatasetInfo | null>(null)
+  const [isFetchingInfo, setIsFetchingInfo] = useState(false)
+  const [infoFetched, setInfoFetched] = useState(false)
   
   // Delete confirmation
   const [deleteTarget, setDeleteTarget] = useState<Dataset | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState('')
   const [isDeleting, setIsDeleting] = useState(false)
 
-  // Fetch datasets on mount
+  // Fetch datasets on mount and sync selection with parent
   useEffect(() => {
     fetchDatasets()
   }, [])
+
+  // Notify parent when datasets change - FIX for Next button visibility
+  useEffect(() => {
+    if (datasets.length > 0) {
+      const paths = datasets.filter(d => d.selected).map(d => d.path)
+      onSelectionChange(paths)
+    }
+  }, [datasets])
+
+  // Fetch HuggingFace dataset info when path changes
+  useEffect(() => {
+    if (activeTab === 'huggingface' && registerPath.trim()) {
+      const timer = setTimeout(() => fetchDatasetInfo(registerPath.trim()), 500)
+      return () => clearTimeout(timer)
+    } else {
+      setDatasetInfo(null)
+      setInfoFetched(false)
+    }
+  }, [registerPath, activeTab])
+
+  const fetchDatasetInfo = async (datasetId: string) => {
+    setIsFetchingInfo(true)
+    setDatasetInfo(null)
+    try {
+      // Use HuggingFace datasets API
+      const res = await fetch(`https://datasets-server.huggingface.co/info?dataset=${encodeURIComponent(datasetId)}`)
+      if (res.ok) {
+        const data = await res.json()
+        const subsets = Object.keys(data.dataset_info || {})
+        const splits: { [subset: string]: { [split: string]: number } } = {}
+        
+        for (const subset of subsets) {
+          const subsetInfo = data.dataset_info[subset]
+          if (subsetInfo?.splits) {
+            splits[subset] = {}
+            for (const [splitName, splitInfo] of Object.entries(subsetInfo.splits)) {
+              splits[subset][splitName] = (splitInfo as any).num_examples || 0
+            }
+          }
+        }
+        
+        setDatasetInfo({ subsets, splits, isPrivate: false })
+        // Auto-select first subset if available
+        if (subsets.length > 0 && !registerSubset) {
+          setRegisterSubset(subsets[0] === 'default' ? '' : subsets[0])
+        }
+      } else if (res.status === 401 || res.status === 403 || res.status === 404) {
+        setDatasetInfo({ subsets: [], splits: {}, isPrivate: true, error: 'Private or not found - enter details manually' })
+      } else {
+        setDatasetInfo({ subsets: [], splits: {}, isPrivate: true, error: 'Could not fetch info - enter details manually' })
+      }
+    } catch (e) {
+      setDatasetInfo({ subsets: [], splits: {}, isPrivate: true, error: 'API unavailable - enter details manually' })
+    } finally {
+      setIsFetchingInfo(false)
+      setInfoFetched(true)
+    }
+  }
+
+  const getSampleCount = (subset: string, split: string): number | null => {
+    if (!datasetInfo || datasetInfo.isPrivate) return null
+    const subsetKey = subset || datasetInfo.subsets[0] || 'default'
+    return datasetInfo.splits[subsetKey]?.[split] ?? null
+  }
 
   const fetchDatasets = async () => {
     setIsLoading(true)
@@ -175,6 +253,8 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange }: Prop
         return
       }
 
+      const maxSamples = registerMaxSamples.trim() ? parseInt(registerMaxSamples) : null
+      
       const res = await fetch(`${API_URL}/api/datasets/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -183,7 +263,8 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange }: Prop
           source: activeTab,
           dataset_id: registerPath.trim(),
           subset: registerSubset.trim() || null,
-          split: registerSplit || 'train'
+          split: registerSplit || 'train',
+          max_samples: maxSamples && maxSamples > 0 ? maxSamples : null
         })
       })
       
@@ -197,6 +278,9 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange }: Prop
         setRegisterName('')
         setRegisterPath('')
         setRegisterSubset('')
+        setRegisterMaxSamples('')
+        setDatasetInfo(null)
+        setInfoFetched(false)
         await fetchDatasets()
       } else {
         setRegisterError(data.detail || 'Registration failed')
@@ -358,29 +442,95 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange }: Prop
               <label className="block text-sm font-medium text-slate-700 mb-1">
                 {activeTab === 'local_path' ? 'Local Path *' : 'Dataset ID *'}
               </label>
-              <input type="text" value={registerPath} onChange={(e) => setRegisterPath(e.target.value)}
-                placeholder={activeTab === 'local_path' ? '/path/to/dataset.jsonl' : 'organization/dataset-name'}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg" />
-            </div>
-            {activeTab !== 'local_path' && (
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Subset (optional)</label>
-                  <input type="text" value={registerSubset} onChange={(e) => setRegisterSubset(e.target.value)}
-                    placeholder="default"
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg" />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Split</label>
-                  <select value={registerSplit} onChange={(e) => setRegisterSplit(e.target.value)}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg">
-                    <option value="train">train</option>
-                    <option value="validation">validation</option>
-                    <option value="test">test</option>
-                  </select>
-                </div>
+              <div className="relative">
+                <input type="text" value={registerPath} onChange={(e) => setRegisterPath(e.target.value)}
+                  placeholder={activeTab === 'local_path' ? '/path/to/dataset.jsonl' : 'organization/dataset-name'}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg pr-10" />
+                {isFetchingInfo && (
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                    <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
+                  </div>
+                )}
               </div>
+              {activeTab === 'huggingface' && infoFetched && datasetInfo && (
+                <p className={`text-xs mt-1 ${datasetInfo.isPrivate ? 'text-amber-600' : 'text-green-600'}`}>
+                  {datasetInfo.isPrivate ? `⚠️ ${datasetInfo.error}` : `✓ Found ${datasetInfo.subsets.length} subset(s)`}
+                </p>
+              )}
+            </div>
+
+            {/* Subset & Split - Show dropdowns if API returned data, otherwise input fields */}
+            {activeTab !== 'local_path' && (
+              <>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Subset</label>
+                    {datasetInfo && !datasetInfo.isPrivate && datasetInfo.subsets.length > 0 ? (
+                      <select value={registerSubset} onChange={(e) => setRegisterSubset(e.target.value)}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white">
+                        {datasetInfo.subsets.map(s => (
+                          <option key={s} value={s === 'default' ? '' : s}>{s}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input type="text" value={registerSubset} onChange={(e) => setRegisterSubset(e.target.value)}
+                        placeholder="default (optional)"
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg" />
+                    )}
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Split</label>
+                    {datasetInfo && !datasetInfo.isPrivate ? (
+                      <select value={registerSplit} onChange={(e) => setRegisterSplit(e.target.value)}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white">
+                        {Object.keys(datasetInfo.splits[registerSubset || datasetInfo.subsets[0]] || {}).map(s => (
+                          <option key={s} value={s}>{s}</option>
+                        ))}
+                        {Object.keys(datasetInfo.splits[registerSubset || datasetInfo.subsets[0]] || {}).length === 0 && (
+                          <>
+                            <option value="train">train</option>
+                            <option value="validation">validation</option>
+                            <option value="test">test</option>
+                          </>
+                        )}
+                      </select>
+                    ) : (
+                      <select value={registerSplit} onChange={(e) => setRegisterSplit(e.target.value)}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white">
+                        <option value="train">train</option>
+                        <option value="validation">validation</option>
+                        <option value="test">test</option>
+                      </select>
+                    )}
+                  </div>
+                </div>
+
+                {/* Show sample count for selected split */}
+                {datasetInfo && !datasetInfo.isPrivate && (
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-2">
+                    <p className="text-xs text-blue-700">
+                      📊 <strong>{registerSplit}</strong> split has{' '}
+                      <strong>{(getSampleCount(registerSubset, registerSplit) || 0).toLocaleString()}</strong> samples
+                    </p>
+                  </div>
+                )}
+              </>
             )}
+
+            {/* Max Samples - for all sources */}
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">
+                Max Samples <span className="text-slate-400 font-normal">(blank = all)</span>
+              </label>
+              <input type="number" value={registerMaxSamples} onChange={(e) => setRegisterMaxSamples(e.target.value)}
+                placeholder="Leave empty to use all samples"
+                min="0" step="1"
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg" />
+              <p className="text-xs text-slate-500 mt-1">
+                Specify maximum number of samples to use, or leave blank for all
+              </p>
+            </div>
+
             {registerError && <p className="text-sm text-red-600 flex items-center gap-1"><AlertCircle className="w-4 h-4" />{registerError}</p>}
             <button onClick={registerDataset} disabled={!registerName.trim() || !registerPath.trim() || isRegistering}
               className="w-full py-2 bg-primary-600 text-white rounded-lg font-medium disabled:opacity-50 flex items-center justify-center gap-2">

@@ -1,12 +1,15 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { 
   Cpu, Database, Settings, Play, CheckCircle, 
   ChevronRight, ChevronLeft, Loader2,
   AlertCircle, Sparkles, Zap, BarChart3,
   MessageSquare, Send, Trash2, StopCircle,
-  RefreshCw, Upload, X, FileText, Check
+  RefreshCw, Upload, X, FileText, Check,
+  HardDrive, Thermometer, Clock, Activity,
+  FolderOpen, Download, Layers, ToggleLeft, ToggleRight,
+  History, Menu, Monitor, Gauge
 } from 'lucide-react'
 import TrainingSettingsStep from '@/components/TrainingSettings'
 import DatasetConfig from '@/components/DatasetConfig'
@@ -46,6 +49,36 @@ interface JobStatus {
   current_loss: number | null
   logs: string[]
   error: string | null
+  learning_rate?: number
+  epoch?: number
+  total_epochs?: number
+  samples_per_second?: number
+  eta_seconds?: number
+}
+
+interface SystemMetrics {
+  gpu_utilization: number | null
+  gpu_memory_used: number | null
+  gpu_memory_total: number | null
+  gpu_temperature: number | null
+  cpu_percent: number | null
+  ram_used: number | null
+  ram_total: number | null
+  available: boolean
+}
+
+interface TrainingMetric {
+  step: number
+  loss: number
+  learning_rate: number
+  timestamp: number
+}
+
+interface LoadedAdapter {
+  id: string
+  name: string
+  path: string
+  active: boolean
 }
 
 interface ChatMessage {
@@ -138,6 +171,26 @@ export default function Home() {
     repetition_penalty: 1.0,
   })
   
+  // Enhanced inference state
+  const [isModelLoading, setIsModelLoading] = useState(false)
+  const [loadedAdapters, setLoadedAdapters] = useState<LoadedAdapter[]>([])
+  const [chatMode, setChatMode] = useState<'chat' | 'completion'>('chat')
+  const [systemPrompt, setSystemPrompt] = useState('')
+  const [keepHistory, setKeepHistory] = useState(true)
+  
+  // System metrics state - null means data not available
+  const [systemMetrics, setSystemMetrics] = useState<SystemMetrics>({
+    gpu_utilization: null, gpu_memory_used: null, gpu_memory_total: null,
+    gpu_temperature: null, cpu_percent: null, ram_used: null, ram_total: null,
+    available: false
+  })
+  
+  // Training metrics for graphs
+  const [trainingMetrics, setTrainingMetrics] = useState<TrainingMetric[]>([])
+  
+  // Mobile menu
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  
   const chatEndRef = useRef<HTMLDivElement>(null)
   const logsEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -148,6 +201,39 @@ export default function Home() {
       fetchDatasets()
     }
   }, [mainTab, currentStep])
+
+  // Fetch system metrics periodically - only set if data is valid
+  const fetchSystemMetrics = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/system/metrics`)
+      if (res.ok) {
+        const data = await res.json()
+        // Only update if we have actual data, mark as available
+        setSystemMetrics({
+          gpu_utilization: data.gpu_utilization ?? null,
+          gpu_memory_used: data.gpu_memory_used ?? null,
+          gpu_memory_total: data.gpu_memory_total ?? null,
+          gpu_temperature: data.gpu_temperature ?? null,
+          cpu_percent: data.cpu_percent ?? null,
+          ram_used: data.ram_used ?? null,
+          ram_total: data.ram_total ?? null,
+          available: data.gpu_memory_total > 0 || data.cpu_percent > 0
+        })
+      }
+    } catch (e) {
+      console.error('Failed to fetch system metrics:', e)
+      // Keep metrics as unavailable on error
+    }
+  }, [])
+
+  // Poll system metrics during training or inference
+  useEffect(() => {
+    if (isTraining || mainTab === 'inference') {
+      fetchSystemMetrics()
+      const interval = setInterval(fetchSystemMetrics, 3000)
+      return () => clearInterval(interval)
+    }
+  }, [isTraining, mainTab, fetchSystemMetrics])
 
   // WebSocket for training updates
   useEffect(() => {
@@ -162,12 +248,28 @@ export default function Home() {
             setTrainingLogs(prev => [...prev.slice(-500), data.message])
           }
           if (data.type === 'progress') {
+            // Update job status
             setJobStatus(prev => prev ? {
               ...prev,
               current_step: data.step || prev.current_step,
               total_steps: data.total_steps || prev.total_steps,
               current_loss: data.loss ?? prev.current_loss,
+              learning_rate: data.learning_rate ?? prev.learning_rate,
+              epoch: data.epoch ?? prev.epoch,
+              total_epochs: data.total_epochs ?? prev.total_epochs,
+              samples_per_second: data.samples_per_second ?? prev.samples_per_second,
+              eta_seconds: data.eta_seconds ?? prev.eta_seconds,
             } : null)
+            
+            // Collect metrics for graphs
+            if (data.step && data.loss !== undefined) {
+              setTrainingMetrics(prev => [...prev.slice(-200), {
+                step: data.step,
+                loss: data.loss,
+                learning_rate: data.learning_rate || 0,
+                timestamp: Date.now()
+              }])
+            }
           }
           if (data.type === 'status') {
             if (data.status === 'completed' || data.status === 'failed' || data.status === 'stopped') {
@@ -408,23 +510,117 @@ export default function Home() {
     }
   }
 
+  // Load model for inference
+  const loadModel = async () => {
+    if (!inferenceModel.trim()) return
+    setIsModelLoading(true)
+    try {
+      const res = await fetch(`${API_URL}/api/inference/load`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_path: inferenceModel })
+      })
+      const data = await res.json()
+      if (data.success) {
+        await fetchInferenceStatus()
+      } else {
+        alert(`Failed to load model: ${data.error || 'Unknown error'}`)
+      }
+    } catch (e) {
+      alert(`Failed to load model: ${e}`)
+    } finally {
+      setIsModelLoading(false)
+    }
+  }
+
+  // Load adapter
+  const loadAdapter = async () => {
+    if (!adapterPath.trim() || !inferenceStatus.model_loaded) return
+    try {
+      const res = await fetch(`${API_URL}/api/inference/load-adapter`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adapter_path: adapterPath })
+      })
+      const data = await res.json()
+      if (data.success) {
+        const newAdapter: LoadedAdapter = {
+          id: `adapter-${Date.now()}`,
+          name: adapterPath.split('/').pop() || 'adapter',
+          path: adapterPath,
+          active: true
+        }
+        // Deactivate others, add new
+        setLoadedAdapters(prev => [...prev.map(a => ({ ...a, active: false })), newAdapter])
+        setAdapterPath('')
+      } else {
+        alert(`Failed to load adapter: ${data.error || 'Unknown error'}`)
+      }
+    } catch (e) {
+      alert(`Failed to load adapter: ${e}`)
+    }
+  }
+
+  // Switch active adapter
+  const switchAdapter = async (adapterId: string) => {
+    const adapter = loadedAdapters.find(a => a.id === adapterId)
+    if (!adapter) return
+    try {
+      const res = await fetch(`${API_URL}/api/inference/switch-adapter`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adapter_path: adapter.path })
+      })
+      if (res.ok) {
+        setLoadedAdapters(prev => prev.map(a => ({ ...a, active: a.id === adapterId })))
+      }
+    } catch (e) {
+      console.error('Failed to switch adapter:', e)
+    }
+  }
+
+  // Remove adapter
+  const removeAdapter = (adapterId: string) => {
+    setLoadedAdapters(prev => prev.filter(a => a.id !== adapterId))
+  }
+
   const sendMessage = async () => {
-    if (!inputMessage.trim() || !inferenceModel || isGenerating) return
+    if (!inputMessage.trim() || !inferenceStatus.model_loaded || isGenerating) return
     
     const userMessage: ChatMessage = { role: 'user', content: inputMessage }
+    
+    // Build messages array with optional system prompt and history
+    let messagesToSend: ChatMessage[] = []
+    
+    // Add system prompt if set and in chat mode
+    if (chatMode === 'chat' && systemPrompt.trim()) {
+      messagesToSend.push({ role: 'system', content: systemPrompt })
+    }
+    
+    // Add history if enabled, otherwise just current message
+    if (keepHistory && chatMode === 'chat') {
+      messagesToSend = [...messagesToSend, ...chatMessages, userMessage]
+    } else {
+      messagesToSend = [...messagesToSend, userMessage]
+    }
+    
     const newMessages = [...chatMessages, userMessage]
     setChatMessages(newMessages)
     setInputMessage('')
     setIsGenerating(true)
     
     try {
-      const res = await fetch(`${API_URL}/api/inference/chat`, {
+      const activeAdapter = loadedAdapters.find(a => a.active)
+      const endpoint = chatMode === 'chat' ? '/api/inference/chat' : '/api/inference/generate'
+      
+      const res = await fetch(`${API_URL}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model_path: inferenceModel,
-          adapter_path: adapterPath || null,
-          messages: newMessages.map(m => ({ role: m.role, content: m.content })),
+          adapter_path: activeAdapter?.path || null,
+          messages: messagesToSend.map(m => ({ role: m.role, content: m.content })),
+          prompt: chatMode === 'completion' ? inputMessage : undefined,
           ...inferenceSettings,
           do_sample: inferenceSettings.temperature > 0,
         }),
@@ -464,8 +660,17 @@ export default function Home() {
 
   const selectedCount = uploadedDatasets.filter(d => d.selected).length
 
+  // Format time helper
+  const formatTime = (seconds: number) => {
+    if (!seconds || seconds < 0) return '--:--'
+    const h = Math.floor(seconds / 3600)
+    const m = Math.floor((seconds % 3600) / 60)
+    const s = Math.floor(seconds % 60)
+    return h > 0 ? `${h}h ${m}m` : `${m}m ${s}s`
+  }
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-white">
       {/* Delete Confirmation Modal */}
       {deleteTarget && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
@@ -521,41 +726,76 @@ export default function Home() {
         </div>
       )}
 
-      {/* Header */}
-      <header className="bg-white border-b border-slate-200 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+      {/* Header - Light Theme with Blue Accents */}
+      <header className="bg-white border-b border-slate-200 shadow-sm sticky top-0 z-40">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-gradient-to-br from-primary-500 to-purple-600 rounded-lg flex items-center justify-center">
-                <Sparkles className="w-6 h-6 text-white" />
+              <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-500/30">
+                <Sparkles className="w-5 h-5 text-white" />
               </div>
-              <div>
-                <h1 className="text-xl font-bold text-slate-900">USF BIOS</h1>
+              <div className="hidden sm:block">
+                <h1 className="text-lg font-bold text-slate-900">USF BIOS</h1>
                 <p className="text-xs text-slate-500">AI Fine-tuning Platform</p>
               </div>
             </div>
             
-            <div className="flex bg-slate-100 rounded-lg p-1">
+            {/* Mobile menu button */}
+            <button onClick={() => setMobileMenuOpen(!mobileMenuOpen)} className="sm:hidden p-2 text-slate-600 hover:text-slate-900">
+              <Menu className="w-6 h-6" />
+            </button>
+            
+            {/* Desktop tabs */}
+            <div className="hidden sm:flex bg-slate-100 rounded-lg p-1">
               <button
                 onClick={() => setMainTab('train')}
-                className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
-                  mainTab === 'train' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+                className={`px-4 py-2 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
+                  mainTab === 'train' ? 'bg-blue-500 text-white shadow-md' : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
-                <Zap className="w-4 h-4 inline mr-2" />Fine-tuning
+                <Zap className="w-4 h-4" />Fine-tuning
               </button>
               <button
                 onClick={() => setMainTab('inference')}
-                className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
-                  mainTab === 'inference' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+                className={`px-4 py-2 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
+                  mainTab === 'inference' ? 'bg-blue-500 text-white shadow-md' : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
-                <MessageSquare className="w-4 h-4 inline mr-2" />Inference
+                <MessageSquare className="w-4 h-4" />Inference
               </button>
             </div>
             
-            <div className="text-sm text-slate-500">Powered by US Inc</div>
+            {/* System metrics mini display - only show if data available */}
+            <div className="hidden lg:flex items-center gap-4 text-xs">
+              {systemMetrics.available && systemMetrics.gpu_utilization !== null && (
+                <div className="flex items-center gap-1 text-slate-600">
+                  <Gauge className="w-4 h-4 text-blue-500" />
+                  <span>GPU: {systemMetrics.gpu_utilization}%</span>
+                </div>
+              )}
+              {systemMetrics.available && systemMetrics.gpu_memory_used !== null && systemMetrics.gpu_memory_total !== null && (
+                <div className="flex items-center gap-1 text-slate-600">
+                  <HardDrive className="w-4 h-4 text-blue-500" />
+                  <span>VRAM: {systemMetrics.gpu_memory_used.toFixed(1)}/{systemMetrics.gpu_memory_total.toFixed(0)}GB</span>
+                </div>
+              )}
+              <div className="text-slate-500">Powered by US Inc</div>
+            </div>
           </div>
+          
+          {/* Mobile menu */}
+          {mobileMenuOpen && (
+            <div className="sm:hidden mt-3 pt-3 border-t border-slate-200 flex gap-2">
+              <button onClick={() => { setMainTab('train'); setMobileMenuOpen(false) }}
+                className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium ${mainTab === 'train' ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-700'}`}>
+                <Zap className="w-4 h-4 inline mr-1" />Fine-tuning
+              </button>
+              <button onClick={() => { setMainTab('inference'); setMobileMenuOpen(false) }}
+                className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium ${mainTab === 'inference' ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-700'}`}>
+                <MessageSquare className="w-4 h-4 inline mr-1" />Inference
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
@@ -566,23 +806,23 @@ export default function Home() {
           <>
             {currentStep <= 4 && (
               <div className="mb-6">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between overflow-x-auto pb-2">
                   {TRAIN_STEPS.map((step, idx) => (
-                    <div key={step.id} className="flex items-center">
-                      <div className={`flex items-center gap-2 ${currentStep >= step.id ? 'text-primary-600' : 'text-slate-400'}`}>
-                        <div className={`w-10 h-10 rounded-full flex items-center justify-center border-2 transition-all ${
-                          currentStep > step.id ? 'bg-primary-600 border-primary-600 text-white' :
-                          currentStep === step.id ? 'border-primary-600 text-primary-600 bg-primary-50' :
+                    <div key={step.id} className="flex items-center flex-shrink-0">
+                      <div className={`flex items-center gap-2 ${currentStep >= step.id ? 'text-blue-600' : 'text-slate-400'}`}>
+                        <div className={`w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center border-2 transition-all ${
+                          currentStep > step.id ? 'bg-blue-500 border-blue-500 text-white' :
+                          currentStep === step.id ? 'border-blue-500 text-blue-600 bg-blue-50' :
                           'border-slate-300 text-slate-400'
                         }`}>
-                          {currentStep > step.id ? <CheckCircle className="w-5 h-5" /> : <step.icon className="w-5 h-5" />}
+                          {currentStep > step.id ? <CheckCircle className="w-4 h-4 sm:w-5 sm:h-5" /> : <step.icon className="w-4 h-4 sm:w-5 sm:h-5" />}
                         </div>
-                        <span className={`hidden sm:block font-medium ${currentStep >= step.id ? 'text-slate-900' : 'text-slate-400'}`}>
+                        <span className={`hidden sm:block text-sm font-medium ${currentStep >= step.id ? 'text-slate-900' : 'text-slate-400'}`}>
                           {step.title}
                         </span>
                       </div>
                       {idx < TRAIN_STEPS.length - 1 && (
-                        <div className={`w-12 sm:w-20 h-0.5 mx-2 ${currentStep > step.id ? 'bg-primary-600' : 'bg-slate-200'}`} />
+                        <div className={`w-8 sm:w-16 h-0.5 mx-2 ${currentStep > step.id ? 'bg-blue-500' : 'bg-slate-200'}`} />
                       )}
                     </div>
                   ))}
@@ -590,7 +830,7 @@ export default function Home() {
               </div>
             )}
 
-            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6">
+            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-4 sm:p-6">
               
               {/* Step 1: Model */}
               {currentStep === 1 && (
@@ -607,7 +847,7 @@ export default function Home() {
                         {['huggingface', 'modelscope', 'local'].map((source) => (
                           <button key={source} onClick={() => setConfig({ ...config, model_source: source as any })}
                             className={`p-3 rounded-lg border-2 text-center transition-all ${
-                              config.model_source === source ? 'border-primary-500 bg-primary-50' : 'border-slate-200 hover:border-slate-300'
+                              config.model_source === source ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-600 hover:border-slate-300'
                             }`}>
                             <span className="capitalize font-medium text-sm">{source}</span>
                           </button>
@@ -620,7 +860,7 @@ export default function Home() {
                       <input type="text" value={config.model_path}
                         onChange={(e) => setConfig({ ...config, model_path: e.target.value })}
                         placeholder={config.model_source === 'local' ? '/path/to/model' : 'organization/model-name'}
-                        className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+                        className="w-full px-4 py-3 border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                       />
                     </div>
                     
@@ -635,7 +875,7 @@ export default function Home() {
                         ].map((model) => (
                           <button key={model.id} onClick={() => setConfig({ ...config, model_path: model.id, model_source: 'huggingface' })}
                             className={`p-2 rounded-lg border text-left transition-all ${
-                              config.model_path === model.id ? 'border-primary-500 bg-primary-50' : 'border-slate-200 hover:border-slate-300'
+                              config.model_path === model.id ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-700 hover:border-slate-300'
                             }`}>
                             <span className="font-medium text-sm">{model.name}</span>
                           </button>
@@ -670,30 +910,44 @@ export default function Home() {
                     <p className="text-slate-600 text-sm">Review your configuration before training</p>
                   </div>
                   
-                  <div className="bg-slate-50 rounded-lg p-4 space-y-3 text-sm">
+                  {/* Output Path Configuration */}
+                  <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
+                    <div className="flex items-center gap-2 mb-3">
+                      <FolderOpen className="w-5 h-5 text-blue-600" />
+                      <label className="text-sm font-medium text-slate-900">Output Directory</label>
+                    </div>
+                    <input type="text" value={config.output_dir}
+                      onChange={(e) => setConfig({ ...config, output_dir: e.target.value })}
+                      placeholder="output/finetuned-model"
+                      className="w-full px-4 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
+                    <p className="text-xs text-slate-500 mt-2">Where the trained model/adapter will be saved</p>
+                  </div>
+                  
+                  <div className="bg-slate-50 rounded-lg p-4 space-y-3 text-sm border border-slate-200">
+                    <h4 className="font-medium text-slate-900 mb-2">Configuration Summary</h4>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <div><span className="text-slate-500">Model:</span> <span className="font-medium break-all">{config.model_path}</span></div>
-                      <div><span className="text-slate-500">Training Type:</span> <span className="font-medium uppercase">{config.train_type}</span></div>
-                      <div><span className="text-slate-500">Epochs:</span> <span className="font-medium">{config.num_train_epochs}</span></div>
-                      <div><span className="text-slate-500">Learning Rate:</span> <span className="font-medium">{config.learning_rate.toExponential(0)}</span></div>
-                      <div><span className="text-slate-500">Effective Batch:</span> <span className="font-medium">{config.per_device_train_batch_size} × {config.gradient_accumulation_steps} = {config.per_device_train_batch_size * config.gradient_accumulation_steps}</span></div>
-                      <div><span className="text-slate-500">Max Length:</span> <span className="font-medium">{config.max_length}</span></div>
+                      <div><span className="text-slate-500">Model:</span> <span className="font-medium text-slate-900 break-all">{config.model_path}</span></div>
+                      <div><span className="text-slate-500">Training Type:</span> <span className="font-medium text-blue-600 uppercase">{config.train_type}</span></div>
+                      <div><span className="text-slate-500">Epochs:</span> <span className="font-medium text-slate-900">{config.num_train_epochs}</span></div>
+                      <div><span className="text-slate-500">Learning Rate:</span> <span className="font-medium text-slate-900">{config.learning_rate.toExponential(0)}</span></div>
+                      <div><span className="text-slate-500">Effective Batch:</span> <span className="font-medium text-slate-900">{config.per_device_train_batch_size} × {config.gradient_accumulation_steps} = {config.per_device_train_batch_size * config.gradient_accumulation_steps}</span></div>
+                      <div><span className="text-slate-500">Max Length:</span> <span className="font-medium text-slate-900">{config.max_length}</span></div>
                       {['lora', 'qlora', 'adalora'].includes(config.train_type) && (
                         <>
-                          <div><span className="text-slate-500">LoRA Rank:</span> <span className="font-medium">{config.lora_rank}</span></div>
-                          <div><span className="text-slate-500">LoRA Alpha:</span> <span className="font-medium">{config.lora_alpha}</span></div>
+                          <div><span className="text-slate-500">LoRA Rank:</span> <span className="font-medium text-slate-900">{config.lora_rank}</span></div>
+                          <div><span className="text-slate-500">LoRA Alpha:</span> <span className="font-medium text-slate-900">{config.lora_alpha}</span></div>
                         </>
                       )}
                       {config.train_type === 'qlora' && (
-                        <div><span className="text-slate-500">Quantization:</span> <span className="font-medium">{config.quant_bits}-bit</span></div>
+                        <div><span className="text-slate-500">Quantization:</span> <span className="font-medium text-blue-600">{config.quant_bits}-bit</span></div>
                       )}
                     </div>
                     <div className="pt-3 border-t border-slate-200">
                       <span className="text-slate-500">Datasets ({config.dataset_paths.length}):</span>
                       <ul className="mt-1 space-y-1">
-                        {uploadedDatasets.filter(d => d.selected).map(d => (
-                          <li key={d.id} className="font-medium text-slate-700 flex items-center gap-2">
-                            <Check className="w-4 h-4 text-green-600" /> {d.name} ({d.total_samples} samples)
+                        {config.dataset_paths.map((path, idx) => (
+                          <li key={idx} className="font-medium text-slate-900 flex items-center gap-2">
+                            <Check className="w-4 h-4 text-green-600" /> {path.split('/').pop()}
                           </li>
                         ))}
                       </ul>
@@ -702,7 +956,7 @@ export default function Home() {
                   
                   <button onClick={startTraining}
                     disabled={config.dataset_paths.length === 0}
-                    className="w-full py-4 bg-gradient-to-r from-primary-600 to-purple-600 text-white rounded-lg font-semibold text-lg hover:opacity-90 disabled:opacity-50 flex items-center justify-center gap-2">
+                    className="w-full py-4 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-semibold text-lg disabled:opacity-50 flex items-center justify-center gap-2 shadow-lg">
                     <Zap className="w-5 h-5" /> Start Training
                   </button>
                 </div>
@@ -711,55 +965,112 @@ export default function Home() {
               {/* Step 5: Training Progress */}
               {currentStep === 5 && jobStatus && (
                 <div className="space-y-4">
-                  <div className="flex items-center justify-between">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                     <div>
                       <h2 className="text-xl font-bold text-slate-900">Training Progress</h2>
-                      <p className="text-slate-600 text-sm">Job: {jobStatus.job_id}</p>
+                      <p className="text-slate-500 text-sm">Job: {jobStatus.job_id}</p>
                     </div>
-                    <div className={`px-3 py-1 rounded-full text-sm font-medium ${
+                    <div className={`px-3 py-1 rounded-full text-sm font-medium self-start ${
                       jobStatus.status === 'running' ? 'bg-blue-100 text-blue-700' :
                       jobStatus.status === 'completed' ? 'bg-green-100 text-green-700' :
-                      jobStatus.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-700'
+                      jobStatus.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600'
                     }`}>
                       {isTraining && <Loader2 className="w-4 h-4 inline mr-1 animate-spin" />}
                       {jobStatus.status.toUpperCase()}
                     </div>
                   </div>
                   
+                  {/* Progress bar */}
                   {jobStatus.total_steps > 0 && (
-                    <div>
-                      <div className="flex justify-between text-sm text-slate-600 mb-1">
+                    <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
+                      <div className="flex justify-between text-sm text-slate-600 mb-2">
                         <span>Step {jobStatus.current_step} / {jobStatus.total_steps}</span>
                         <span>{Math.round((jobStatus.current_step / jobStatus.total_steps) * 100)}%</span>
                       </div>
-                      <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
-                        <div className="h-full bg-gradient-to-r from-primary-500 to-purple-500 transition-all"
+                      <div className="w-full h-3 bg-slate-200 rounded-full overflow-hidden">
+                        <div className="h-full bg-blue-500 transition-all"
                           style={{ width: `${(jobStatus.current_step / jobStatus.total_steps) * 100}%` }} />
+                      </div>
+                      {jobStatus.eta_seconds && jobStatus.eta_seconds > 0 && (
+                        <p className="text-xs text-slate-500 mt-2 flex items-center gap-1">
+                          <Clock className="w-3 h-3" /> ETA: {formatTime(jobStatus.eta_seconds)}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  
+                  {/* Metrics Grid - only show actual data */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
+                    <div className="bg-slate-50 rounded-lg p-3 text-center border border-slate-200">
+                      <BarChart3 className="w-5 h-5 mx-auto text-blue-500 mb-1" />
+                      <span className="text-xs text-slate-500">Loss</span>
+                      <p className="text-lg font-bold text-slate-900">{jobStatus.current_loss !== null && jobStatus.current_loss !== undefined ? jobStatus.current_loss.toFixed(4) : 'N/A'}</p>
+                    </div>
+                    <div className="bg-slate-50 rounded-lg p-3 text-center border border-slate-200">
+                      <Activity className="w-5 h-5 mx-auto text-blue-500 mb-1" />
+                      <span className="text-xs text-slate-500">Speed</span>
+                      <p className="text-lg font-bold text-slate-900">{jobStatus.samples_per_second ? `${jobStatus.samples_per_second.toFixed(1)} s/s` : 'N/A'}</p>
+                    </div>
+                    {systemMetrics.available && systemMetrics.gpu_memory_used !== null && systemMetrics.gpu_memory_total !== null ? (
+                      <div className="bg-slate-50 rounded-lg p-3 text-center border border-slate-200">
+                        <HardDrive className="w-5 h-5 mx-auto text-green-500 mb-1" />
+                        <span className="text-xs text-slate-500">GPU Memory</span>
+                        <p className="text-lg font-bold text-slate-900">{systemMetrics.gpu_memory_used.toFixed(1)}<span className="text-xs">/{systemMetrics.gpu_memory_total.toFixed(0)}GB</span></p>
+                      </div>
+                    ) : (
+                      <div className="bg-slate-50 rounded-lg p-3 text-center border border-slate-200">
+                        <HardDrive className="w-5 h-5 mx-auto text-slate-400 mb-1" />
+                        <span className="text-xs text-slate-500">GPU Memory</span>
+                        <p className="text-lg font-bold text-slate-400">N/A</p>
+                      </div>
+                    )}
+                    {systemMetrics.available && systemMetrics.gpu_temperature !== null ? (
+                      <div className="bg-slate-50 rounded-lg p-3 text-center border border-slate-200">
+                        <Thermometer className="w-5 h-5 mx-auto text-orange-500 mb-1" />
+                        <span className="text-xs text-slate-500">GPU Temp</span>
+                        <p className="text-lg font-bold text-slate-900">{systemMetrics.gpu_temperature}°C</p>
+                      </div>
+                    ) : (
+                      <div className="bg-slate-50 rounded-lg p-3 text-center border border-slate-200">
+                        <Thermometer className="w-5 h-5 mx-auto text-slate-400 mb-1" />
+                        <span className="text-xs text-slate-500">GPU Temp</span>
+                        <p className="text-lg font-bold text-slate-400">N/A</p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Loss Graph */}
+                  {trainingMetrics.length > 1 && (
+                    <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
+                      <h4 className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
+                        <BarChart3 className="w-4 h-4 text-blue-500" /> Training Loss
+                      </h4>
+                      <div className="h-32 flex items-end gap-px bg-white rounded p-2">
+                        {trainingMetrics.slice(-50).map((m, i) => {
+                          const maxLoss = Math.max(...trainingMetrics.slice(-50).map(x => x.loss))
+                          const height = (m.loss / maxLoss) * 100
+                          return (
+                            <div key={i} className="flex-1 bg-blue-500 rounded-t opacity-80 hover:opacity-100 transition-opacity"
+                              style={{ height: `${height}%` }} title={`Step ${m.step}: ${m.loss.toFixed(4)}`} />
+                          )
+                        })}
+                      </div>
+                      <div className="flex justify-between text-xs text-slate-500 mt-1">
+                        <span>Step {trainingMetrics[Math.max(0, trainingMetrics.length - 50)]?.step || 0}</span>
+                        <span>Step {trainingMetrics[trainingMetrics.length - 1]?.step || 0}</span>
                       </div>
                     </div>
                   )}
                   
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="bg-slate-50 rounded-lg p-3 text-center">
-                      <BarChart3 className="w-5 h-5 mx-auto text-slate-400 mb-1" />
-                      <span className="text-xs text-slate-500">Loss</span>
-                      <p className="text-lg font-bold">{jobStatus.current_loss?.toFixed(4) || '-'}</p>
-                    </div>
-                    <div className="bg-slate-50 rounded-lg p-3 text-center">
-                      <Zap className="w-5 h-5 mx-auto text-slate-400 mb-1" />
-                      <span className="text-xs text-slate-500">Step</span>
-                      <p className="text-lg font-bold">{jobStatus.current_step}</p>
-                    </div>
-                  </div>
-                  
-                  <div className="bg-slate-900 rounded-lg p-3 h-48 overflow-y-auto font-mono text-xs text-green-400">
-                    {trainingLogs.map((log, i) => <div key={i}>{log}</div>)}
+                  {/* Logs */}
+                  <div className="bg-slate-900 rounded-lg p-3 h-40 overflow-y-auto font-mono text-xs text-green-400">
+                    {trainingLogs.map((log, i) => <div key={i} className="hover:bg-slate-800/50">{log}</div>)}
                     <div ref={logsEndRef} />
                   </div>
                   
                   {isTraining && (
                     <button onClick={stopTraining}
-                      className="w-full py-3 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 flex items-center justify-center gap-2">
+                      className="w-full py-3 bg-red-500 text-white rounded-lg font-medium hover:bg-red-600 flex items-center justify-center gap-2">
                       <StopCircle className="w-5 h-5" /> Stop Training
                     </button>
                   )}
@@ -782,12 +1093,12 @@ export default function Home() {
               {currentStep <= 4 && (
                 <div className="flex justify-between mt-6 pt-4 border-t border-slate-200">
                   <button onClick={() => setCurrentStep(Math.max(1, currentStep - 1))} disabled={currentStep === 1}
-                    className="flex items-center gap-2 px-4 py-2 text-slate-600 font-medium disabled:opacity-50">
+                    className="flex items-center gap-2 px-4 py-2 text-slate-600 font-medium disabled:opacity-50 hover:text-slate-900">
                     <ChevronLeft className="w-5 h-5" /> Back
                   </button>
                   {currentStep < 4 && (
                     <button onClick={() => setCurrentStep(currentStep + 1)} disabled={!canProceed()}
-                      className="flex items-center gap-2 px-4 py-2 bg-primary-600 text-white rounded-lg font-medium disabled:opacity-50">
+                      className="flex items-center gap-2 px-4 py-2 bg-blue-500 text-white rounded-lg font-medium disabled:opacity-50 hover:bg-blue-600">
                       Next <ChevronRight className="w-5 h-5" />
                     </button>
                   )}
@@ -799,81 +1110,173 @@ export default function Home() {
 
         {/* ===================== INFERENCE TAB ===================== */}
         {mainTab === 'inference' && (
-          <div className="grid grid-cols-3 gap-4">
-            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-4 space-y-4">
-              <h3 className="font-bold text-slate-900">Model Settings</h3>
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            {/* Left Panel - Model & Settings */}
+            <div className="bg-white rounded-xl border border-slate-200 shadow-lg p-4 space-y-4">
+              <h3 className="font-bold text-slate-900 flex items-center gap-2">
+                <Cpu className="w-5 h-5 text-blue-500" /> Model Settings
+              </h3>
               
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Model Path</label>
+              {/* Model Loading */}
+              <div className="space-y-2">
+                <label className="block text-sm font-medium text-slate-700">Base Model</label>
                 <input type="text" value={inferenceModel}
                   onChange={(e) => setInferenceModel(e.target.value)}
                   placeholder="Qwen/Qwen2.5-7B-Instruct"
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm" />
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-slate-900 text-sm placeholder-slate-400" />
+                <button onClick={loadModel} disabled={!inferenceModel.trim() || isModelLoading}
+                  className="w-full py-2 bg-blue-500 text-white rounded-lg text-sm font-medium hover:bg-blue-600 disabled:opacity-50 flex items-center justify-center gap-2">
+                  {isModelLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                  {isModelLoading ? 'Loading...' : 'Load Model'}
+                </button>
               </div>
               
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">LoRA Adapter (optional)</label>
-                <input type="text" value={adapterPath}
-                  onChange={(e) => setAdapterPath(e.target.value)}
-                  placeholder="/path/to/adapter"
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm" />
+              {/* Adapter Management */}
+              <div className="border-t border-slate-200 pt-4 space-y-2">
+                <label className="block text-sm font-medium text-slate-700 flex items-center gap-2">
+                  <Layers className="w-4 h-4 text-blue-500" /> LoRA Adapters
+                </label>
+                <div className="flex gap-2">
+                  <input type="text" value={adapterPath}
+                    onChange={(e) => setAdapterPath(e.target.value)}
+                    placeholder="/path/to/adapter"
+                    disabled={!inferenceStatus.model_loaded}
+                    className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-slate-900 text-sm placeholder-slate-400 disabled:opacity-50" />
+                  <button onClick={loadAdapter} disabled={!adapterPath.trim() || !inferenceStatus.model_loaded}
+                    className="px-3 py-2 bg-blue-50 text-blue-600 border border-blue-200 rounded-lg text-sm font-medium hover:bg-blue-100 disabled:opacity-50">
+                    Load
+                  </button>
+                </div>
+                {loadedAdapters.length > 0 && (
+                  <div className="space-y-1 mt-2">
+                    {loadedAdapters.map(adapter => (
+                      <div key={adapter.id} className={`flex items-center gap-2 p-2 rounded-lg text-xs ${adapter.active ? 'bg-blue-50 border border-blue-200' : 'bg-slate-50'}`}>
+                        <button onClick={() => switchAdapter(adapter.id)} className={`w-4 h-4 rounded-full border-2 ${adapter.active ? 'bg-blue-500 border-blue-500' : 'border-slate-300'}`} />
+                        <span className="flex-1 text-slate-700 truncate">{adapter.name}</span>
+                        <button onClick={() => removeAdapter(adapter.id)} className="text-slate-400 hover:text-red-500"><X className="w-3 h-3" /></button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
               
-              <div className="border-t pt-4">
-                <h4 className="text-sm font-medium text-slate-700 mb-2">Generation Settings</h4>
-                <div className="space-y-2">
+              {/* Chat Mode Toggle */}
+              <div className="border-t border-slate-200 pt-4">
+                <label className="block text-sm font-medium text-slate-700 mb-2">Mode</label>
+                <div className="flex gap-2">
+                  <button onClick={() => setChatMode('chat')}
+                    className={`flex-1 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-1 ${chatMode === 'chat' ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-600'}`}>
+                    <MessageSquare className="w-4 h-4" /> Chat
+                  </button>
+                  <button onClick={() => setChatMode('completion')}
+                    className={`flex-1 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-1 ${chatMode === 'completion' ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-600'}`}>
+                    <FileText className="w-4 h-4" /> Complete
+                  </button>
+                </div>
+                {chatMode === 'chat' && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <button onClick={() => setKeepHistory(!keepHistory)} className="text-slate-500 hover:text-slate-900">
+                      {keepHistory ? <ToggleRight className="w-5 h-5 text-blue-500" /> : <ToggleLeft className="w-5 h-5" />}
+                    </button>
+                    <span className="text-xs text-slate-500">Keep conversation history</span>
+                  </div>
+                )}
+              </div>
+              
+              {/* Generation Settings */}
+              <div className="border-t border-slate-200 pt-4">
+                <h4 className="text-sm font-medium text-slate-700 mb-2">Generation</h4>
+                <div className="space-y-3">
                   <div>
-                    <label className="text-xs text-slate-600">Max Tokens: {inferenceSettings.max_new_tokens}</label>
+                    <div className="flex justify-between text-xs text-slate-500 mb-1">
+                      <span>Max Tokens</span><span>{inferenceSettings.max_new_tokens}</span>
+                    </div>
                     <input type="range" min="64" max="2048" value={inferenceSettings.max_new_tokens}
                       onChange={(e) => setInferenceSettings({ ...inferenceSettings, max_new_tokens: parseInt(e.target.value) })}
-                      className="w-full" />
+                      className="w-full accent-blue-500" />
                   </div>
                   <div>
-                    <label className="text-xs text-slate-600">Temperature: {inferenceSettings.temperature}</label>
+                    <div className="flex justify-between text-xs text-slate-500 mb-1">
+                      <span>Temperature</span><span>{inferenceSettings.temperature}</span>
+                    </div>
                     <input type="range" min="0" max="2" step="0.1" value={inferenceSettings.temperature}
                       onChange={(e) => setInferenceSettings({ ...inferenceSettings, temperature: parseFloat(e.target.value) })}
-                      className="w-full" />
+                      className="w-full accent-blue-500" />
                   </div>
                 </div>
               </div>
               
-              <div className="border-t pt-4">
-                <h4 className="text-sm font-medium text-slate-700 mb-2">Memory Status</h4>
-                <div className="text-xs text-slate-600 space-y-1">
-                  <p>Model Loaded: {inferenceStatus.model_loaded ? 'Yes' : 'No'}</p>
-                  {inferenceStatus.model_path && <p className="truncate">Path: {inferenceStatus.model_path}</p>}
-                  <p>GPU Memory: {inferenceStatus.memory_used_gb.toFixed(2)} GB</p>
+              {/* System Status - only show actual data */}
+              <div className="border-t border-slate-200 pt-4">
+                <h4 className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
+                  <Monitor className="w-4 h-4 text-green-500" /> System Status
+                </h4>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="bg-slate-50 rounded-lg p-2 text-center border border-slate-200">
+                    <Gauge className={`w-4 h-4 mx-auto mb-1 ${systemMetrics.available && systemMetrics.gpu_utilization !== null ? 'text-blue-500' : 'text-slate-400'}`} />
+                    <span className="text-slate-500">GPU</span>
+                    <p className={`font-medium ${systemMetrics.available && systemMetrics.gpu_utilization !== null ? 'text-slate-900' : 'text-slate-400'}`}>
+                      {systemMetrics.available && systemMetrics.gpu_utilization !== null ? `${systemMetrics.gpu_utilization}%` : 'N/A'}
+                    </p>
+                  </div>
+                  <div className="bg-slate-50 rounded-lg p-2 text-center border border-slate-200">
+                    <HardDrive className={`w-4 h-4 mx-auto mb-1 ${systemMetrics.available && systemMetrics.gpu_memory_used !== null ? 'text-blue-500' : 'text-slate-400'}`} />
+                    <span className="text-slate-500">VRAM</span>
+                    <p className={`font-medium ${systemMetrics.available && systemMetrics.gpu_memory_used !== null ? 'text-slate-900' : 'text-slate-400'}`}>
+                      {systemMetrics.available && systemMetrics.gpu_memory_used !== null ? `${systemMetrics.gpu_memory_used.toFixed(1)}GB` : 'N/A'}
+                    </p>
+                  </div>
                 </div>
                 <div className="flex gap-2 mt-2">
                   <button onClick={fetchInferenceStatus}
-                    className="flex-1 px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded text-xs font-medium flex items-center justify-center gap-1">
+                    className="flex-1 px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded text-xs font-medium text-slate-600 flex items-center justify-center gap-1">
                     <RefreshCw className="w-3 h-3" /> Refresh
                   </button>
                   <button onClick={clearMemory}
-                    className="flex-1 px-2 py-1 bg-red-100 hover:bg-red-200 text-red-700 rounded text-xs font-medium flex items-center justify-center gap-1">
+                    className="flex-1 px-2 py-1 bg-red-50 hover:bg-red-100 text-red-600 rounded text-xs font-medium flex items-center justify-center gap-1">
                     <Trash2 className="w-3 h-3" /> Clear
                   </button>
                 </div>
               </div>
             </div>
             
-            <div className="col-span-2 bg-white rounded-xl shadow-lg border border-slate-200 flex flex-col h-[600px]">
-              <div className="p-4 border-b border-slate-200">
-                <h3 className="font-bold text-slate-900">Chat Interface</h3>
-                <p className="text-xs text-slate-500">Test your model with chat messages</p>
+            {/* Right Panel - Chat Interface */}
+            <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 shadow-lg flex flex-col h-[500px] sm:h-[600px]">
+              <div className="p-4 border-b border-slate-200 flex items-center justify-between">
+                <div>
+                  <h3 className="font-bold text-slate-900">{chatMode === 'chat' ? 'Chat Interface' : 'Text Completion'}</h3>
+                  <p className="text-xs text-slate-500">
+                    {inferenceStatus.model_loaded ? `Model: ${inferenceStatus.model_path?.split('/').pop()}` : 'Load a model to start'}
+                  </p>
+                </div>
+                {chatMode === 'chat' && (
+                  <button onClick={() => setChatMessages([])} className="p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg">
+                    <History className="w-4 h-4" />
+                  </button>
+                )}
               </div>
+              
+              {/* System Prompt (Chat mode only) */}
+              {chatMode === 'chat' && (
+                <div className="px-4 pt-2">
+                  <input type="text" value={systemPrompt}
+                    onChange={(e) => setSystemPrompt(e.target.value)}
+                    placeholder="System prompt (optional)..."
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-900 text-xs placeholder-slate-400" />
+                </div>
+              )}
               
               <div className="flex-1 overflow-y-auto p-4 space-y-3">
                 {chatMessages.length === 0 && (
                   <div className="text-center text-slate-400 py-10">
                     <MessageSquare className="w-10 h-10 mx-auto mb-2 opacity-50" />
-                    <p>Enter a model path and start chatting</p>
+                    <p>{inferenceStatus.model_loaded ? 'Start a conversation' : 'Load a model first'}</p>
                   </div>
                 )}
                 {chatMessages.map((msg, i) => (
                   <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`max-w-[80%] px-4 py-2 rounded-lg ${
-                      msg.role === 'user' ? 'bg-primary-600 text-white' : 'bg-slate-100 text-slate-900'
+                    <div className={`max-w-[85%] px-4 py-2 rounded-lg ${
+                      msg.role === 'user' ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-900'
                     }`}>
                       <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
                     </div>
@@ -882,7 +1285,7 @@ export default function Home() {
                 {isGenerating && (
                   <div className="flex justify-start">
                     <div className="bg-slate-100 px-4 py-2 rounded-lg">
-                      <Loader2 className="w-5 h-5 animate-spin text-slate-400" />
+                      <Loader2 className="w-5 h-5 animate-spin text-blue-500" />
                     </div>
                   </div>
                 )}
@@ -893,16 +1296,16 @@ export default function Home() {
                 <div className="flex gap-2">
                   <button onClick={() => setChatMessages([])}
                     className="px-3 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg">
-                    <Trash2 className="w-5 h-5 text-slate-600" />
+                    <Trash2 className="w-5 h-5 text-slate-500" />
                   </button>
                   <input type="text" value={inputMessage}
                     onChange={(e) => setInputMessage(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendMessage()}
-                    placeholder="Type your message..."
-                    disabled={!inferenceModel || isGenerating}
-                    className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary-500 disabled:opacity-50" />
-                  <button onClick={sendMessage} disabled={!inferenceModel || !inputMessage.trim() || isGenerating}
-                    className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50">
+                    placeholder={chatMode === 'chat' ? 'Type your message...' : 'Enter text to complete...'}
+                    disabled={!inferenceStatus.model_loaded || isGenerating}
+                    className="flex-1 px-4 py-2 border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:ring-2 focus:ring-blue-500 disabled:opacity-50" />
+                  <button onClick={sendMessage} disabled={!inferenceStatus.model_loaded || !inputMessage.trim() || isGenerating}
+                    className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50">
                     <Send className="w-5 h-5" />
                   </button>
                 </div>
@@ -912,7 +1315,7 @@ export default function Home() {
         )}
       </main>
 
-      <footer className="mt-6 py-4 text-center text-xs text-slate-500">
+      <footer className="mt-6 py-4 text-center text-xs text-slate-500 border-t border-slate-200">
         USF BIOS v1.0.0 - Copyright 2024-2026 US Inc. All rights reserved.
       </footer>
     </div>

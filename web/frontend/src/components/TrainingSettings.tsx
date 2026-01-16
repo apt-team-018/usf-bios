@@ -1,7 +1,7 @@
 'use client'
 
-import { useState } from 'react'
-import { HelpCircle, Plus, Minus, ChevronDown, AlertCircle } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { HelpCircle, Plus, Minus, ChevronDown, AlertCircle, Edit3 } from 'lucide-react'
 
 // Type definitions
 interface SelectConfig<T> {
@@ -55,8 +55,8 @@ export const PARAM_CONFIG: {
     dropout: { label: 'LoRA Dropout', min: 0, max: 0.5, step: 0.01, default: 0.05,
       tooltip: 'Regularization to prevent overfitting. 0.05-0.1 recommended.',
       effect: { up: 'More regularization, prevents overfitting', down: 'Less regularization, may overfit' }},
-    target_modules: { label: 'Target Modules', options: ['all-linear', 'q_proj,v_proj', 'q_proj,k_proj,v_proj,o_proj'], default: 'all-linear',
-      tooltip: 'Layers to apply LoRA. "all-linear" applies to all linear layers for best results.' }
+    target_modules: { label: 'Target Modules', options: ['all-linear', 'q_proj,v_proj', 'q_proj,k_proj,v_proj,o_proj', 'custom'], default: 'all-linear',
+      tooltip: 'Layers to apply LoRA. "all-linear" applies to all linear layers. Select "custom" to specify your own module names for unsupported models.' }
   },
   qlora: {
     rank: { label: 'LoRA Rank', options: [4, 8, 16, 32, 64], default: 8,
@@ -208,6 +208,40 @@ interface Props {
 export default function TrainingSettingsStep({ config, setConfig }: Props) {
   const typeConfig = PARAM_CONFIG[config.train_type] || {}
   const commonConfig = PARAM_CONFIG.common
+  
+  // State for custom target modules input
+  const [isCustomModules, setIsCustomModules] = useState(false)
+  const [customModulesInput, setCustomModulesInput] = useState('')
+  
+  // Check if current target_modules is a custom value (not in predefined options)
+  useEffect(() => {
+    const predefinedOptions = ['all-linear', 'q_proj,v_proj', 'q_proj,k_proj,v_proj,o_proj', 'custom']
+    if (config.target_modules && !predefinedOptions.includes(config.target_modules)) {
+      setIsCustomModules(true)
+      setCustomModulesInput(config.target_modules)
+    }
+  }, [])
+
+  const handleTargetModulesChange = (value: string) => {
+    if (value === 'custom') {
+      setIsCustomModules(true)
+      // Keep current value if it was already custom, otherwise clear
+      if (!customModulesInput) {
+        setCustomModulesInput('')
+      }
+    } else {
+      setIsCustomModules(false)
+      setConfig(p => ({ ...p, target_modules: value }))
+    }
+  }
+
+  const handleCustomModulesChange = (value: string) => {
+    setCustomModulesInput(value)
+    // Update config with the custom value
+    if (value.trim()) {
+      setConfig(p => ({ ...p, target_modules: value.trim() }))
+    }
+  }
 
   const applyDefaults = (type: TrainingConfig['train_type']) => {
     const tc = PARAM_CONFIG[type] || {}
@@ -310,10 +344,43 @@ export default function TrainingSettingsStep({ config, setConfig }: Props) {
                 tooltip={typeConfig.quant_bits.tooltip} formatOption={(v) => `${v}-bit`} />
             )}
             {typeConfig.target_modules && (
-              <div className="sm:col-span-2 lg:col-span-3">
-                <SelectInput value={config.target_modules} onChange={(v) => setConfig(p => ({ ...p, target_modules: v }))}
-                  options={typeConfig.target_modules.options} label={typeConfig.target_modules.label}
-                  tooltip={typeConfig.target_modules.tooltip} />
+              <div className="sm:col-span-2 lg:col-span-3 space-y-2">
+                <div className="flex items-center gap-1 mb-1">
+                  <label className="text-sm font-medium text-slate-700">{typeConfig.target_modules.label}</label>
+                  <Tooltip text={typeConfig.target_modules.tooltip} />
+                </div>
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <select 
+                      value={isCustomModules ? 'custom' : config.target_modules}
+                      onChange={(e) => handleTargetModulesChange(e.target.value)}
+                      className="w-full px-3 py-2 pr-10 border border-slate-300 rounded-lg bg-white text-sm font-medium appearance-none focus:ring-2 focus:ring-primary-500">
+                      <option value="all-linear">all-linear</option>
+                      <option value="q_proj,v_proj">q_proj,v_proj</option>
+                      <option value="q_proj,k_proj,v_proj,o_proj">q_proj,k_proj,v_proj,o_proj</option>
+                      <option value="custom">✏️ Custom...</option>
+                    </select>
+                    <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+                  </div>
+                </div>
+                {isCustomModules && (
+                  <div className="mt-2">
+                    <div className="flex items-center gap-2 mb-1">
+                      <Edit3 className="w-4 h-4 text-purple-600" />
+                      <label className="text-sm font-medium text-purple-700">Custom Module Names</label>
+                    </div>
+                    <input
+                      type="text"
+                      value={customModulesInput}
+                      onChange={(e) => handleCustomModulesChange(e.target.value)}
+                      placeholder="e.g., q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
+                      className="w-full px-3 py-2 border border-purple-300 rounded-lg bg-white text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                    />
+                    <p className="text-xs text-slate-500 mt-1">
+                      Enter comma-separated module names. Common modules: q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj, fc1, fc2
+                    </p>
+                  </div>
+                )}
               </div>
             )}
           </div>

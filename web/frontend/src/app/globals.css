@@ -2,44 +2,114 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Light Theme with Blue Accents */
 :root {
-  --foreground-rgb: 0, 0, 0;
-  --background-start-rgb: 250, 250, 252;
-  --background-end-rgb: 255, 255, 255;
+  --us-blue-500: #3b82f6;
+  --us-blue-400: #60a5fa;
+  --us-blue-600: #2563eb;
+  --us-accent: #06b6d4;
+  --us-success: #10b981;
+  --us-warning: #f59e0b;
+  --us-error: #ef4444;
 }
 
 body {
-  color: rgb(var(--foreground-rgb));
-  background: linear-gradient(
-      to bottom,
-      transparent,
-      rgb(var(--background-end-rgb))
-    )
-    rgb(var(--background-start-rgb));
+  background: linear-gradient(to bottom, #f8fafc, #ffffff);
+  color: #1e293b;
   min-height: 100vh;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
-/* Custom scrollbar */
+/* Custom scrollbar - Light theme */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #f1f1f1;
+  background: #f1f5f9;
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #c1c1c1;
+  background: #cbd5e1;
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #a1a1a1;
+  background: var(--us-blue-500);
 }
 
-/* Wizard step animations */
+/* Cards with glass effect */
+.us-card {
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.9), rgba(30, 41, 59, 0.8));
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  backdrop-filter: blur(10px);
+}
+
+.us-card-light {
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(226, 232, 240, 0.8);
+}
+
+/* Gradient buttons */
+.us-btn-primary {
+  background: linear-gradient(135deg, var(--us-blue-500), var(--us-blue-600));
+  color: white;
+  transition: all 0.2s ease;
+}
+
+.us-btn-primary:hover {
+  background: linear-gradient(135deg, var(--us-blue-400), var(--us-blue-500));
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+}
+
+/* Input fields dark theme */
+.us-input {
+  background: var(--us-navy-800);
+  border: 1px solid var(--us-navy-600);
+  color: #e2e8f0;
+  transition: all 0.2s ease;
+}
+
+.us-input:focus {
+  border-color: var(--us-blue-500);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+  outline: none;
+}
+
+.us-input::placeholder {
+  color: #64748b;
+}
+
+/* Metric cards */
+.metric-card {
+  background: linear-gradient(135deg, var(--us-navy-800), var(--us-navy-700));
+  border: 1px solid rgba(59, 130, 246, 0.15);
+  border-radius: 12px;
+}
+
+/* Glow effects */
+.glow-blue {
+  box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+}
+
+.glow-success {
+  box-shadow: 0 0 20px rgba(16, 185, 129, 0.3);
+}
+
+/* Animations */
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 5px rgba(59, 130, 246, 0.4); }
+  50% { box-shadow: 0 0 20px rgba(59, 130, 246, 0.6); }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* Step animations */
 .step-enter {
   opacity: 0;
   transform: translateX(20px);
@@ -51,12 +121,52 @@ body {
   transition: opacity 300ms, transform 300ms;
 }
 
-.step-exit {
-  opacity: 1;
+/* Mobile responsive utilities */
+@media (max-width: 640px) {
+  .mobile-stack {
+    flex-direction: column !important;
+  }
+  
+  .mobile-full {
+    width: 100% !important;
+  }
+  
+  .mobile-hide {
+    display: none !important;
+  }
+  
+  .mobile-text-sm {
+    font-size: 0.875rem !important;
+  }
 }
 
-.step-exit-active {
-  opacity: 0;
-  transform: translateX(-20px);
-  transition: opacity 300ms, transform 300ms;
+/* Chart container */
+.chart-container {
+  background: var(--us-navy-800);
+  border: 1px solid var(--us-navy-600);
+  border-radius: 8px;
+}
+
+/* Log viewer */
+.log-viewer {
+  background: #000;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* Status badges */
+.badge-running {
+  background: linear-gradient(135deg, var(--us-blue-500), var(--us-accent));
+  color: white;
+}
+
+.badge-completed {
+  background: linear-gradient(135deg, var(--us-success), #059669);
+  color: white;
+}
+
+.badge-failed {
+  background: linear-gradient(135deg, var(--us-error), #dc2626);
+  color: white;
 }

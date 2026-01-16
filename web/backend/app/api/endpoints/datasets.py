@@ -27,6 +27,7 @@ class DatasetRegistration(BaseModel):
     dataset_id: str  # HF/MS dataset ID or local path
     subset: Optional[str] = None  # For HF datasets with subsets
     split: Optional[str] = "train"
+    max_samples: Optional[int] = None  # None or 0 = use all samples
 
 
 class RegisteredDataset(BaseModel):
@@ -42,6 +43,7 @@ class RegisteredDataset(BaseModel):
     format: str = "unknown"
     created_at: float
     selected: bool = True
+    max_samples: Optional[int] = None  # None or 0 = use all samples
 
 
 @router.post("/validate", response_model=DatasetValidation)
@@ -450,7 +452,8 @@ async def register_dataset(registration: DatasetRegistration):
             size_human=size_human,
             format=fmt,
             created_at=datetime.now().timestamp(),
-            selected=True
+            selected=True,
+            max_samples=registration.max_samples if registration.max_samples and registration.max_samples > 0 else None
         )
         
         # Store in registry
