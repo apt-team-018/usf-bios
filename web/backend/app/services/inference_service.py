@@ -1,21 +1,49 @@
 # Copyright (c) US Inc. All rights reserved.
 """
-Inference service for model testing
+Inference service for model testing using USF BIOS package
 - Test models before fine-tuning
 - Test intermediate checkpoints during fine-tuning
 - Test final fine-tuned models
+
+IMPORTANT: This service uses the USF BIOS custom transformers fork,
+NOT the standard HuggingFace transformers library.
 """
 
 import asyncio
 import gc
 import os
 import sys
-import torch
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field
+
+# Add the project root to path for usf_bios imports
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+# Check if USF BIOS and torch are available
+USF_BIOS_AVAILABLE = False
+TORCH_AVAILABLE = False
+
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    torch = None
+
+try:
+    from usf_bios.model import get_model_processor
+    from usf_bios.infer_engine import TransformersEngine
+    from usf_bios.infer_engine.protocol import InferRequest, RequestConfig
+    USF_BIOS_AVAILABLE = True
+except ImportError:
+    get_model_processor = None
+    TransformersEngine = None
+    InferRequest = None
+    RequestConfig = None
 
 
 class InferenceRequest(BaseModel):
@@ -51,11 +79,13 @@ class ModelInfo(BaseModel):
 
 
 class InferenceService:
-    """Service for model inference with memory management"""
+    """
+    Service for model inference with memory management.
+    Uses USF BIOS custom transformers fork for model loading and inference.
+    """
     
     def __init__(self):
-        self._model = None
-        self._tokenizer = None
+        self._engine: Optional[Any] = None
         self._current_model_path: Optional[str] = None
         self._current_adapter_path: Optional[str] = None
         self._lock = asyncio.Lock()
@@ -64,7 +94,7 @@ class InferenceService:
     def _get_gpu_memory_used(self) -> float:
         """Get GPU memory usage in GB"""
         try:
-            if torch.cuda.is_available():
+            if TORCH_AVAILABLE and torch.cuda.is_available():
                 return torch.cuda.memory_allocated() / (1024 ** 3)
         except Exception:
             pass
@@ -88,14 +118,10 @@ class InferenceService:
             try:
                 memory_before = self._get_gpu_memory_used()
                 
-                # Delete model and tokenizer
-                if self._model is not None:
-                    del self._model
-                    self._model = None
-                
-                if self._tokenizer is not None:
-                    del self._tokenizer
-                    self._tokenizer = None
+                # Delete engine (contains model and processor)
+                if self._engine is not None:
+                    del self._engine
+                    self._engine = None
                 
                 self._current_model_path = None
                 self._current_adapter_path = None
@@ -105,7 +131,7 @@ class InferenceService:
                 gc.collect()
                 
                 # Clear CUDA cache
-                if torch.cuda.is_available():
+                if TORCH_AVAILABLE and torch.cuda.is_available():
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
                 
@@ -124,13 +150,25 @@ class InferenceService:
                 }
     
     async def load_model(self, model_path: str, adapter_path: Optional[str] = None) -> Dict[str, Any]:
-        """Load a model into memory"""
+        """Load a model into memory using USF BIOS TransformersEngine"""
+        if not USF_BIOS_AVAILABLE:
+            return {
+                "success": False,
+                "error": "USF BIOS package not available. Please install the usf_bios package from the project root."
+            }
+        
+        if not TORCH_AVAILABLE:
+            return {
+                "success": False,
+                "error": "PyTorch not installed. Please install PyTorch first."
+            }
+        
         async with self._lock:
             try:
                 # Check if same model is already loaded
                 if (self._current_model_path == model_path and 
                     self._current_adapter_path == adapter_path and 
-                    self._model is not None):
+                    self._engine is not None):
                     return {
                         "success": True,
                         "message": "Model already loaded",
@@ -138,43 +176,29 @@ class InferenceService:
                     }
                 
                 # Clear existing model first
-                if self._model is not None:
-                    await self.clear_memory()
-                
-                # Import here to avoid loading torch at startup
-                from transformers import AutoModelForCausalLM, AutoTokenizer
-                
-                # Load tokenizer
-                self._tokenizer = AutoTokenizer.from_pretrained(
-                    model_path,
-                    trust_remote_code=True
-                )
+                if self._engine is not None:
+                    del self._engine
+                    self._engine = None
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                 
                 # Determine device and dtype
                 device_map = "auto" if torch.cuda.is_available() else "cpu"
                 torch_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
                 
-                # Load model
-                self._model = AutoModelForCausalLM.from_pretrained(
-                    model_path,
-                    device_map=device_map,
+                # Load model using USF BIOS TransformersEngine
+                adapters = [adapter_path] if adapter_path else None
+                
+                self._engine = TransformersEngine(
+                    model=model_path,
+                    adapters=adapters,
                     torch_dtype=torch_dtype,
-                    trust_remote_code=True
+                    device_map=device_map,
                 )
                 
-                # Load LoRA adapter if specified
-                if adapter_path:
-                    try:
-                        from peft import PeftModel
-                        self._model = PeftModel.from_pretrained(self._model, adapter_path)
-                        self._current_adapter_path = adapter_path
-                    except Exception as e:
-                        return {
-                            "success": False,
-                            "error": f"Failed to load adapter: {str(e)}"
-                        }
-                
                 self._current_model_path = model_path
+                self._current_adapter_path = adapter_path
                 self._loaded_at = datetime.now()
                 
                 return {
@@ -186,11 +210,11 @@ class InferenceService:
             
             except Exception as e:
                 # Clean up on failure
-                self._model = None
-                self._tokenizer = None
+                self._engine = None
                 self._current_model_path = None
+                self._current_adapter_path = None
                 gc.collect()
-                if torch.cuda.is_available():
+                if TORCH_AVAILABLE and torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 
                 return {
@@ -199,10 +223,16 @@ class InferenceService:
                 }
     
     async def generate(self, request: InferenceRequest) -> InferenceResponse:
-        """Generate response from model"""
+        """Generate response from model using USF BIOS inference engine"""
+        if not USF_BIOS_AVAILABLE:
+            return InferenceResponse(
+                success=False,
+                error="USF BIOS package not available. Please install the usf_bios package."
+            )
+        
         try:
             # Load model if needed
-            if (self._model is None or 
+            if (self._engine is None or 
                 self._current_model_path != request.model_path or
                 self._current_adapter_path != request.adapter_path):
                 
@@ -213,7 +243,7 @@ class InferenceService:
                         error=load_result.get("error", "Failed to load model")
                     )
             
-            if self._model is None or self._tokenizer is None:
+            if self._engine is None:
                 return InferenceResponse(
                     success=False,
                     error="Model not loaded"
@@ -221,84 +251,59 @@ class InferenceService:
             
             start_time = datetime.now()
             
-            # Format messages for chat
-            try:
-                # Try chat template first
-                if hasattr(self._tokenizer, 'apply_chat_template'):
-                    input_text = self._tokenizer.apply_chat_template(
-                        request.messages,
-                        tokenize=False,
-                        add_generation_prompt=True
-                    )
-                else:
-                    # Fallback to simple formatting
-                    input_text = ""
-                    for msg in request.messages:
-                        role = msg.get("role", "user")
-                        content = msg.get("content", "")
-                        if role == "system":
-                            input_text += f"System: {content}\n\n"
-                        elif role == "user":
-                            input_text += f"User: {content}\n\n"
-                        elif role == "assistant":
-                            input_text += f"Assistant: {content}\n\n"
-                    input_text += "Assistant: "
-            except Exception as e:
-                return InferenceResponse(
-                    success=False,
-                    error=f"Failed to format messages: {str(e)}"
-                )
+            # Create inference request using USF BIOS protocol
+            infer_request = InferRequest(messages=request.messages)
+            request_config = RequestConfig(
+                max_tokens=request.max_new_tokens,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                top_k=request.top_k,
+                repetition_penalty=request.repetition_penalty,
+            )
             
-            # Tokenize
-            inputs = self._tokenizer(input_text, return_tensors="pt")
-            if torch.cuda.is_available():
-                inputs = {k: v.cuda() for k, v in inputs.items()}
-            
-            input_length = inputs["input_ids"].shape[1]
-            
-            # Generate
-            with torch.no_grad():
-                outputs = self._model.generate(
-                    **inputs,
-                    max_new_tokens=request.max_new_tokens,
-                    temperature=request.temperature if request.do_sample else 1.0,
-                    top_p=request.top_p if request.do_sample else 1.0,
-                    top_k=request.top_k if request.do_sample else 0,
-                    repetition_penalty=request.repetition_penalty,
-                    do_sample=request.do_sample,
-                    pad_token_id=self._tokenizer.pad_token_id or self._tokenizer.eos_token_id,
-                )
-            
-            # Decode output
-            generated_tokens = outputs[0][input_length:]
-            response_text = self._tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            # Run inference using USF BIOS engine
+            response = self._engine.infer(
+                infer_request=infer_request,
+                request_config=request_config,
+            )
             
             end_time = datetime.now()
             inference_time_ms = int((end_time - start_time).total_seconds() * 1000)
             
+            # Extract response text
+            response_text = ""
+            tokens_generated = 0
+            
+            if hasattr(response, 'choices') and response.choices:
+                choice = response.choices[0]
+                if hasattr(choice, 'message') and choice.message:
+                    response_text = choice.message.content or ""
+                if hasattr(response, 'usage') and response.usage:
+                    tokens_generated = response.usage.completion_tokens or 0
+            elif isinstance(response, str):
+                response_text = response
+            
             return InferenceResponse(
                 success=True,
                 response=response_text,
-                tokens_generated=len(generated_tokens),
+                tokens_generated=tokens_generated,
                 inference_time_ms=inference_time_ms,
                 model_loaded=self._current_model_path or ""
             )
         
-        except torch.cuda.OutOfMemoryError:
+        except Exception as e:
+            error_msg = str(e)
+            
             # Handle OOM gracefully
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            if "OutOfMemoryError" in error_msg or "CUDA out of memory" in error_msg:
+                gc.collect()
+                if TORCH_AVAILABLE and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                error_msg = "GPU out of memory. Try reducing max_new_tokens or clearing memory first."
             
             return InferenceResponse(
                 success=False,
-                error="GPU out of memory. Try reducing max_new_tokens or clearing memory first."
-            )
-        
-        except Exception as e:
-            return InferenceResponse(
-                success=False,
-                error=str(e)
+                error=error_msg
             )
 
 

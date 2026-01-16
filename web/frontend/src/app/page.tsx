@@ -6,8 +6,10 @@ import {
   ChevronRight, ChevronLeft, Loader2,
   AlertCircle, Sparkles, Zap, BarChart3,
   MessageSquare, Send, Trash2, StopCircle,
-  MemoryStick, RefreshCw
+  RefreshCw, Upload, X, FileText, Check
 } from 'lucide-react'
+import TrainingSettingsStep from '@/components/TrainingSettings'
+import DatasetConfig from '@/components/DatasetConfig'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
@@ -17,7 +19,7 @@ interface TrainingConfig {
   model_source: 'huggingface' | 'modelscope' | 'local'
   modality: 'text' | 'vision' | 'audio' | 'video'
   train_type: 'full' | 'lora' | 'qlora' | 'adalora'
-  dataset_path: string
+  dataset_paths: string[]
   output_dir: string
   num_train_epochs: number
   learning_rate: number
@@ -30,6 +32,7 @@ interface TrainingConfig {
   target_modules: string
   quant_bits: number | null
   torch_dtype: string
+  warmup_ratio: number
   deepspeed: string | null
   fsdp: string | null
   early_stop_interval: number | null
@@ -50,10 +53,21 @@ interface ChatMessage {
   content: string
 }
 
-// Main tabs
+interface UploadedDataset {
+  id: string
+  name: string
+  filename: string
+  path: string
+  size: number
+  size_human: string
+  format: string
+  total_samples: number
+  created_at: number
+  selected?: boolean
+}
+
 type MainTab = 'train' | 'inference'
 
-// Training wizard steps
 const TRAIN_STEPS = [
   { id: 1, title: 'Select Model', icon: Cpu },
   { id: 2, title: 'Configure Dataset', icon: Database },
@@ -62,10 +76,7 @@ const TRAIN_STEPS = [
 ]
 
 export default function Home() {
-  // Main tab
   const [mainTab, setMainTab] = useState<MainTab>('train')
-  
-  // Training state
   const [currentStep, setCurrentStep] = useState(1)
   const [isTraining, setIsTraining] = useState(false)
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null)
@@ -76,7 +87,7 @@ export default function Home() {
     model_source: 'huggingface',
     modality: 'text',
     train_type: 'lora',
-    dataset_path: '',
+    dataset_paths: [],
     output_dir: 'output/finetuned',
     num_train_epochs: 3,
     learning_rate: 0.0001,
@@ -89,16 +100,25 @@ export default function Home() {
     target_modules: 'all-linear',
     quant_bits: null,
     torch_dtype: 'bfloat16',
+    warmup_ratio: 0.03,
     deepspeed: null,
     fsdp: null,
     early_stop_interval: null,
   })
 
-  const [datasetValidation, setDatasetValidation] = useState<{
-    valid: boolean
-    total_samples: number
-    errors: string[]
-  } | null>(null)
+  // Dataset state
+  const [uploadedDatasets, setUploadedDatasets] = useState<UploadedDataset[]>([])
+  const [isLoadingDatasets, setIsLoadingDatasets] = useState(false)
+  const [isUploading, setIsUploading] = useState(false)
+  const [uploadName, setUploadName] = useState('')
+  const [uploadFile, setUploadFile] = useState<File | null>(null)
+  const [showUploadForm, setShowUploadForm] = useState(false)
+  const [uploadError, setUploadError] = useState('')
+  
+  // Delete confirmation state
+  const [deleteTarget, setDeleteTarget] = useState<UploadedDataset | null>(null)
+  const [deleteConfirmText, setDeleteConfirmText] = useState('')
+  const [isDeleting, setIsDeleting] = useState(false)
 
   // Inference state
   const [inferenceModel, setInferenceModel] = useState('')
@@ -120,6 +140,14 @@ export default function Home() {
   
   const chatEndRef = useRef<HTMLDivElement>(null)
   const logsEndRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Fetch datasets on mount and when on step 2
+  useEffect(() => {
+    if (mainTab === 'train' && currentStep === 2) {
+      fetchDatasets()
+    }
+  }, [mainTab, currentStep])
 
   // WebSocket for training updates
   useEffect(() => {
@@ -159,7 +187,6 @@ export default function Home() {
     }
   }, [jobStatus?.job_id, isTraining])
 
-  // Auto-scroll logs and chat
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [trainingLogs])
@@ -168,35 +195,163 @@ export default function Home() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [chatMessages])
 
-  // API functions with error handling
-  const validateDataset = async () => {
-    if (!config.dataset_path) return
+  // Dataset functions
+  const fetchDatasets = async () => {
+    setIsLoadingDatasets(true)
     try {
-      const res = await fetch(`${API_URL}/api/datasets/validate?dataset_path=${encodeURIComponent(config.dataset_path)}`, {
-        method: 'POST',
-      })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = await res.json()
-      setDatasetValidation(data)
+      const res = await fetch(`${API_URL}/api/datasets/list`)
+      if (res.ok) {
+        const data = await res.json()
+        // Preserve selection state
+        const newDatasets = data.datasets.map((ds: UploadedDataset) => ({
+          ...ds,
+          selected: uploadedDatasets.find(d => d.id === ds.id)?.selected ?? true
+        }))
+        setUploadedDatasets(newDatasets)
+        // Update config with selected paths
+        const selectedPaths = newDatasets.filter((d: UploadedDataset) => d.selected).map((d: UploadedDataset) => d.path)
+        setConfig(prev => ({ ...prev, dataset_paths: selectedPaths }))
+      }
     } catch (e) {
-      setDatasetValidation({ valid: false, total_samples: 0, errors: [`Validation failed: ${e}`] })
+      console.error('Failed to fetch datasets:', e)
+    } finally {
+      setIsLoadingDatasets(false)
+    }
+  }
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) {
+      setUploadFile(file)
+      // Auto-suggest name from filename
+      if (!uploadName) {
+        const name = file.name.replace(/\.(jsonl|json|csv)$/i, '')
+        setUploadName(name)
+      }
+    }
+  }
+
+  const uploadDataset = async () => {
+    if (!uploadFile || !uploadName.trim()) {
+      setUploadError('Please provide both a file and a name')
+      return
+    }
+    
+    setIsUploading(true)
+    setUploadError('')
+    
+    try {
+      const formData = new FormData()
+      formData.append('file', uploadFile)
+      
+      const res = await fetch(`${API_URL}/api/datasets/upload?dataset_name=${encodeURIComponent(uploadName.trim())}`, {
+        method: 'POST',
+        body: formData,
+      })
+      
+      const data = await res.json()
+      
+      if (data.success) {
+        // Add to list with selected=true
+        const newDataset: UploadedDataset = {
+          id: data.id,
+          name: data.name,
+          filename: data.filename,
+          path: data.path,
+          size: data.size,
+          size_human: `${(data.size / 1024).toFixed(1)} KB`,
+          format: data.format,
+          total_samples: data.total_samples || 0,
+          created_at: Date.now() / 1000,
+          selected: true
+        }
+        setUploadedDatasets(prev => [newDataset, ...prev])
+        setConfig(prev => ({ ...prev, dataset_paths: [...prev.dataset_paths, data.path] }))
+        
+        // Reset form
+        setUploadName('')
+        setUploadFile(null)
+        setShowUploadForm(false)
+        if (fileInputRef.current) fileInputRef.current.value = ''
+        
+        // Show validation errors if any
+        if (data.errors && data.errors.length > 0) {
+          alert(`Dataset uploaded but has warnings:\n${data.errors.join('\n')}`)
+        }
+      } else {
+        setUploadError(data.detail || 'Upload failed')
+      }
+    } catch (e) {
+      setUploadError(`Upload failed: ${e}`)
+    } finally {
+      setIsUploading(false)
+    }
+  }
+
+  const toggleDatasetSelection = (datasetId: string) => {
+    setUploadedDatasets(prev => {
+      const updated = prev.map(d => 
+        d.id === datasetId ? { ...d, selected: !d.selected } : d
+      )
+      // Update config with selected paths
+      const selectedPaths = updated.filter(d => d.selected).map(d => d.path)
+      setConfig(c => ({ ...c, dataset_paths: selectedPaths }))
+      return updated
+    })
+  }
+
+  const confirmDelete = async () => {
+    if (!deleteTarget || deleteConfirmText.toLowerCase() !== 'delete') return
+    
+    setIsDeleting(true)
+    try {
+      const res = await fetch(
+        `${API_URL}/api/datasets/delete/${encodeURIComponent(deleteTarget.id)}?confirm=delete`,
+        { method: 'DELETE' }
+      )
+      
+      if (res.ok) {
+        setUploadedDatasets(prev => prev.filter(d => d.id !== deleteTarget.id))
+        setConfig(prev => ({
+          ...prev,
+          dataset_paths: prev.dataset_paths.filter(p => p !== deleteTarget.path)
+        }))
+        setDeleteTarget(null)
+        setDeleteConfirmText('')
+      } else {
+        const data = await res.json()
+        alert(data.detail || 'Delete failed')
+      }
+    } catch (e) {
+      alert(`Delete failed: ${e}`)
+    } finally {
+      setIsDeleting(false)
     }
   }
 
   const startTraining = async () => {
+    if (config.dataset_paths.length === 0) {
+      alert('Please select at least one dataset for training')
+      return
+    }
+    
     try {
       setTrainingLogs([])
       
-      // Create job
+      // Create job with combined dataset path
+      const jobConfig = {
+        ...config,
+        dataset_path: config.dataset_paths.join(',')
+      }
+      
       const createRes = await fetch(`${API_URL}/api/jobs/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config),
+        body: JSON.stringify(jobConfig),
       })
       if (!createRes.ok) throw new Error(`Create failed: ${createRes.status}`)
       const job = await createRes.json()
       
-      // Start job
       const startRes = await fetch(`${API_URL}/api/jobs/${job.job_id}/start`, {
         method: 'POST',
       })
@@ -294,22 +449,78 @@ export default function Home() {
   const canProceed = () => {
     switch (currentStep) {
       case 1: return config.model_path.length > 0
-      case 2: return config.dataset_path.length > 0
+      case 2: return config.dataset_paths.length > 0
       case 3: return true
       case 4: return true
       default: return false
     }
   }
 
-  // Fetch inference status on mount and tab change
   useEffect(() => {
     if (mainTab === 'inference') {
       fetchInferenceStatus()
     }
   }, [mainTab])
 
+  const selectedCount = uploadedDatasets.filter(d => d.selected).length
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
+      {/* Delete Confirmation Modal */}
+      {deleteTarget && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 max-w-md w-full mx-4 shadow-2xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center">
+                <Trash2 className="w-5 h-5 text-red-600" />
+              </div>
+              <div>
+                <h3 className="font-bold text-slate-900">Delete Dataset</h3>
+                <p className="text-sm text-slate-500">This action cannot be undone</p>
+              </div>
+            </div>
+            
+            <div className="bg-slate-50 rounded-lg p-3 mb-4">
+              <p className="text-sm text-slate-700">
+                <strong>Dataset:</strong> {deleteTarget.name}
+              </p>
+              <p className="text-sm text-slate-500">
+                {deleteTarget.total_samples} samples • {deleteTarget.size_human}
+              </p>
+            </div>
+            
+            <p className="text-sm text-slate-600 mb-3">
+              Type <strong className="text-red-600">delete</strong> to confirm:
+            </p>
+            <input
+              type="text"
+              value={deleteConfirmText}
+              onChange={(e) => setDeleteConfirmText(e.target.value)}
+              placeholder="Type 'delete' here"
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg mb-4 focus:ring-2 focus:ring-red-500 focus:border-red-500"
+              autoFocus
+            />
+            
+            <div className="flex gap-2">
+              <button
+                onClick={() => { setDeleteTarget(null); setDeleteConfirmText('') }}
+                className="flex-1 px-4 py-2 border border-slate-300 rounded-lg font-medium text-slate-700 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDelete}
+                disabled={deleteConfirmText.toLowerCase() !== 'delete' || isDeleting}
+                className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              >
+                {isDeleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <header className="bg-white border-b border-slate-200 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
@@ -324,29 +535,22 @@ export default function Home() {
               </div>
             </div>
             
-            {/* Main Tab Switcher */}
             <div className="flex bg-slate-100 rounded-lg p-1">
               <button
                 onClick={() => setMainTab('train')}
                 className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
-                  mainTab === 'train' 
-                    ? 'bg-white text-slate-900 shadow-sm' 
-                    : 'text-slate-600 hover:text-slate-900'
+                  mainTab === 'train' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
-                <Zap className="w-4 h-4 inline mr-2" />
-                Fine-tuning
+                <Zap className="w-4 h-4 inline mr-2" />Fine-tuning
               </button>
               <button
                 onClick={() => setMainTab('inference')}
                 className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
-                  mainTab === 'inference' 
-                    ? 'bg-white text-slate-900 shadow-sm' 
-                    : 'text-slate-600 hover:text-slate-900'
+                  mainTab === 'inference' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
-                <MessageSquare className="w-4 h-4 inline mr-2" />
-                Inference
+                <MessageSquare className="w-4 h-4 inline mr-2" />Inference
               </button>
             </div>
             
@@ -360,7 +564,6 @@ export default function Home() {
         {/* ===================== TRAINING TAB ===================== */}
         {mainTab === 'train' && (
           <>
-            {/* Progress Steps */}
             {currentStep <= 4 && (
               <div className="mb-6">
                 <div className="flex items-center justify-between">
@@ -445,123 +648,18 @@ export default function Home() {
 
               {/* Step 2: Dataset */}
               {currentStep === 2 && (
-                <div className="space-y-5">
-                  <div>
-                    <h2 className="text-xl font-bold text-slate-900 mb-1">Configure Dataset</h2>
-                    <p className="text-slate-600 text-sm">Specify your training dataset</p>
-                  </div>
-                  
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">Dataset Path</label>
-                      <div className="flex gap-2">
-                        <input type="text" value={config.dataset_path}
-                          onChange={(e) => setConfig({ ...config, dataset_path: e.target.value })}
-                          placeholder="/path/to/dataset.jsonl"
-                          className="flex-1 px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary-500"
-                        />
-                        <button onClick={validateDataset}
-                          className="px-4 py-3 bg-slate-100 hover:bg-slate-200 rounded-lg font-medium text-slate-700">
-                          Validate
-                        </button>
-                      </div>
-                    </div>
-                    
-                    {datasetValidation && (
-                      <div className={`p-4 rounded-lg ${datasetValidation.valid ? 'bg-green-50 border border-green-200' : 'bg-red-50 border border-red-200'}`}>
-                        {datasetValidation.valid ? (
-                          <div className="flex items-center gap-2 text-green-700">
-                            <CheckCircle className="w-5 h-5" />
-                            <span>Valid: {datasetValidation.total_samples} samples</span>
-                          </div>
-                        ) : (
-                          <div className="flex items-center gap-2 text-red-700">
-                            <AlertCircle className="w-5 h-5" />
-                            <span>{datasetValidation.errors.join(', ')}</span>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
+                <DatasetConfig 
+                  selectedPaths={config.dataset_paths}
+                  onSelectionChange={(paths) => setConfig(prev => ({ ...prev, dataset_paths: paths }))}
+                />
               )}
 
-              {/* Step 3: Settings */}
+              {/* Step 3: Training Settings */}
               {currentStep === 3 && (
-                <div className="space-y-5">
-                  <div>
-                    <h2 className="text-xl font-bold text-slate-900 mb-1">Training Settings</h2>
-                    <p className="text-slate-600 text-sm">Configure hyperparameters</p>
-                  </div>
-                  
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">Training Type</label>
-                      <div className="grid grid-cols-4 gap-2">
-                        {[
-                          { id: 'lora', name: 'LoRA' },
-                          { id: 'qlora', name: 'QLoRA' },
-                          { id: 'adalora', name: 'AdaLoRA' },
-                          { id: 'full', name: 'Full' },
-                        ].map((type) => (
-                          <button key={type.id} onClick={() => setConfig({ ...config, train_type: type.id as any, quant_bits: type.id === 'qlora' ? 4 : null })}
-                            className={`p-2 rounded-lg border-2 text-center transition-all ${
-                              config.train_type === type.id ? 'border-primary-500 bg-primary-50' : 'border-slate-200 hover:border-slate-300'
-                            }`}>
-                            <span className="font-medium text-sm">{type.name}</span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                    
-                    <div className="grid grid-cols-3 gap-3">
-                      <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1">Epochs</label>
-                        <input type="number" value={config.num_train_epochs}
-                          onChange={(e) => setConfig({ ...config, num_train_epochs: parseInt(e.target.value) || 1 })}
-                          className="w-full px-3 py-2 border border-slate-300 rounded-lg" />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1">Learning Rate</label>
-                        <input type="number" step="0.00001" value={config.learning_rate}
-                          onChange={(e) => setConfig({ ...config, learning_rate: parseFloat(e.target.value) || 0.0001 })}
-                          className="w-full px-3 py-2 border border-slate-300 rounded-lg" />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1">Batch Size</label>
-                        <input type="number" value={config.per_device_train_batch_size}
-                          onChange={(e) => setConfig({ ...config, per_device_train_batch_size: parseInt(e.target.value) || 1 })}
-                          className="w-full px-3 py-2 border border-slate-300 rounded-lg" />
-                      </div>
-                    </div>
-                    
-                    {['lora', 'qlora', 'adalora'].includes(config.train_type) && (
-                      <div className="bg-slate-50 rounded-lg p-4">
-                        <h4 className="font-medium text-slate-900 mb-3">LoRA Settings</h4>
-                        <div className="grid grid-cols-3 gap-3">
-                          <div>
-                            <label className="block text-sm font-medium text-slate-700 mb-1">Rank</label>
-                            <input type="number" value={config.lora_rank}
-                              onChange={(e) => setConfig({ ...config, lora_rank: parseInt(e.target.value) || 8 })}
-                              className="w-full px-3 py-2 border border-slate-300 rounded-lg" />
-                          </div>
-                          <div>
-                            <label className="block text-sm font-medium text-slate-700 mb-1">Alpha</label>
-                            <input type="number" value={config.lora_alpha}
-                              onChange={(e) => setConfig({ ...config, lora_alpha: parseInt(e.target.value) || 32 })}
-                              className="w-full px-3 py-2 border border-slate-300 rounded-lg" />
-                          </div>
-                          <div>
-                            <label className="block text-sm font-medium text-slate-700 mb-1">Dropout</label>
-                            <input type="number" step="0.01" value={config.lora_dropout}
-                              onChange={(e) => setConfig({ ...config, lora_dropout: parseFloat(e.target.value) || 0.05 })}
-                              className="w-full px-3 py-2 border border-slate-300 rounded-lg" />
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
+                <TrainingSettingsStep 
+                  config={config} 
+                  setConfig={(fn) => setConfig(prev => ({ ...prev, ...fn(prev) }))} 
+                />
               )}
 
               {/* Step 4: Review */}
@@ -569,18 +667,42 @@ export default function Home() {
                 <div className="space-y-5">
                   <div>
                     <h2 className="text-xl font-bold text-slate-900 mb-1">Review & Start</h2>
-                    <p className="text-slate-600 text-sm">Review your configuration</p>
+                    <p className="text-slate-600 text-sm">Review your configuration before training</p>
                   </div>
                   
-                  <div className="bg-slate-50 rounded-lg p-4 grid grid-cols-2 gap-3 text-sm">
-                    <div><span className="text-slate-500">Model:</span> <span className="font-medium">{config.model_path}</span></div>
-                    <div><span className="text-slate-500">Type:</span> <span className="font-medium uppercase">{config.train_type}</span></div>
-                    <div><span className="text-slate-500">Dataset:</span> <span className="font-medium">{config.dataset_path}</span></div>
-                    <div><span className="text-slate-500">Epochs:</span> <span className="font-medium">{config.num_train_epochs}</span></div>
+                  <div className="bg-slate-50 rounded-lg p-4 space-y-3 text-sm">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <div><span className="text-slate-500">Model:</span> <span className="font-medium break-all">{config.model_path}</span></div>
+                      <div><span className="text-slate-500">Training Type:</span> <span className="font-medium uppercase">{config.train_type}</span></div>
+                      <div><span className="text-slate-500">Epochs:</span> <span className="font-medium">{config.num_train_epochs}</span></div>
+                      <div><span className="text-slate-500">Learning Rate:</span> <span className="font-medium">{config.learning_rate.toExponential(0)}</span></div>
+                      <div><span className="text-slate-500">Effective Batch:</span> <span className="font-medium">{config.per_device_train_batch_size} × {config.gradient_accumulation_steps} = {config.per_device_train_batch_size * config.gradient_accumulation_steps}</span></div>
+                      <div><span className="text-slate-500">Max Length:</span> <span className="font-medium">{config.max_length}</span></div>
+                      {['lora', 'qlora', 'adalora'].includes(config.train_type) && (
+                        <>
+                          <div><span className="text-slate-500">LoRA Rank:</span> <span className="font-medium">{config.lora_rank}</span></div>
+                          <div><span className="text-slate-500">LoRA Alpha:</span> <span className="font-medium">{config.lora_alpha}</span></div>
+                        </>
+                      )}
+                      {config.train_type === 'qlora' && (
+                        <div><span className="text-slate-500">Quantization:</span> <span className="font-medium">{config.quant_bits}-bit</span></div>
+                      )}
+                    </div>
+                    <div className="pt-3 border-t border-slate-200">
+                      <span className="text-slate-500">Datasets ({config.dataset_paths.length}):</span>
+                      <ul className="mt-1 space-y-1">
+                        {uploadedDatasets.filter(d => d.selected).map(d => (
+                          <li key={d.id} className="font-medium text-slate-700 flex items-center gap-2">
+                            <Check className="w-4 h-4 text-green-600" /> {d.name} ({d.total_samples} samples)
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   </div>
                   
                   <button onClick={startTraining}
-                    className="w-full py-4 bg-gradient-to-r from-primary-600 to-purple-600 text-white rounded-lg font-semibold text-lg hover:opacity-90 flex items-center justify-center gap-2">
+                    disabled={config.dataset_paths.length === 0}
+                    className="w-full py-4 bg-gradient-to-r from-primary-600 to-purple-600 text-white rounded-lg font-semibold text-lg hover:opacity-90 disabled:opacity-50 flex items-center justify-center gap-2">
                     <Zap className="w-5 h-5" /> Start Training
                   </button>
                 </div>
@@ -678,7 +800,6 @@ export default function Home() {
         {/* ===================== INFERENCE TAB ===================== */}
         {mainTab === 'inference' && (
           <div className="grid grid-cols-3 gap-4">
-            {/* Settings Panel */}
             <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-4 space-y-4">
               <h3 className="font-bold text-slate-900">Model Settings</h3>
               
@@ -736,7 +857,6 @@ export default function Home() {
               </div>
             </div>
             
-            {/* Chat Panel */}
             <div className="col-span-2 bg-white rounded-xl shadow-lg border border-slate-200 flex flex-col h-[600px]">
               <div className="p-4 border-b border-slate-200">
                 <h3 className="font-bold text-slate-900">Chat Interface</h3>
@@ -753,9 +873,7 @@ export default function Home() {
                 {chatMessages.map((msg, i) => (
                   <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                     <div className={`max-w-[80%] px-4 py-2 rounded-lg ${
-                      msg.role === 'user' 
-                        ? 'bg-primary-600 text-white' 
-                        : 'bg-slate-100 text-slate-900'
+                      msg.role === 'user' ? 'bg-primary-600 text-white' : 'bg-slate-100 text-slate-900'
                     }`}>
                       <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
                     </div>

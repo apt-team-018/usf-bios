@@ -153,3 +153,79 @@ megatron_output/
 
 # ast template
 ast_index_file.py
+
+# ============================================
+# Web Application (Frontend & Backend)
+# ============================================
+
+# Frontend - Node.js
+web/frontend/node_modules/
+web/frontend/.next/
+web/frontend/out/
+web/frontend/.env.local
+web/frontend/.env.development.local
+web/frontend/.env.test.local
+web/frontend/.env.production.local
+web/frontend/npm-debug.log*
+web/frontend/yarn-debug.log*
+web/frontend/yarn-error.log*
+
+# Backend - Python virtual environment
+web/backend/venv/
+web/backend/.venv/
+web/backend/__pycache__/
+web/backend/app/__pycache__/
+web/backend/app/**/__pycache__/
+web/backend/*.pyc
+web/backend/.env
+
+# Uploaded datasets and outputs
+web/backend/uploads/
+web/backend/datasets/
+
+# Docker
+web/.docker-data/
+
+# General node_modules (any location)
+**/node_modules/
+
+# General Python venv (any location)
+**/.venv/
+**/venv/
+
+# IDE specific
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Compiled files
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+
+# Model checkpoints and weights (large files)
+*.bin
+*.safetensors
+checkpoints/
+models/

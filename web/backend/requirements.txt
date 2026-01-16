@@ -4,3 +4,9 @@ python-multipart>=0.0.6
 websockets>=12.0
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
+aiofiles>=23.0.0
+
+# NOTE: DO NOT install standard transformers, peft, or accelerate here!
+# The usf_bios package has its own custom fork of these libraries.
+# Install the usf_bios package from the project root instead:
+#   cd /path/to/usf-bios && pip install -e .
