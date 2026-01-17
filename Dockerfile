@@ -69,7 +69,7 @@ COPY web/backend $BACKEND_DIR
 # Copy frontend and build
 COPY web/frontend $FRONTEND_DIR
 WORKDIR $FRONTEND_DIR
-RUN npm ci --only=production 2>/dev/null || npm install
+RUN npm install
 RUN npm run build
 
 # Create startup script
