@@ -35,13 +35,13 @@ class AdamW(Optimizer):
 
     def __init__(
         self,
-        params: Iterable[nn.parameter.Parameter],
-        lr: float = 1e-3,
-        betas: Tuple[float, float] = (0.9, 0.999),
-        eps: float = 1e-6,
-        weight_decay: float = 0.0,
-        correct_bias: bool = True,
-        no_deprecation_warning: bool = False,
+        params,
+        lr=1e-3,
+        betas=(0.9, 0.999),
+        eps=1e-6,
+        weight_decay=0.0,
+        correct_bias=True,
+        no_deprecation_warning=False,
     ):
         require_version('torch>=1.5.0')  # add_ with alpha
         if lr < 0.0:
