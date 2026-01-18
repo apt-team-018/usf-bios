@@ -157,7 +157,7 @@ class LoRA(USFAdapter):
             optimizer_group_callback=optimizer_group_callback)
 
     @staticmethod
-    def activate_adapter(module: torch.nn.Module, adapter_name: str, activate: bool, offload: str = None):
+    def activate_adapter(module: "torch.nn.Module", adapter_name: str, activate: bool, offload: str = None):
         set_adapter(module, adapter_name, activate, offload)
         for sub_module in module.modules():
             if isinstance(sub_module, (LoraLayer, LoRALayer)):
@@ -166,7 +166,7 @@ class LoRA(USFAdapter):
                     sub_module.save_memory(adapter_name, activate, offload)
 
     @staticmethod
-    def unpatch_lora(model, config: LoRAConfig, adapter_name: str):
+    def unpatch_lora(model, config: "LoRAConfig", adapter_name: str):
         """Unpatch lora modules and merge the weights to original modules.
 
         LoRA constructs an additional layer with low-rank decomposition matrices of the weights in the network.

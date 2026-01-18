@@ -52,7 +52,7 @@ class ReftConfig(USFConfig):
 class Reft(USFAdapter):
 
     @staticmethod
-    def prepare_model(model: nn.Module, config: ReftConfig, adapter_name: str):
+    def prepare_model(model: "nn.Module", config: ReftConfig, adapter_name: str):
         from usf_bios.utils.import_utils import is_pyreft_available
         if not is_pyreft_available():
             raise ImportError('Please install pyreft before using ReFT: ' '`pip install pyreft`')
@@ -109,7 +109,7 @@ class Reft(USFAdapter):
             model_key_mapping = Reft.get_model_key_mapping(config.model_type, config)
             module_list_key = model_key_mapping.module_list
         logger.info_debug(f'Applying Reft to module: {module_list_key}')
-        module_list: nn.ModuleList = model.get_submodule(module_list_key)
+        module_list: "nn.Module"List = model.get_submodule(module_list_key)
         representations = []
         for idx, layer in enumerate(module_list):
             if config.layers and idx not in config.layers:
@@ -211,5 +211,5 @@ class Reft(USFAdapter):
         return True
 
     @staticmethod
-    def activate_adapter(module: torch.nn.Module, adapter_name: str, activate: bool, offload: str = None):
+    def activate_adapter(module: "torch.nn.Module", adapter_name: str, activate: bool, offload: str = None):
         assert activate, 'ReFT does not support deactivate'

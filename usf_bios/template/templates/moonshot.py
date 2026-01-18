@@ -77,7 +77,7 @@ class KimiVLTemplate(Template):
             res['image_grid_hws'] = image_grid_hws
         return res
 
-    def _post_encode(self, model: nn.Module, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_encode(self, model: "nn.Module", inputs: Dict[str, Any]) -> Dict[str, Any]:
         input_ids = inputs['input_ids']
         pixel_values = inputs.get('pixel_values')
         inputs_embeds = model.get_input_embeddings()(input_ids)

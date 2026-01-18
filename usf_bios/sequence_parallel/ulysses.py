@@ -182,7 +182,7 @@ class SequenceParallel:
         """The real position ids, this is different from the position_ids in mrope"""
         return self.extra_kwargs.get('text_position_ids')
 
-    def _prepare_flash_attn(self, base_model: torch.nn.Module):
+    def _prepare_flash_attn(self, base_model: "torch.nn.Module"):
         try:
             from transformers import masking_utils
 
@@ -273,7 +273,7 @@ class SequenceParallel:
 
         from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-        def local_flash_attn(module: torch.nn.Module, query_states, key_states, value_states, attention_mask, *args,
+        def local_flash_attn(module: "torch.nn.Module", query_states, key_states, value_states, attention_mask, *args,
                              dist_attn, **kwargs):
             if self.world_size == 1 or module.__class__ not in [m.__class__ for m in text_model.modules()]:
                 return ALL_ATTENTION_FUNCTIONS['flash_attention_2_origin'](module, query_states, key_states,
@@ -335,7 +335,7 @@ class SequenceParallel:
                 query_states.transpose(1, 2), key_states.transpose(1, 2), value_states.transpose(1, 2), attention_mask,
                 *args, **kwargs), None
 
-        def local_sdpa_attn(module: torch.nn.Module, query_states, key_states, value_states, attention_mask, *args,
+        def local_sdpa_attn(module: "torch.nn.Module", query_states, key_states, value_states, attention_mask, *args,
                             dist_attn, **kwargs):
             # Bypass SP logic when world_size == 1 (SP disabled) or module not in text_model
             if self.world_size == 1 or module.__class__ not in [m.__class__ for m in text_model.modules()]:
@@ -362,7 +362,7 @@ class SequenceParallel:
             local_flash_attn, dist_attn=DistributedAttention(None, self))
         ALL_ATTENTION_FUNCTIONS['sdpa'] = partial(local_sdpa_attn, dist_attn=DistributedAttention(None, self))
 
-    def _prepare_forward_hook(self, base_model: torch.nn.Module):
+    def _prepare_forward_hook(self, base_model: "torch.nn.Module"):
 
         def pre_forward_split_hook(_self, args, kwargs):
             if self.world_size == 1:
@@ -392,7 +392,7 @@ class SequenceParallel:
 
         base_model.register_forward_pre_hook(pre_forward_split_hook, with_kwargs=True)
 
-    def _prepare_moe_aux_loss(self, base_model: torch.nn.Module):
+    def _prepare_moe_aux_loss(self, base_model: "torch.nn.Module"):
         from .utils import GatherLoss
 
         def moe_aux_loss_hook(module, args, kwargs, output):
@@ -426,7 +426,7 @@ class SequenceParallel:
 
         base_model.register_forward_hook(moe_aux_loss_hook, with_kwargs=True)
 
-    def prepare(self, sp_size: int, model: torch.nn.Module, tokenizer: PreTrainedTokenizer, padding_free: bool):
+    def prepare(self, sp_size: int, model: "torch.nn.Module", tokenizer: PreTrainedTokenizer, padding_free: bool):
         self.num_heads = HfConfigFactory.get_config_attr(model.config, 'num_key_value_heads')
         if self.num_heads is None:
             self.num_heads = HfConfigFactory.get_config_attr(model.config, 'num_attention_heads')

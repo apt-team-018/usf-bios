@@ -712,13 +712,13 @@ class USFMixin:
             sp_enabled = self.template.sequence_parallel_size > 1
             pf_enabled = bool(self.template.padding_free)
 
-            def _register_llm_hooks_in_order(llm_model: nn.Module, hooks: List[Callable]):
+            def _register_llm_hooks_in_order(llm_model: "nn.Module", hooks: List[Callable]):
                 # hooks are provided in desired execution order.
                 # We use prepend=True and register in reverse to preserve the order.
                 for hook in reversed(hooks):
                     llm_model.register_forward_hook(hook, with_kwargs=True, prepend=True)
 
-            def _get_hook_target_model(task_type_: str) -> nn.Module:
+            def _get_hook_target_model(task_type_: str) -> "nn.Module":
                 # For embedding, we hook on the LM-head model because embedding outputs are typically
                 # produced from `output.logits` by `patch_output_normalizer` (registered on LM-head model).
                 if task_type_ == 'embedding':

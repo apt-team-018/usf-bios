@@ -105,7 +105,7 @@ def _create_and_replace_hook(self, peft_config, adapter_name, target, *args, **k
     return self._create_and_replace_origin(peft_config, adapter_name, target, *args, **kwargs)
 
 
-def _convert_dtype(target: torch.nn.Module, adapter_name: str, lora_dtype: str):
+def _convert_dtype(target: "torch.nn.Module", adapter_name: str, lora_dtype: str):
     if lora_dtype is not None:
         torch_dtype = getattr(torch, lora_dtype)
         if hasattr(target, 'lora_A') and adapter_name in target.lora_A:
@@ -301,7 +301,7 @@ def hot_patch_peft_module():
         BoneModel._create_and_replace = _create_and_replace_hook
 
     # Support type conversion
-    def __new_init__(self, model: torch.nn.Module, config: Dict[str, LoraConfig], adapter_name: str):
+    def __new_init__(self, model: "torch.nn.Module", config: Dict[str, LoraConfig], adapter_name: str):
 
         self.__init_origin__(model, config, adapter_name)
         active_adapters = self.active_adapter

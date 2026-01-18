@@ -136,7 +136,7 @@ class USFOutput:
         load_state_dict_callback (`FunctionType`): A callback called before load_state_dict of the tuner.
         load_callback (`FunctionType`): A callback used to load trained model.
     """
-    model: torch.nn.Module = None
+    model: "torch.nn.Module" = None
     config: USFConfig = None
     state_dict_callback: FunctionType = None
     save_callback: FunctionType = None
@@ -160,7 +160,7 @@ class ActivationMixin:
             ActivationMixin.REMINEDED = True
             logger.warn('Using multiple thread mode, gradient checkpointing is not supported.')
 
-    def mark_all_sub_modules_as_plugin(self: torch.nn.Module):
+    def mark_all_sub_modules_as_plugin(self: "torch.nn.Module"):
         self.plugin = True
         for name, module in self.named_modules():
             if 'base_layer' not in name:
@@ -237,7 +237,7 @@ class OffloadHelper:
 
         return weight
 
-    def offload_disk(self, module: torch.nn.Module, adapter_name, module_key):
+    def offload_disk(self, module: "torch.nn.Module", adapter_name, module_key):
         key = adapter_name + ':' + module_key
         md5 = hashlib.md5(key.encode('utf-8')).hexdigest()
         sub_folder = os.path.join(self.cache_dir, md5)
@@ -247,7 +247,7 @@ class OffloadHelper:
         for key, tensor in state_dict.items():
             OffloadHelper.offload_weight(tensor, key, sub_folder, self.index[md5])
 
-    def load_disk(self, module: torch.nn.Module, adapter_name, module_key):
+    def load_disk(self, module: "torch.nn.Module", adapter_name, module_key):
         key = adapter_name + ':' + module_key
         md5 = hashlib.md5(key.encode('utf-8')).hexdigest()
         sub_folder = os.path.join(self.cache_dir, md5)
@@ -281,15 +281,15 @@ class USFAdapter:
     offload_helper = None
 
     @staticmethod
-    def prepare_model(model: torch.nn.Module, config: USFConfig, adapter_name: str) -> USFOutput:
+    def prepare_model(model: "torch.nn.Module", config: USFConfig, adapter_name: str) -> USFOutput:
         raise NotImplementedError
 
     @staticmethod
-    def activate_adapter(module: torch.nn.Module, adapter_name: str, activate: bool, offload: str = None):
+    def activate_adapter(module: "torch.nn.Module", adapter_name: str, activate: bool, offload: str = None):
         raise NotImplementedError
 
     @staticmethod
-    def save_memory(module: torch.nn.Module, adapter_name: str, module_key: str, activate: bool, offload: str = None):
+    def save_memory(module: "torch.nn.Module", adapter_name: str, module_key: str, activate: bool, offload: str = None):
         if not isinstance(module, torch.nn.Module):
             return
         if activate:
@@ -298,7 +298,7 @@ class USFAdapter:
             USFAdapter.offload(module, adapter_name, module_key, offload=offload)
 
     @staticmethod
-    def offload(module: torch.nn.Module, adapter_name, module_key, offload: str):
+    def offload(module: "torch.nn.Module", adapter_name, module_key, offload: str):
         if not offload:
             return
         device = next(iter(module.parameters())).device
@@ -319,7 +319,7 @@ class USFAdapter:
         gc_collect()
 
     @staticmethod
-    def load(module: torch.nn.Module, adapter_name, module_key):
+    def load(module: "torch.nn.Module", adapter_name, module_key):
         device = next(iter(module.parameters())).device
         if not hasattr(module, 'origin_device') or module.origin_device == str(device):
             return
@@ -348,7 +348,7 @@ class USFAdapter:
         return model_key_mapping
 
     @staticmethod
-    def state_dict_load_hook(model: torch.nn.Module, state_dict: Dict[str, torch.Tensor]):
+    def state_dict_load_hook(model: "torch.nn.Module", state_dict: Dict[str, torch.Tensor]):
         pass
 
     @staticmethod

@@ -77,7 +77,7 @@ class DPOTrainer(RLHFTrainerMixin, USFMixin, DataLoaderMixin, HFDPOTrainer):
 
     def concatenated_forward(
         self,
-        model: nn.Module,
+        model: "nn.Module",
         batch: Dict[str, Union[List, torch.LongTensor]],
         is_ref_model: bool = False
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:

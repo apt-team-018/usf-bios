@@ -37,10 +37,10 @@ class Part(USFAdapter):
         return re.fullmatch(config.target_modules, module_key)
 
     @staticmethod
-    def prepare_model(model: nn.Module, config: PartConfig, adapter_name: str):
+    def prepare_model(model: "nn.Module", config: PartConfig, adapter_name: str):
         name_list = [name for name, _ in model.named_modules(remove_duplicate=False)]
         for name in name_list:
-            module: nn.Module = model.get_submodule(name)
+            module: "nn.Module" = model.get_submodule(name)
             if Part.target_module_matched(name, config) and not getattr(module, 'plugin', False):
                 if hasattr(module, 'base_layer'):
                     module = module.base_layer
@@ -82,13 +82,13 @@ class Part(USFAdapter):
 
             return new_state_dict
 
-        def mark_trainable_callback(model: nn.Module):
+        def mark_trainable_callback(model: "nn.Module"):
             pass
 
-        def load_state_dict_callback(model: nn.Module, adapter_name: str, state_dict: Dict[str, torch.Tensor]):
+        def load_state_dict_callback(model: "nn.Module", adapter_name: str, state_dict: Dict[str, torch.Tensor]):
             new_state_dict = {}
             for name, module in model.named_modules(remove_duplicate=False):
-                module: nn.Module
+                module: "nn.Module"
                 if Part.target_module_matched(name, config):
                     for param_name in state_dict:
                         if param_name.startswith(name):
@@ -110,10 +110,10 @@ class Part(USFAdapter):
             load_state_dict_callback=load_state_dict_callback)
 
     @staticmethod
-    def activate_adapter(module: torch.nn.Module, adapter_name: str, activate: bool, offload: str = None):
+    def activate_adapter(module: "torch.nn.Module", adapter_name: str, activate: bool, offload: str = None):
         name_list = [name for name, _ in module.named_modules(remove_duplicate=False)]
         for name in name_list:
-            sub_module: nn.Module = module.get_submodule(name)
+            sub_module: "nn.Module" = module.get_submodule(name)
             if re.fullmatch(f'.*_part_{adapter_name}$', name):
                 sub_module.activated = activate
                 USFAdapter.save_memory(sub_module, adapter_name, name, activate, offload)

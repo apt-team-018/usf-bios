@@ -356,7 +356,7 @@ def _patch_peft_BaseTuner():
     from peft.tuners.tuners_utils import BaseTuner
     _origin_get_tied_target_modules = BaseTuner._get_tied_target_modules
 
-    def _get_tied_target_modules(self, model: nn.Module) -> List[str]:
+    def _get_tied_target_modules(self, model: "nn.Module") -> List[str]:
         try:
             return _origin_get_tied_target_modules(self, model)
         except AttributeError:

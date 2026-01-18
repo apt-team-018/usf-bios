@@ -52,7 +52,7 @@ class FlorenceTemplate(Template):
         encoded['labels'] = labels
         return encoded
 
-    def _post_encode(self, model: nn.Module, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_encode(self, model: "nn.Module", inputs: Dict[str, Any]) -> Dict[str, Any]:
         inputs_embeds = model.get_input_embeddings()(inputs['input_ids'])
         pixel_values = inputs.get('pixel_values')
         if pixel_values is not None:

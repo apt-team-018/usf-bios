@@ -30,7 +30,7 @@ def get_n_params_grads(model) -> Tuple[List[int], List[int]]:
     return n_params, n_grads
 
 
-def get_model_parameter_info(model: nn.Module, name: Optional[str] = None) -> str:
+def get_model_parameter_info(model: "nn.Module", name: Optional[str] = None) -> str:
     n_params, n_grads = get_n_params_grads(model)
     n_params = sum(n_params)
     n_grads = sum(n_grads)
@@ -49,7 +49,7 @@ def get_model_parameter_info(model: nn.Module, name: Optional[str] = None) -> st
     return s
 
 
-def find_sub_module(module: torch.nn.Module, module_name: str) -> List[torch.nn.Module]:
+def find_sub_module(module: "torch.nn.Module", module_name: str) -> List[torch.nn.Module]:
     _modules = list()
     for name, sub_module in module.named_modules():
         if not name:
@@ -59,7 +59,7 @@ def find_sub_module(module: torch.nn.Module, module_name: str) -> List[torch.nn.
     return _modules
 
 
-def show_layers(model: nn.Module, max_lines: Optional[int] = 20) -> None:
+def show_layers(model: "nn.Module", max_lines: Optional[int] = 20) -> None:
     named_p = list(model.named_parameters())
     for i, (n, p) in enumerate(named_p):
         if max_lines is not None and i >= max_lines:
@@ -69,7 +69,7 @@ def show_layers(model: nn.Module, max_lines: Optional[int] = 20) -> None:
             logger.info_debug(f'[{n}]: requires_grad={p.requires_grad}, dtype={p.dtype}, device={p.device}')
 
 
-def freeze_parameters(model: nn.Module,
+def freeze_parameters(model: "nn.Module",
                       freeze_parameters_ratio: float,
                       freeze_parameters: List[str],
                       freeze_parameters_regex: Optional[str] = None) -> None:
@@ -100,7 +100,7 @@ def freeze_parameters(model: nn.Module,
                 p.requires_grad = False
 
 
-def activate_parameters(model: nn.Module,
+def activate_parameters(model: "nn.Module",
                         additional_trainable_parameters: List[str],
                         trainable_parameters_regex: Optional[str] = None) -> None:
     has_activate = False
@@ -133,7 +133,7 @@ def activate_parameters(model: nn.Module,
 
 
 def find_layers(
-    model: nn.Module,
+    model: "nn.Module",
     cond: Callable[[str, nn.Module], bool],
     sub_module: Optional[str] = None,
     min_name_len: Optional[int] = None,
@@ -166,14 +166,14 @@ def find_layers(
     return list(target_module_names)
 
 
-def find_norm(model: nn.Module) -> List[str]:
+def find_norm(model: "nn.Module") -> List[str]:
     # find_layer_norm
     return find_layers(
         model,
         lambda name, module: isinstance(module, torch.nn.LayerNorm) or 'rmsnorm' in module.__class__.__name__.lower())
 
 
-def find_embedding(model: nn.Module) -> List[str]:
+def find_embedding(model: "nn.Module") -> List[str]:
     return find_layers(model, lambda name, module: isinstance(module, torch.nn.Embedding))
 
 

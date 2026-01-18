@@ -130,7 +130,7 @@ class MiniCPMVTemplate(Template):
         }
         return encoded
 
-    def _post_encode(self, model: nn.Module, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_encode(self, model: "nn.Module", inputs: Dict[str, Any]) -> Dict[str, Any]:
         inputs_embeds, _ = model.get_vllm_embedding(inputs)
         return {'inputs_embeds': inputs_embeds}
 

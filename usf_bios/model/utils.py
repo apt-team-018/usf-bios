@@ -51,7 +51,7 @@ class AttnImpl:
             HfConfigFactory.set_config_attr(config, key, use_flash_attn, include_vit=True, ensure_set=False)
 
 
-def get_llm_model(model: torch.nn.Module, model_meta=None, inner_backbone=True):
+def get_llm_model(model: "torch.nn.Module", model_meta=None, inner_backbone=True):
     """Get LLM model, this function can be used to get the llm module from a multi-modal model.
 
     Args:
@@ -200,7 +200,7 @@ class InitModelStrategy:
     }
 
     @staticmethod
-    def init_parameters(model: nn.Module, init_strategy: str) -> None:
+    def init_parameters(model: "nn.Module", init_strategy: str) -> None:
         """Initialize model parameters using the specified strategy.
         Args:
             model: The model whose parameters to initialize

@@ -190,7 +190,7 @@ class QuantEngine(ProcessorMixin):
             quantizer.prepare_dataset = _prepare_dataset_origin
 
     @staticmethod
-    def get_block_name_to_quantize(model: nn.Module) -> Optional[str]:
+    def get_block_name_to_quantize(model: "nn.Module") -> Optional[str]:
         model_arch = model.model_meta.model_arch
         prefix = ''
         if hasattr(model_arch, 'language_model'):

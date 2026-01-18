@@ -47,7 +47,7 @@ class LongLoRAConfig(LoRAConfig):
 class LongLoRA(LoRA):
 
     @staticmethod
-    def prepare_model(model: nn.Module, config: LongLoRAConfig, adapter_name: str):
+    def prepare_model(model: "nn.Module", config: LongLoRAConfig, adapter_name: str):
         """Prepare a model with `LongLoRAConfig`"""
         LoraModel(model, config, adapter_name)
 
@@ -76,7 +76,7 @@ class LongLoRA(LoRA):
             config=config, state_dict_callback=state_dict_callback, mark_trainable_callback=mark_trainable_callback)
 
 
-def mark_embedding_normalizer_as_trainable(model: nn.Module, extra_parameters: Union[str, List[str],
+def mark_embedding_normalizer_as_trainable(model: "nn.Module", extra_parameters: Union[str, List[str],
                                                                                      Tuple[str]]) -> None:
     for name, sub_module in model.named_parameters():
         if isinstance(extra_parameters, str):

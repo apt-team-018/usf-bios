@@ -103,7 +103,7 @@ class DeepseekVLTemplate(Template):
             encoded = {'input_ids': input_ids, 'labels': labels, 'generate_mode': inputs.generate_mode}
             return encoded
 
-    def _post_encode(self, model: nn.Module, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_encode(self, model: "nn.Module", inputs: Dict[str, Any]) -> Dict[str, Any]:
         if not inputs.get('generate_mode'):
             inputs['pixel_values'] = inputs['pixel_values'].to(dtype=self.model_info.torch_dtype)
             inputs_embeds = model.prepare_inputs_embeds(**inputs)
@@ -482,7 +482,7 @@ class DeepseekVL2Template(DeepseekVLTemplate):
         encoded = {'output': output, 'input_ids': input_ids, 'labels': labels}
         return encoded
 
-    def _post_encode(self, model: nn.Module, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_encode(self, model: "nn.Module", inputs: Dict[str, Any]) -> Dict[str, Any]:
         inputs['images_seq_mask'] = inputs['images_seq_mask'].to(torch.bool)
         inputs['images_spatial_crop'] = inputs['images_spatial_crop'].to(torch.long)
         inputs_embeds = model.prepare_inputs_embeds(**inputs)

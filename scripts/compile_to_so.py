@@ -54,7 +54,6 @@ def compile_directory(source_dir):
                     'cdivision': True,
                     'embedsignature': False,  # Don't embed function signatures
                     'emit_code_comments': False,  # No source comments in C
-                    'annotation_typing': False,  # Ignore type annotations (avoid unknown type warnings)
                 },
                 nthreads=4,  # Parallel compilation
                 quiet=True

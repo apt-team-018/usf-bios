@@ -303,7 +303,7 @@ class GKDTrainer(RolloutTrainerMixin, USFMixin, HFGKDTrainer):
     # Code borrowed from huggingface/trl
     @patch_profiling_decorator
     def training_step(self,
-                      model: nn.Module,
+                      model: "nn.Module",
                       inputs: DataType,
                       num_items_in_batch: Optional[int] = None) -> torch.Tensor:
         """

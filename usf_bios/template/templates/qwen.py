@@ -1064,7 +1064,7 @@ class Ovis2_5Template(Template):
         encoded['input_ids'] = input_ids
         return encoded
 
-    def _post_encode(self, model: nn.Module, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_encode(self, model: "nn.Module", inputs: Dict[str, Any]) -> Dict[str, Any]:
         input_ids = inputs['input_ids']
         pixel_values = inputs.get('pixel_values', None)
         grid_thws = inputs.get('grid_thws')

@@ -59,7 +59,7 @@ class SideConfig(USFConfig):
 class Side(USFAdapter):
 
     @staticmethod
-    def prepare_model(model: nn.Module, config: SideConfig, adapter_name: str) -> USFOutput:
+    def prepare_model(model: "nn.Module", config: SideConfig, adapter_name: str) -> USFOutput:
         """Prepare a model with `SideConfig`"""
         module_keys = [key for key, _ in model.named_modules()]
 
@@ -117,11 +117,11 @@ class Side(USFAdapter):
             config=config, state_dict_callback=state_dict_callback, mark_trainable_callback=mark_trainable_callback)
 
     @staticmethod
-    def activate_adapter(module: torch.nn.Module, adapter_name: str, activate: bool, offload: str = None):
+    def activate_adapter(module: "torch.nn.Module", adapter_name: str, activate: bool, offload: str = None):
         modules = find_sub_module(module, f'side_{adapter_name}')
         for _module in modules:
             _module: ActivationMixin
-            _module: nn.Module
+            _module: "nn.Module"
             _module.set_activation(adapter_name, activate)
             USFAdapter.save_memory(_module, adapter_name, _module.module_key, activate, offload)
 

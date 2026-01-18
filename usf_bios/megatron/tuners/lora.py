@@ -475,7 +475,7 @@ class LoraParallelLinear(MegatronModule, LoraLayer):
 
 
 def dispatch_megatron(
-    target: torch.nn.Module,
+    target: "torch.nn.Module",
     adapter_name: str,
     lora_config,
     **kwargs: Any,
