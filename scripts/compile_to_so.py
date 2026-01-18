@@ -42,11 +42,18 @@ def compile_directory(source_dir):
     
     print(f"Compiling {len(py_files)} files in {source_dir}...")
     
+    # Change to source directory for proper .so file placement
+    original_dir = os.getcwd()
+    os.chdir(source_dir)
+    
+    # Convert absolute paths to relative paths from source_dir
+    rel_py_files = [os.path.relpath(f, source_dir) for f in py_files]
+    
     # Compile with Cython - maximum security settings
     try:
         setup(
             ext_modules=cythonize(
-                py_files,
+                rel_py_files,
                 compiler_directives={
                     'language_level': '3',
                     'boundscheck': False,
@@ -63,7 +70,10 @@ def compile_directory(source_dir):
         )
     except Exception as e:
         print(f"Error compiling {source_dir}: {e}")
+        os.chdir(original_dir)
         sys.exit(1)
+    finally:
+        os.chdir(original_dir)
     
     # Remove source .py files (keep __init__.py)
     for py_file in py_files:
