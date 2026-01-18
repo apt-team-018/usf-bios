@@ -91,14 +91,16 @@ def safe_snapshot_download(model_id_or_path: str,
     else:
         if model_id_or_path.startswith('/'):  # startswith
             raise ValueError(f"path: '{model_id_or_path}' not found")
-        model_id_or_path = model_id_or_path.split(':', 1)  # get sub_folder
-        if len(model_id_or_path) == 1:
-            model_id_or_path = [model_id_or_path[0], None]
-        model_id_or_path, sub_folder = model_id_or_path
+        path_parts = model_id_or_path.split(':', 1)  # get sub_folder
+        if len(path_parts) == 1:
+            model_id = path_parts[0]
+            sub_folder = None
+        else:
+            model_id, sub_folder = path_parts
         if sub_folder is not None:
             kwargs['allow_patterns'] = [f"{sub_folder.rstrip('/')}/*"]
-        with safe_ddp_context(hash_id=model_id_or_path):
-            model_dir = hub.download_model(model_id_or_path, revision, ignore_patterns, token=hub_token, **kwargs)
+        with safe_ddp_context(hash_id=model_id):
+            model_dir = hub.download_model(model_id, revision, ignore_patterns, token=hub_token, **kwargs)
 
         logger.info_debug(f'Loading the model using model_dir: {model_dir}')
 
