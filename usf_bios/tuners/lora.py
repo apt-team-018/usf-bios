@@ -56,7 +56,7 @@ class LoRAConfig(LoraConfig, USFConfig):
             return False
         return True
 
-    def to_peft_config(self) -> 'LoraConfig':
+    def to_peft_config(self) -> LoraConfig:
         _dict = asdict(self)
         _dict.pop('use_qa_lora', None)
         _dict.pop('enable_lora', None)
@@ -75,7 +75,7 @@ class LoRAConfig(LoraConfig, USFConfig):
 class LoRA(USFAdapter):
 
     @staticmethod
-    def prepare_model(model: 'nn.Module', config: 'LoRAConfig', adapter_name: str):
+    def prepare_model(model: nn.Module, config: LoRAConfig, adapter_name: str):
         assert not config.use_qa_lora, 'Do not use qa-lora'
         if config.use_qa_lora:
             auto_gptq_config = get_quantization_config(model, method='gptq')
