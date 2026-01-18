@@ -50,7 +50,7 @@ def compile_directory(source_dir):
                 compiler_directives={
                     'language_level': '3',
                     'boundscheck': False,
-                    'wraparound': False,
+                    'wraparound': True,  # Allow negative indexing (Python standard)
                     'cdivision': True,
                     'embedsignature': False,  # Don't embed function signatures
                     'emit_code_comments': False,  # No source comments in C
