@@ -76,7 +76,7 @@ jobs:
 
   build-and-push:
     needs: version
-    runs-on: ubuntu-latest-4-cores
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       packages: write
