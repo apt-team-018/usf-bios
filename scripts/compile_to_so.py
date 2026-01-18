@@ -56,7 +56,7 @@ def compile_directory(source_dir):
                     'emit_code_comments': False,  # No source comments in C
                     'annotation_typing': False,  # Python annotations, not Cython types
                 },
-                nthreads=4,  # Parallel compilation
+                nthreads=8,  # Parallel compilation (use more cores)
                 quiet=True
             ),
             script_args=['build_ext', '--inplace']
