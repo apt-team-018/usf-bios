@@ -44,7 +44,7 @@ class LLaMAProConfig(USFConfig):
 class LLaMAPro(USFAdapter):
 
     @staticmethod
-    def prepare_model(model: "nn.Module", config: LLaMAProConfig, adapter_name: str) -> USFOutput:
+    def prepare_model(model: nn.Module, config: LLaMAProConfig, adapter_name: str) -> USFOutput:
         """Prepare a model with `LLaMAProConfig`"""
         num_hidden_layers = HfConfigFactory.get_config_attr(model.config, 'num_hidden_layers')
         if num_hidden_layers is None:
@@ -174,7 +174,7 @@ class LLaMAPro(USFAdapter):
         return model_key_mapping
 
     @classmethod
-    def search_correct_model_type(cls, module: "nn.Module"):
+    def search_correct_model_type(cls, module: nn.Module):
         for arch_name, arch_type in MODEL_ARCH_MAPPING.items():
             arch_type: ModelKeys
             if getattr(arch_type, 'module_list') is None:
@@ -220,19 +220,19 @@ class LLaMAPro(USFAdapter):
                 _down_proj.bias.data = torch.zeros_like(_down_proj.bias)
 
     @staticmethod
-    def _set_module_list(config, module: "nn.Module", module_list: "nn.Module"List):
+    def _set_module_list(config, module: nn.Module, module_list: nn.ModuleList):
         model_key_mapping = LLaMAPro.get_model_key_mapping(config.model_type, config)
         idx = model_key_mapping.module_list.rfind('.')
         parent = module.get_submodule(model_key_mapping.module_list[:idx])
         setattr(parent, model_key_mapping.module_list[idx + 1:], module_list)
 
     @staticmethod
-    def _find_module_list(config, module: "nn.Module") -> nn.ModuleList:
+    def _find_module_list(config, module: nn.Module) -> nn.ModuleList:
         model_key_mapping = LLaMAPro.get_model_key_mapping(config.model_type, config)
         return module.get_submodule(model_key_mapping.module_list)
 
     @staticmethod
-    def activate_adapter(module: "torch.nn.Module", adapter_name: str, activate: bool, offload: str = None):
+    def activate_adapter(module: torch.nn.Module, adapter_name: str, activate: bool, offload: str = None):
         module.activate_module(activate)
 
     @staticmethod

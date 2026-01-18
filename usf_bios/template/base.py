@@ -608,7 +608,7 @@ class Template(ProcessorMixin):
         packed.update(self._data_collator_mm_data(row))
         return packed
 
-    def _post_encode(self, model: "nn.Module", inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_encode(self, model: nn.Module, inputs: Dict[str, Any]) -> Dict[str, Any]:
         return inputs
 
     @staticmethod
@@ -1451,7 +1451,7 @@ class Template(ProcessorMixin):
     def post_process_generate_response(self, response: str, inputs: StdTemplateInputs) -> str:
         return response
 
-    def pre_forward_hook(self, model: "nn.Module", args, kwargs):
+    def pre_forward_hook(self, model: nn.Module, args, kwargs):
         old_kwargs = to_device(kwargs, model.device)
         kwargs = to_device(self._post_encode(model, old_kwargs), model.device)
         for k, v in old_kwargs.items():

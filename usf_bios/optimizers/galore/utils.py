@@ -82,7 +82,7 @@ class GaloreSchedulerWrapper(LRScheduler):
         self._last_lr = lr_scheduler.get_last_lr()
 
 
-def _create_optimizer_and_scheduler(model: "nn.Module", args: 'TrainingArguments', config: GaLoreConfig, max_steps,
+def _create_optimizer_and_scheduler(model: nn.Module, args: 'TrainingArguments', config: GaLoreConfig, max_steps,
                                     **defaults):
     galore_params = []
     for module_name, module in model.named_modules():

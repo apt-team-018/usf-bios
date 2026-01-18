@@ -395,7 +395,7 @@ class VLLMClient:
         if all_errors:
             raise RuntimeError(f'Multiple errors: {all_errors}')
 
-    def update_model_params(self, model: "nn.Module"):
+    def update_model_params(self, model: nn.Module):
         for name, param in model.named_parameters():
             self.update_named_param(name, param.data)
 

@@ -62,7 +62,7 @@ class Seq2SeqTrainer(USFMixin, DataLoaderMixin, HfSeq2SeqTrainer):
 
     def prediction_step(
         self,
-        model: "nn.Module",
+        model: nn.Module,
         inputs: Dict[str, Union[torch.Tensor, Any]],
         prediction_loss_only: bool,
         ignore_keys: Optional[List[str]] = None,

@@ -1513,7 +1513,7 @@ class GRPOTrainer(RolloutTrainerMixin, USFMixin, HFGRPOTrainer):
         return logps, entropies
 
     def _get_logps_via_sp(self,
-                          model: "torch.nn.Module",
+                          model: torch.nn.Module,
                           inputs: 'DataType',
                           logits_to_keep: int,
                           input_ids: torch.Tensor,
@@ -1607,7 +1607,7 @@ class GRPOTrainer(RolloutTrainerMixin, USFMixin, HFGRPOTrainer):
         return per_token_logps, entropies
 
     def _get_logps_via_local_forward(self,
-                                     model: "torch.nn.Module",
+                                     model: torch.nn.Module,
                                      inputs: 'DataType',
                                      logits_to_keep: int,
                                      input_ids: torch.Tensor,
@@ -1735,7 +1735,7 @@ class GRPOTrainer(RolloutTrainerMixin, USFMixin, HFGRPOTrainer):
 
         Parameters
         ----------
-        model : "torch.nn.Module"
+        model : torch.nn.Module
             The model used to compute log-probs and entropies.
         inputs : DataType
             A list of dictionary of tensors that constitute the full rollout/training batch.
@@ -1849,7 +1849,7 @@ class GRPOTrainer(RolloutTrainerMixin, USFMixin, HFGRPOTrainer):
         self.eval_flag = True
         return output
 
-    def training_step(self, model: "nn.Module", inputs: DataType, num_items_in_batch=None) -> torch.Tensor:
+    def training_step(self, model: nn.Module, inputs: DataType, num_items_in_batch=None) -> torch.Tensor:
         if self.args.async_generate:
             # Wait for the eval rollout to complete
             while not self.is_async_generate_eval_rollout_done():

@@ -130,7 +130,7 @@ class mPlugOwl3Template(Template):
         encoded['loss_scale'] = loss_scale
         return encoded
 
-    def _post_encode(self, model: "nn.Module", inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_encode(self, model: nn.Module, inputs: Dict[str, Any]) -> Dict[str, Any]:
         if 'media_offset' in inputs:
             media_offset = []
             cusum_offset = 0
@@ -163,7 +163,7 @@ class mPlugOwl3Template(Template):
 class mPlugOwl3_241101Template(mPlugOwl3Template):
     version = '241101'
 
-    def _post_encode(self, model: "nn.Module", inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_encode(self, model: nn.Module, inputs: Dict[str, Any]) -> Dict[str, Any]:
         if 'pixel_values' in inputs:
             pixel_values = inputs.pop('pixel_values')
             inputs['image_embeds'] = torch.concat([model.forward_image(pv) for pv in pixel_values])

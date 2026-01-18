@@ -36,7 +36,7 @@ class TrainerAdapterCallback(TrainerCallback):
 
 class DynamicLayerActivationCallback(TrainerCallback):
 
-    def __init__(self, n_layers: int, step_interval: int, model: "torch.nn.Module"):
+    def __init__(self, n_layers: int, step_interval: int, model: torch.nn.Module):
         super().__init__()
         self.n_layers = n_layers
         self.step_interval = step_interval

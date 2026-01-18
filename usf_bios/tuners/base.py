@@ -375,7 +375,7 @@ class USFModel(nn.Module):
     @classmethod
     def _prepare_model(
         cls,
-        model: "nn.Module",
+        model: nn.Module,
         config: USFConfig,
         adapter_name: str,
     ):

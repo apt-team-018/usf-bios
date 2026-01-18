@@ -78,7 +78,7 @@ class MegrezOmniTemplate(Template):
         encoded['loss_scale'] = loss_scale
         return encoded
 
-    def _post_encode(self, model: "nn.Module", inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_encode(self, model: nn.Module, inputs: Dict[str, Any]) -> Dict[str, Any]:
         _, inputs_embeds, _ = model.compose_embeddings(inputs)
         inputs.pop('position_ids', None)
         return {'inputs_embeds': inputs_embeds}

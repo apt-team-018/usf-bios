@@ -112,7 +112,7 @@ class PaddleOCRTemplate(Template):
 
         return encoded
 
-    def _post_encode(self, model: "nn.Module", inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_encode(self, model: nn.Module, inputs: Dict[str, Any]) -> Dict[str, Any]:
         embedding = model.get_input_embeddings()
         device = embedding.weight.device
         input_ids = inputs['input_ids']

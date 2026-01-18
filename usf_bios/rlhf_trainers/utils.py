@@ -570,7 +570,7 @@ class _ForwardRedirection:
     A method call to a wrapped module gets rerouted through the wrapper's `forward` method instead.
     """
 
-    def __call__(self, wrapper_module: "nn.Module", original_module: "nn.Module", method: callable, *args: Any,
+    def __call__(self, wrapper_module: nn.Module, original_module: nn.Module, method: callable, *args: Any,
                  **kwargs: Any):
         """Reroutes a method call through the `wrapper_module`'s `forward` method.
         Args:
@@ -601,10 +601,10 @@ class _ForwardRedirection:
         self.on_after_outer_forward(wrapper_module, original_module)
         return wrapper_output
 
-    def on_after_inner_forward(self, wrapper_module: "nn.Module", original_module: "nn.Module") -> None:
+    def on_after_inner_forward(self, wrapper_module: nn.Module, original_module: nn.Module) -> None:
         pass
 
-    def on_after_outer_forward(self, wrapper_module: "nn.Module", original_module: "nn.Module") -> None:
+    def on_after_outer_forward(self, wrapper_module: nn.Module, original_module: nn.Module) -> None:
         pass
 
 
@@ -1045,7 +1045,7 @@ class TensorMetadata(BaseModel):
 
 class UpdateFlattenedAdapterRequest(BaseModel):
     lora_int_id: int
-    peft_config: "LoraConfig"
+    peft_config: LoraConfig
     metadatas: List[FlattenedTensorMetadata]
 
 
@@ -1056,7 +1056,7 @@ class UpdateFlattenedParamsRequest(BaseModel):
 class UpdateAdapterRequest(BaseModel):
     """Request for non-flattened adapter weight update"""
     lora_int_id: int
-    peft_config: "LoraConfig"
+    peft_config: LoraConfig
     lora_tensors_metadata: List[TensorMetadata]
 
 

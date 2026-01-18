@@ -81,7 +81,7 @@ class RLHFTrainerMixin:
         return train_dataloader
 
     def concatenated_forward(
-        self, model: "nn.Module", batch: Dict[str, Union[List, torch.LongTensor]]
+        self, model: nn.Module, batch: Dict[str, Union[List, torch.LongTensor]]
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
         model_kwargs = batch.copy()
         labels = model_kwargs.pop('labels', None)

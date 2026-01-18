@@ -388,7 +388,7 @@ def sdpa_forward(
     return attn_output, None, past_key_value
 
 
-def replace_llama_attn(model: "nn.Module"):
+def replace_llama_attn(model: nn.Module):
     layers = None
     for module in model.modules():
         if isinstance(module, torch.nn.ModuleList):

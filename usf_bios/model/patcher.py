@@ -27,7 +27,7 @@ from usf_bios.utils import (HfConfigFactory, deep_getattr, get_device_count, get
 logger = get_logger()
 
 
-def patch_fixed_float_dtype(module: "torch.nn.Module", dtype):
+def patch_fixed_float_dtype(module: torch.nn.Module, dtype):
     """Patch the module, to make sure the consisitent dtype."""
 
     def get_float_dtype_hook(dtype):
@@ -40,7 +40,7 @@ def patch_fixed_float_dtype(module: "torch.nn.Module", dtype):
     module.register_forward_hook(get_float_dtype_hook(dtype))
 
 
-def patch_fixed_device(module: "torch.nn.Module", device):
+def patch_fixed_device(module: torch.nn.Module, device):
     """Move the output to the specific device"""
 
     def get_device_hook(device):
@@ -53,7 +53,7 @@ def patch_fixed_device(module: "torch.nn.Module", device):
     module.register_forward_hook(get_device_hook(device))
 
 
-def patch_output_clone(module: "torch.nn.Module"):
+def patch_output_clone(module: torch.nn.Module):
     """Clone the output, to avoid the inplace problem"""
 
     def _clone_hook(module, input, output):
@@ -64,13 +64,13 @@ def patch_output_clone(module: "torch.nn.Module"):
 
 def patch_get_input_embeddings(model, embedding_keys: str):
 
-    def get_input_embeddings(self) -> "nn.Module":
+    def get_input_embeddings(self) -> nn.Module:
         return deep_getattr(model, embedding_keys)
 
     model.get_input_embeddings = MethodType(get_input_embeddings, model)
 
 
-def patch_output_normalizer(module: "torch.nn.Module", model_meta):
+def patch_output_normalizer(module: torch.nn.Module, model_meta):
 
     def lm_head_forward(self, hidden_states):
         return hidden_states
@@ -102,7 +102,7 @@ def patch_output_normalizer(module: "torch.nn.Module", model_meta):
     llm_model.register_forward_hook(_output_embedding_hook, with_kwargs=True)
 
 
-def patch_output_to_input_device(module: "torch.nn.Module"):
+def patch_output_to_input_device(module: torch.nn.Module):
     """Patch the module, to make sure the output is in the same device with the input.
 
     Args:
@@ -451,7 +451,7 @@ def patch_mp_ddp():
         from accelerate.utils.modeling import get_balanced_memory, infer_auto_device_map
 
         @wraps(infer_auto_device_map)
-        def _infer_auto_device_map_patch(model: "nn.Module",
+        def _infer_auto_device_map_patch(model: nn.Module,
                                          max_memory: Optional[Dict[Union[int, str], Union[int, str]]] = None,
                                          **kwargs) -> Dict[str, Union[int, str, torch.device]]:
             """The auxiliary function for supports MP + DDP. Monkey Patching.

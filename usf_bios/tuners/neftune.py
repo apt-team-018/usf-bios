@@ -31,7 +31,7 @@ class NEFTuneConfig(USFConfig):
 class NEFTune(USFAdapter):
 
     @staticmethod
-    def prepare_model(model: "nn.Module", config: NEFTuneConfig, adapter_name: str) -> USFOutput:
+    def prepare_model(model: nn.Module, config: NEFTuneConfig, adapter_name: str) -> USFOutput:
         """Prepare a model with `NEFTuneConfig`"""
         for sub_module in model.modules():
             if isinstance(sub_module, torch.nn.Embedding):
@@ -59,7 +59,7 @@ class NEFTune(USFAdapter):
             config=config, state_dict_callback=state_dict_callback, mark_trainable_callback=mark_trainable_callback)
 
     @staticmethod
-    def activate_adapter(module: "torch.nn.Module", adapter_name: str, activate: bool, offload: str = None):
+    def activate_adapter(module: torch.nn.Module, adapter_name: str, activate: bool, offload: str = None):
         for sub_module in module.modules():
             if isinstance(sub_module, torch.nn.Embedding):
                 sub_module.nef_activated = activate

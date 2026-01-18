@@ -44,7 +44,7 @@ class KTOTrainer(RLHFTrainerMixin, USFMixin, HFKTOTrainer):
 
     # Code borrowed from huggingface/trl
     def forward(
-        self, model: "nn.Module", batch: Dict[str, Union[list, torch.LongTensor]]
+        self, model: nn.Module, batch: Dict[str, Union[list, torch.LongTensor]]
     ) -> tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
         KL_logps = self._compute_kl_logps(model, batch)
         model_kwargs, labels = self._get_model_kwargs(batch, 'completion_')

@@ -70,7 +70,7 @@ class InternvlTemplate(Template):
         else:
             return super().forward_context(model, inputs)
 
-    def _post_encode(self, model: "nn.Module", inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_encode(self, model: nn.Module, inputs: Dict[str, Any]) -> Dict[str, Any]:
         embedding = model.get_input_embeddings()
         device = embedding.weight.device
         input_ids = inputs['input_ids']
@@ -315,7 +315,7 @@ class InternvlhfTemplate(Internvl2Template):
             encoded['pixel_values'] = concatenate_list(image_video_patches)
         return encoded
 
-    def _post_encode(self, model: "nn.Module", inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_encode(self, model: nn.Module, inputs: Dict[str, Any]) -> Dict[str, Any]:
         embedding = model.get_input_embeddings()
         device = embedding.weight.device
         input_ids = inputs['input_ids']

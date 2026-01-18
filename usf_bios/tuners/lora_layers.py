@@ -89,7 +89,7 @@ if is_bnb_available():
             self.set_activation(args[1], True)
             super(ActivationMixin, self).__init__(*args, **kwargs)
 
-    def dispatch_bnb_8bit(target: "torch.nn.Module", adapter_name: str, module_key: str, **kwargs):
+    def dispatch_bnb_8bit(target: torch.nn.Module, adapter_name: str, module_key: str, **kwargs):
         new_module = None
 
         if isinstance(target, BaseTunerLayer):
@@ -126,7 +126,7 @@ if is_bnb_4bit_available():
             self.set_activation(args[1], True)
             super(ActivationMixin, self).__init__(*args, **kwargs)
 
-    def dispatch_bnb_4bit(target: "torch.nn.Module", adapter_name: str, module_key: str, **kwargs):
+    def dispatch_bnb_4bit(target: torch.nn.Module, adapter_name: str, module_key: str, **kwargs):
         new_module = None
 
         if isinstance(target, BaseTunerLayer):
@@ -150,9 +150,9 @@ if is_bnb_4bit_available():
 
 
 def dispatch_default(
-    target: "torch.nn.Module",
+    target: torch.nn.Module,
     adapter_name: str,
-    lora_config: "LoraConfig",
+    lora_config: LoraConfig,
     module_key: str,
     **kwargs,
 ) -> Optional[torch.nn.Module]:
@@ -243,7 +243,7 @@ class LoraModel(_LoraModel):
             nn.Module.__init__(self)
             self.model = model
 
-    def _mark_only_adapters_as_trainable(self, model: "nn.Module") -> None:
+    def _mark_only_adapters_as_trainable(self, model: nn.Module) -> None:
         for active_adapter in self.active_adapters:
             bias = self.peft_config[active_adapter].bias
             if bias == 'none':
@@ -261,7 +261,7 @@ class LoraModel(_LoraModel):
                 raise NotImplementedError(f'Requested bias: {bias}, is not implemented.')
 
     def inject_adapter(self,
-                       model: "nn.Module",
+                       model: nn.Module,
                        adapter_name: str,
                        autocast_adapter_dtype: bool = True,
                        low_cpu_mem_usage: bool = False,
@@ -345,7 +345,7 @@ class LoraModel(_LoraModel):
             else:
                 model.modules_to_save.update(set(peft_config.modules_to_save))
 
-    def _convert_dtype(self, target: "nn.Module", lora_dtype: str):
+    def _convert_dtype(self, target: nn.Module, lora_dtype: str):
         if lora_dtype == 'float32':
             torch_dtype = torch.float32
         elif lora_dtype == 'float16':
@@ -639,7 +639,7 @@ class MergedLinear(nn.Linear, LoRALayer):
             return result
 
 
-def mark_lora_as_trainable(model: "nn.Module", adapter_name: str, bias: str = 'none') -> None:
+def mark_lora_as_trainable(model: nn.Module, adapter_name: str, bias: str = 'none') -> None:
     if bias == 'none':
         return
     elif bias == 'all':

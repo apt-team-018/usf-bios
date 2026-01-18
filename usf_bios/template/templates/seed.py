@@ -225,7 +225,7 @@ class SailVLTemplate(Template):
         encoded['pixel_values'] = pixel_values
         return encoded
 
-    def _post_encode(self, model: "nn.Module", inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_encode(self, model: nn.Module, inputs: Dict[str, Any]) -> Dict[str, Any]:
         embedding = model.language_model.get_input_embeddings()
         device = embedding.weight.device
         input_ids = inputs['input_ids']
