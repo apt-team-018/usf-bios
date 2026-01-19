@@ -23,7 +23,8 @@ env:
 
 jobs:
   build-test:
-    runs-on: ubuntu-latest
+    # GitHub Teams - use larger runner for faster builds
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
     
     permissions:
