@@ -5,12 +5,47 @@ Enterprise AI Training & Fine-tuning Platform
 """
 
 import os
-from fastapi import FastAPI
+import json
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from .api import api_router
 from .core.config import settings
 from .core.database import init_db, engine
+
+# Config file path - shared with frontend
+CONFIG_FILE = "/app/web/frontend/public/runtime-config.json"
+_backend_url_detected = False
+
+def write_backend_url(url: str):
+    """Write backend URL to config file for frontend to read"""
+    global _backend_url_detected
+    if _backend_url_detected:
+        return
+    try:
+        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+        config = {"backendUrl": url, "detectedAt": "startup"}
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(config, f)
+        print(f"[Backend] External URL detected: {url}")
+        print(f"[Backend] Config written to: {CONFIG_FILE}")
+        _backend_url_detected = True
+    except Exception as e:
+        print(f"[Backend] Failed to write config: {e}")
+
+class DetectExternalUrlMiddleware(BaseHTTPMiddleware):
+    """Middleware to detect backend's external URL from first request"""
+    async def dispatch(self, request: Request, call_next):
+        global _backend_url_detected
+        if not _backend_url_detected:
+            # Get external URL from request headers
+            host = request.headers.get("host", "")
+            scheme = request.headers.get("x-forwarded-proto", "https")
+            if host:
+                external_url = f"{scheme}://{host}"
+                write_backend_url(external_url)
+        return await call_next(request)
 
 # Create FastAPI application
 app = FastAPI(
@@ -20,6 +55,9 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+# Add URL detection middleware (runs on every request until URL is detected)
+app.add_middleware(DetectExternalUrlMiddleware)
 
 # CORS middleware
 app.add_middleware(

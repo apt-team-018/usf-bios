@@ -14,39 +14,14 @@ export USF_UI_ONLY=1
 export DATABASE_URL="${DATABASE_URL:-sqlite:////app/data/db/usf_bios.db}"
 
 # ============================================================================
-# Auto-detect Backend URL and write to shared config file
-# Frontend will read this config at startup
+# Backend URL Detection
+# Backend detects its own external URL from incoming HTTP requests
+# and writes to /app/web/frontend/public/runtime-config.json
+# Frontend reads this file ONCE at startup and caches forever
+# This works with ANY cloud provider - no env var detection needed
 # ============================================================================
-BACKEND_URL=""
-FRONTEND_URL=""
-
-if [ -n "$RUNPOD_POD_ID" ]; then
-    # RunPod environment detected
-    BACKEND_URL="https://${RUNPOD_POD_ID}-8000.proxy.runpod.net"
-    FRONTEND_URL="https://${RUNPOD_POD_ID}-3000.proxy.runpod.net"
-    echo "[Auto-Config] RunPod detected"
-elif [ -n "$VAST_CONTAINERLABEL" ]; then
-    # Vast.ai environment detected
-    BACKEND_URL="https://${VAST_CONTAINERLABEL}-8000.direct.vast.ai"
-    FRONTEND_URL="https://${VAST_CONTAINERLABEL}-3000.direct.vast.ai"
-    echo "[Auto-Config] Vast.ai detected"
-elif [ -n "$LAMBDA_INSTANCE_ID" ]; then
-    # Lambda Labs environment
-    BACKEND_URL="http://localhost:8000"
-    FRONTEND_URL="http://localhost:3000"
-    echo "[Auto-Config] Lambda Labs detected"
-else
-    # Default: localhost (for local development)
-    BACKEND_URL="${BACKEND_URL:-http://localhost:8000}"
-    FRONTEND_URL="${FRONTEND_URL:-http://localhost:3000}"
-    echo "[Auto-Config] Using localhost"
-fi
-
-# Write config to shared file that frontend can access
-CONFIG_FILE="/app/web/frontend/public/runtime-config.json"
-echo "{\"backendUrl\": \"${BACKEND_URL}\", \"frontendUrl\": \"${FRONTEND_URL}\", \"timestamp\": \"$(date -Iseconds)\"}" > "$CONFIG_FILE"
-echo "[Auto-Config] Backend URL: $BACKEND_URL"
-echo "[Auto-Config] Config written to: $CONFIG_FILE"
+echo "[Config] Backend will detect external URL from first HTTP request"
+echo "[Config] Frontend will read /runtime-config.json once at startup"
 
 # Create required directories
 mkdir -p /app/data/db /app/data/uploads /app/data/datasets \
