@@ -1082,76 +1082,98 @@ export default function Home() {
                   )}
                   
                   <div className="grid gap-4">
-                    {/* Model Source - Only show if multiple sources are supported */}
                     {(() => {
                       const supportedSources = (systemCapabilities.supported_model_sources || systemCapabilities.supported_sources || ['local']);
                       const hasMultipleSources = supportedSources.length > 1;
+                      const isLocked = !!(systemCapabilities.has_model_restriction && systemCapabilities.supported_model);
                       
-                      return hasMultipleSources ? (
-                        <div>
-                          <label className="block text-sm font-medium text-slate-700 mb-2">
-                            Model Source
-                            {systemCapabilities.has_model_restriction && systemCapabilities.supported_model && <Lock className="w-3 h-3 inline ml-1 text-slate-400" />}
-                          </label>
-                          <div className="grid grid-cols-3 gap-2">
-                            {supportedSources.map((source) => {
-                              const isLocked = !!(systemCapabilities.has_model_restriction && systemCapabilities.supported_model)
-                              return (
-                              <button key={source} 
-                                onClick={() => !isLocked && setConfig({ ...config, model_source: source as any })}
-                                disabled={isLocked}
-                                className={`p-3 rounded-lg border-2 text-center transition-all ${
-                                  config.model_source === source ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-600 hover:border-slate-300'
-                                } ${isLocked ? 'opacity-60 cursor-not-allowed' : ''}`}>
-                                <span className="capitalize font-medium text-sm">{source}</span>
-                              </button>
-                            )})}
+                      // Dynamic labels based on selected source
+                      const getLabel = () => {
+                        if (config.model_source === 'local') return 'Local Model Path';
+                        if (config.model_source === 'huggingface') return 'HuggingFace Model ID';
+                        if (config.model_source === 'modelscope') return 'ModelScope Model ID';
+                        return 'Model Path';
+                      };
+                      
+                      const getPlaceholder = () => {
+                        if (config.model_source === 'local') return '/path/to/model (e.g., /root/models/usf-omega)';
+                        if (config.model_source === 'huggingface') return 'organization/model-name (e.g., meta-llama/Llama-2-7b)';
+                        if (config.model_source === 'modelscope') return 'organization/model-name';
+                        return 'Enter model path or ID';
+                      };
+                      
+                      const getHelpText = () => {
+                        if (config.model_source === 'local') return 'Enter the full path to your model directory on the server';
+                        if (config.model_source === 'huggingface') return 'Enter the HuggingFace model ID (e.g., meta-llama/Llama-2-7b)';
+                        if (config.model_source === 'modelscope') return 'Enter the ModelScope model ID';
+                        return '';
+                      };
+                      
+                      return (
+                        <>
+                          {/* Model Source Selector - Only show if multiple sources supported */}
+                          {hasMultipleSources && (
+                            <div>
+                              <label className="block text-sm font-medium text-slate-700 mb-2">
+                                Model Source
+                                {isLocked && <Lock className="w-3 h-3 inline ml-1 text-slate-400" />}
+                              </label>
+                              <div className={`grid gap-2`} style={{ gridTemplateColumns: `repeat(${supportedSources.length}, 1fr)` }}>
+                                {supportedSources.map((source) => (
+                                  <button key={source} 
+                                    onClick={() => !isLocked && setConfig({ ...config, model_source: source as any })}
+                                    disabled={isLocked}
+                                    className={`p-3 rounded-lg border-2 text-center transition-all ${
+                                      config.model_source === source ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-600 hover:border-slate-300'
+                                    } ${isLocked ? 'opacity-60 cursor-not-allowed' : ''}`}>
+                                    <span className="capitalize font-medium text-sm">{source}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          
+                          {/* Model Path/ID Input */}
+                          <div>
+                            <label className="block text-sm font-medium text-slate-700 mb-2">
+                              {getLabel()}
+                              {isLocked && <Lock className="w-3 h-3 inline ml-1 text-slate-400" />}
+                            </label>
+                            <input type="text" value={config.model_path}
+                              onChange={(e) => !isLocked && setConfig({ ...config, model_path: e.target.value })}
+                              disabled={isLocked}
+                              placeholder={getPlaceholder()}
+                              className={`w-full px-4 py-3 border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${
+                                isLocked ? 'bg-slate-100 cursor-not-allowed' : ''
+                              }`}
+                            />
+                            {!isLocked && (
+                              <p className="text-xs text-slate-500 mt-1">{getHelpText()}</p>
+                            )}
+                            {isLocked && (
+                              <p className="text-xs text-slate-500 mt-1">
+                                Supported model: {systemCapabilities.supported_model}
+                              </p>
+                            )}
                           </div>
-                        </div>
-                      ) : null;
+                          
+                          {/* Info box for local models */}
+                          {!isLocked && config.model_source === 'local' && (
+                            <div className="bg-slate-50 rounded-lg p-4 border border-slate-200">
+                              <p className="text-sm text-slate-700">
+                                <strong>Local Model:</strong> Enter the path to your model directory on the server. 
+                                This should be a directory containing the model files (config.json, model weights, etc.).
+                              </p>
+                              <p className="text-xs text-slate-500 mt-2">Example paths:</p>
+                              <ul className="text-xs text-slate-500 mt-1 space-y-1">
+                                <li>• <code className="bg-slate-200 px-1 rounded">/root/models/usf-omega-40b</code></li>
+                                <li>• <code className="bg-slate-200 px-1 rounded">/mnt/storage/models/llama-7b</code></li>
+                              </ul>
+                            </div>
+                          )}
+                        </>
+                      );
                     })()}
-                    
-                    <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
-                        Local Model Path
-                        {systemCapabilities.has_model_restriction && systemCapabilities.supported_model && <Lock className="w-3 h-3 inline ml-1 text-slate-400" />}
-                      </label>
-                      <input type="text" value={config.model_path}
-                        onChange={(e) => !(systemCapabilities.has_model_restriction && systemCapabilities.supported_model) && setConfig({ ...config, model_path: e.target.value })}
-                        disabled={!!(systemCapabilities.has_model_restriction && systemCapabilities.supported_model)}
-                        placeholder="/path/to/model (e.g., /mnt/storage/models/usf-omega)"
-                        className={`w-full px-4 py-3 border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${
-                          (systemCapabilities.has_model_restriction && systemCapabilities.supported_model) ? 'bg-slate-100 cursor-not-allowed' : ''
-                        }`}
-                      />
-                      {!(systemCapabilities.has_model_restriction && systemCapabilities.supported_model) && (
-                        <p className="text-xs text-slate-500 mt-1">
-                          Enter the full path to your model directory on the server
-                        </p>
-                      )}
-                      {systemCapabilities.has_model_restriction && systemCapabilities.supported_model && (
-                        <p className="text-xs text-slate-500 mt-1">
-                          Supported model: {systemCapabilities.supported_model}
-                        </p>
-                      )}
-                    </div>
-                    
-                    {/* Local Model Info */}
-                    {!systemCapabilities.has_model_restriction && (
-                      <div className="bg-slate-50 rounded-lg p-4 border border-slate-200">
-                        <p className="text-sm text-slate-700">
-                          <strong>Local Model:</strong> Enter the path to your model directory on the server. 
-                          This should be a directory containing the model files (config.json, model weights, etc.).
-                        </p>
-                        <p className="text-xs text-slate-500 mt-2">
-                          Example paths:
-                        </p>
-                        <ul className="text-xs text-slate-500 mt-1 space-y-1">
-                          <li>• <code className="bg-slate-200 px-1 rounded">/root/models/usf-omega-40b</code></li>
-                          <li>• <code className="bg-slate-200 px-1 rounded">/mnt/storage/models/llama-7b</code></li>
-                        </ul>
-                      </div>
-                    )}
                   </div>
                 </div>
               )}
