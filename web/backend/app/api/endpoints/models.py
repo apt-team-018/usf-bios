@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from ...models.schemas import ModelSource, ModelValidation
 from ...core.database import get_db
+from ...core.capabilities import get_validator
 from ...services.model_registry_service import ModelRegistryService
 
 router = APIRouter()
@@ -20,8 +21,8 @@ router = APIRouter()
 class ModelRegistration(BaseModel):
     """Request model for registering a model"""
     name: str
-    source: Literal["local", "huggingface", "modelscope"] = "local"
-    source_id: str = "/path/to/local/model"  # Local path or model ID
+    source: str = "local"  # Model source
+    source_id: str  # Local path to model directory
     description: Optional[str] = None
     model_type: Optional[str] = None  # llm, vlm, etc.
     model_size: Optional[str] = None  # 7B, 14B, 40B, etc.
@@ -59,30 +60,70 @@ async def get_supported_models():
 
 @router.post("/validate", response_model=ModelValidation)
 async def validate_model(
-    model_path: str = Query("/path/to/local/model", description="Local model path"),
+    model_path: str = Query(..., description="Path to model directory"),
     source: ModelSource = Query(ModelSource.LOCAL, description="Model source")
 ):
     """Validate if a model exists and is accessible"""
     try:
+        # First validate source is allowed
+        validator = get_validator()
+        source_str = source.value if hasattr(source, 'value') else str(source)
+        is_valid, msg = validator.validate_model_path(model_path, source_str)
+        if not is_valid:
+            return ModelValidation(valid=False, error=msg)
+        
         if source == ModelSource.LOCAL:
             path = Path(model_path)
+            
+            # Check if path exists
             if not path.exists():
-                return ModelValidation(valid=False, error="Local path does not exist")
+                return ModelValidation(valid=False, error="Model path does not exist. Please verify the path is correct.")
             
-            config_path = path / "config.json"
-            if not config_path.exists():
-                return ModelValidation(valid=False, error="No config.json found in model directory")
+            # Check read permissions
+            if not os.access(model_path, os.R_OK):
+                return ModelValidation(valid=False, error="Cannot access model path. Please check read permissions.")
             
-            # Try to read config
-            import json
-            with open(config_path) as f:
-                config = json.load(f)
-            
-            model_type = config.get("model_type", "unknown")
-            return ModelValidation(valid=True, model_type=model_type)
+            # For directories, check for model files
+            if path.is_dir():
+                config_path = path / "config.json"
+                if config_path.exists():
+                    # Try to read config and get architecture
+                    import json
+                    try:
+                        with open(config_path) as f:
+                            config = json.load(f)
+                        
+                        model_type = config.get("model_type", "unknown")
+                        architectures = config.get("architectures", [])
+                        
+                        # Validate architecture if available
+                        if architectures and len(architectures) > 0:
+                            arch_valid, arch_msg = validator.validate_architecture(architectures[0])
+                            if not arch_valid:
+                                return ModelValidation(valid=False, error=arch_msg)
+                        
+                        return ModelValidation(valid=True, model_type=model_type)
+                    except (json.JSONDecodeError, IOError):
+                        return ModelValidation(valid=False, error="Could not read model configuration.")
+                else:
+                    # Check for model files without config.json
+                    model_files = list(path.glob("*.safetensors")) + list(path.glob("*.bin"))
+                    if model_files:
+                        return ModelValidation(valid=True, model_type="unknown")
+                    return ModelValidation(valid=False, error="No model files found in directory.")
+            else:
+                # Single file - check extension
+                if path.suffix.lower() in [".safetensors", ".bin", ".pt", ".pth", ".gguf"]:
+                    return ModelValidation(valid=True, model_type="file")
+                return ModelValidation(valid=False, error="Unsupported model file format.")
         
         else:
-            # For HF/MS models, we assume they're valid if format is correct
+            # For remote models - validate source is allowed
+            source_key = "huggingface" if source == ModelSource.HUGGINGFACE else "modelscope"
+            is_source_valid, source_msg = validator.validate_model_path(model_path, source_key)
+            if not is_source_valid:
+                return ModelValidation(valid=False, error=source_msg)
+            
             if "/" not in model_path:
                 return ModelValidation(valid=False, error="Invalid model ID format. Use 'organization/model-name'")
             
@@ -96,10 +137,48 @@ async def validate_model(
 # Model Registry Endpoints
 # ============================================================================
 
+# Valid source values (internal - not exposed in schema)
+_VALID_MODEL_SOURCES = {"local", "huggingface", "modelscope"}
+
+
 @router.post("/registry/register")
 async def register_model(registration: ModelRegistration, db: Session = Depends(get_db)):
     """Register a model in the global registry"""
     try:
+        # Validate source value is valid
+        if registration.source not in _VALID_MODEL_SOURCES:
+            raise HTTPException(status_code=400, detail="Invalid source type")
+        
+        # Validate source is allowed by system configuration
+        validator = get_validator()
+        is_valid, msg = validator.validate_model_path(registration.source_id, registration.source)
+        if not is_valid:
+            raise HTTPException(status_code=403, detail=msg)
+        
+        # For local models, validate path exists and is accessible
+        if registration.source == "local":
+            path = Path(registration.source_id)
+            if not path.exists():
+                raise HTTPException(status_code=400, detail="Model path does not exist. Please verify the path is correct.")
+            if not os.access(registration.source_id, os.R_OK):
+                raise HTTPException(status_code=400, detail="Cannot access model path. Please check read permissions.")
+            
+            # Validate architecture if config.json exists
+            if path.is_dir():
+                config_path = path / "config.json"
+                if config_path.exists():
+                    try:
+                        import json
+                        with open(config_path) as f:
+                            config = json.load(f)
+                        architectures = config.get("architectures", [])
+                        if architectures and len(architectures) > 0:
+                            arch_valid, arch_msg = validator.validate_architecture(architectures[0])
+                            if not arch_valid:
+                                raise HTTPException(status_code=403, detail=arch_msg)
+                    except (json.JSONDecodeError, IOError):
+                        pass  # Continue if config can't be read
+        
         service = ModelRegistryService(db)
         result = service.register_model(
             name=registration.name,
@@ -110,6 +189,8 @@ async def register_model(registration: ModelRegistration, db: Session = Depends(
             model_size=registration.model_size
         )
         return {"success": True, "model": result}
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -118,7 +199,7 @@ async def register_model(registration: ModelRegistration, db: Session = Depends(
 
 @router.get("/registry/list")
 async def list_registered_models(
-    source: Optional[str] = Query(None, description="Filter by source (huggingface, modelscope, local)"),
+    source: Optional[str] = Query(None, description="Filter by source"),
     db: Session = Depends(get_db)
 ):
     """List all registered models"""

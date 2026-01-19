@@ -30,7 +30,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     """Chat inference request"""
-    model_path: str = Field(..., description="Model path (HF ID, local path, or checkpoint)")
+    model_path: str = Field(..., description="Model path (local path or checkpoint)")
     messages: List[ChatMessage] = Field(..., description="Chat messages")
     adapter_path: Optional[str] = Field(default=None, description="LoRA adapter path (for fine-tuned models)")
     max_new_tokens: int = Field(default=512, ge=1, le=4096)

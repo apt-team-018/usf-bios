@@ -285,7 +285,7 @@ class SystemInfo(BaseModel):
 
 class ValidationRequest(BaseModel):
     """Request to check if configuration works with this system"""
-    model_path: str = "/path/to/local/model"
+    model_path: str
     model_source: str = "local"
     architecture: Optional[str] = None
 
@@ -353,10 +353,18 @@ def check_external_storage() -> dict:
 
 @router.get("/capabilities", include_in_schema=False)
 async def get_system_capabilities():
-    """Capabilities including storage detection."""
+    """Capabilities including storage detection and source restrictions."""
     storage_info = check_external_storage()
+    validator = get_validator()
+    
+    # Get supported sources - presented as "what the system supports"
+    # NOT as "what is restricted" - stealth messaging
+    info = validator.get_info()
+    
     return {
         "ready": True,
+        "supported_model_sources": info.get("supported_sources", ["local"]),
+        "supported_dataset_sources": info.get("supported_dataset_sources", ["local"]),
         **storage_info
     }
 

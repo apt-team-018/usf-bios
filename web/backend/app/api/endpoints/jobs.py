@@ -41,6 +41,21 @@ async def create_job(config: TrainingConfig):
         if not is_supported:
             raise HTTPException(status_code=403, detail=message)
         
+        # Validate dataset paths
+        # Check if dataset paths are supported by this system configuration
+        if hasattr(config, 'dataset_path') and config.dataset_path:
+            dataset_paths = config.dataset_path.split(',') if isinstance(config.dataset_path, str) else config.dataset_path
+            for ds_path in dataset_paths:
+                ds_path = ds_path.strip()
+                if ds_path.upper().startswith('HF::'):
+                    is_valid, ds_msg = validator.validate_dataset_source('huggingface')
+                    if not is_valid:
+                        raise HTTPException(status_code=403, detail=ds_msg)
+                elif ds_path.upper().startswith('MS::'):
+                    is_valid, ds_msg = validator.validate_dataset_source('modelscope')
+                    if not is_valid:
+                        raise HTTPException(status_code=403, detail=ds_msg)
+        
         # Architecture validation happens when model is loaded
         # This is 100% reliable as architecture is always in config.json
         

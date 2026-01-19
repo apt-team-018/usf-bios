@@ -1,7 +1,4 @@
-# USF BIOS - Secure Production Docker Image
-# - Compiles Python to native .so binaries (Cython)
-# - Industry-standard code protection (cannot be reverse engineered)
-# - Disables CLI access - WebUI only
+# USF BIOS - Production Docker Image
 # Copyright (c) US Inc. All rights reserved.
 
 # ============================================================================
@@ -47,12 +44,12 @@ RUN find /compile -name "*.pyc" -delete && \
     rm -f /compile/compile_to_so.py
 
 # ============================================================================
-# Stage 3: Production Image (Secure)
+# Stage 3: Production Image
 # ============================================================================
 FROM python:3.11-slim
 
 LABEL maintainer="US Inc <support@us.inc>"
-LABEL description="USF BIOS - Enterprise AI Fine-tuning Platform (Secure)"
+LABEL description="USF BIOS - Enterprise AI Fine-tuning Platform"
 LABEL version="1.0.0"
 
 # Security: Create non-root user
@@ -152,12 +149,12 @@ RUN mkdir -p /app/data/uploads \
 # Switch to non-root user
 USER usf
 
-# Expose ports
-EXPOSE 3000 8000
+# Expose frontend port only - backend is internal
+EXPOSE 3000
 
-# Health check
+# Health check via frontend
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:3000 || exit 1
 
-# Entry point - WebUI only
+# Entry point
 ENTRYPOINT ["/app/entrypoint.sh"]

@@ -29,10 +29,6 @@ echo "=============================================="
 echo "  USF BIOS - AI Fine-tuning Platform"
 echo "  Copyright (c) US Inc. All rights reserved."
 echo "=============================================="
-echo ""
-echo "  Mode: WebUI Only (Secure Binary)"
-echo "  Code Protection: Native .so binaries"
-echo ""
 
 # Function to wait for service
 wait_for_service() {
@@ -55,11 +51,11 @@ wait_for_service() {
     return 1
 }
 
-# Start backend API
+# Start backend API (internal only - bound to 127.0.0.1)
 echo "[1/2] Starting Backend API server..."
 cd /app/web/backend
 python -m uvicorn app.main:app \
-    --host 0.0.0.0 \
+    --host 127.0.0.1 \
     --port 8000 \
     --workers 1 \
     --log-level warning \
@@ -88,12 +84,7 @@ echo "=============================================="
 echo "  Services Started Successfully!"
 echo "=============================================="
 echo ""
-echo "  Architecture: Next.js API Proxy"
-echo "  Browser → /api/* → localhost:8000 (internal)"
-echo ""
-echo "  Frontend: http://0.0.0.0:3000 (exposed)"
-echo "  Backend:  localhost:8000 (internal only)"
-echo "  Health:   http://0.0.0.0:8000/health"
+echo "  Access: http://0.0.0.0:3000"
 echo ""
 echo "=============================================="
 

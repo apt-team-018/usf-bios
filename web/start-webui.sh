@@ -16,10 +16,10 @@ if [ ! -f "/app/backend/app/models/db_models.py" ]; then
 fi
 echo "  ✓ Backend files verified"
 
-# Start backend API
+# Start backend API (internal only - bound to 127.0.0.1)
 echo "Starting backend..."
 cd /app/backend
-python -m uvicorn main:app --host 0.0.0.0 --port 8000 &
+python -m uvicorn main:app --host 127.0.0.1 --port 8000 &
 BACKEND_PID=$!
 
 # Wait for backend to be ready
@@ -46,9 +46,7 @@ echo "=============================================="
 echo "  Services Started Successfully!"
 echo "=============================================="
 echo ""
-echo "  Frontend UI:  http://localhost:3000"
-echo "  Backend API:  http://localhost:8000"
-echo "  API Docs:     http://localhost:8000/docs"
+echo "  Access: http://localhost:3000"
 echo ""
 echo "=============================================="
 

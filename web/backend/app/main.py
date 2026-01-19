@@ -6,13 +6,41 @@ Enterprise AI Training & Fine-tuning Platform
 
 import os
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from .api import api_router
 from .core.config import settings
 from .core.database import init_db, engine
+from .core.capabilities import is_system_expired
 
-# No middleware needed - /config endpoint returns URL directly from request
+# System expiration middleware - blocks ALL APIs when expired
+class SystemExpirationMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware to check system expiration status.
+    If system is expired, ALL API requests are blocked except health check.
+    This cannot be bypassed - middleware runs before any route handler.
+    """
+    async def dispatch(self, request: Request, call_next):
+        # Always allow health check for container orchestration
+        if request.url.path == "/health":
+            return await call_next(request)
+        
+        # Check system expiration
+        expired, message = is_system_expired()
+        if expired:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "system_expired",
+                    "message": "System requires upgrade. Please contact support.",
+                    "blocked": True
+                }
+            )
+        
+        return await call_next(request)
+
 
 # Create FastAPI application
 app = FastAPI(
@@ -31,6 +59,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# System expiration middleware - MUST be after CORS to handle preflight
+app.add_middleware(SystemExpirationMiddleware)
 
 # Include API routes
 app.include_router(api_router, prefix="/api")

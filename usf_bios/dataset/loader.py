@@ -11,6 +11,7 @@ from modelscope.hub.utils.utils import get_cache_dir
 
 from usf_bios.hub import get_hub
 from usf_bios.utils import get_logger, get_seed, safe_ddp_context, use_hf_hub
+from usf_bios.system_guard import validate_dataset_source, DatasetSourceError
 from .dataset_meta import DATASET_TYPE, BaseDatasetLoader
 from .dataset_syntax import DatasetSyntax
 from .preprocessor import RowPreprocessor
@@ -76,6 +77,8 @@ class DatasetLoader(BaseDatasetLoader):
             load_context = nullcontext
             use_hf = True
             dataset_str = f'Use local folder, dataset_dir: {dataset_id}'
+            # Local directory - validate as local source
+            validate_dataset_source('local', dataset_id)
             # The dataset downloaded from modelscope will have an additional dataset_infos.json file.
             with safe_ddp_context('dataset_infos_rename'):
                 dataset_infos_path = os.path.join(dataset_id, 'dataset_infos.json')
@@ -89,8 +92,12 @@ class DatasetLoader(BaseDatasetLoader):
             load_context = partial(safe_ddp_context, hash_id=dataset_id, use_barrier=True)
             dataset_str_f = 'Downloading the dataset from {hub}, dataset_id: {dataset_id}'
             if use_hf:
+                # Validate HuggingFace source before attempting to load
+                validate_dataset_source('huggingface', dataset_id)
                 dataset_str = dataset_str_f.format(hub='HuggingFace', dataset_id=dataset_id)
             else:
+                # Validate ModelScope source before attempting to load
+                validate_dataset_source('modelscope', dataset_id)
                 dataset_str = dataset_str_f.format(hub='US Inc', dataset_id=dataset_id)
         logger.info_debug(dataset_str)
         hub = get_hub(use_hf)

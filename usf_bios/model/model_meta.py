@@ -219,10 +219,31 @@ def _get_model_info(model_dir: str, model_type: Optional[str], quantization_conf
     is_moe_model = HfConfigFactory.is_moe_model(config)
     is_multimodal = HfConfigFactory.is_multimodal(config)
 
+    # Get architectures for validation - this is the 100% reliable point
+    architectures = HfConfigFactory.get_config_attr(config, 'architectures')
+    
+    # CORE VALIDATION: Validate architecture at native load time
+    # This cannot be bypassed - architecture is always known at this point
+    try:
+        from usf_bios.system_guard import validate_architecture_at_load, ArchitectureCompatibilityError
+        
+        if architectures and isinstance(architectures, list) and len(architectures) > 0:
+            # Normal case: architecture detected, validate it
+            validate_architecture_at_load(architectures[0], model_dir)
+        else:
+            # No architecture detected - this is suspicious
+            # Block by default for security (unknown models not allowed)
+            from usf_bios.system_guard import _check_valid
+            if not _check_valid():
+                raise ArchitectureCompatibilityError(
+                    "Unable to detect model architecture. This system only supports models with valid configuration files."
+                )
+    except ImportError:
+        pass  # system_guard not available (shouldn't happen in normal use)
+
     if model_type is None:
         model_type = _read_args_json_model_type(model_dir)
     if model_type is None:
-        architectures = HfConfigFactory.get_config_attr(config, 'architectures')
         model_types = get_matched_model_types(architectures)
         if len(model_types) > 1:
             raise ValueError(f'Failed to automatically match `model_type` for `{model_dir}`. '

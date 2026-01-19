@@ -2,7 +2,7 @@
 # NO USF BIOS training code, NO Cython compilation
 # Purpose: Quick test build to verify web UI works
 # Build: docker build -f web/Dockerfile.webui-test -t usf-bios-webui-test .
-# Run: docker run -p 3000:3000 -p 8000:8000 usf-bios-webui-test
+# Run: docker run -p 3000:3000 usf-bios-webui-test
 
 # ============================================================================
 # Stage 1: Frontend Builder
@@ -83,12 +83,12 @@ RUN mkdir -p /app/data/datasets /app/data/output /app/data/checkpoints \
 COPY web/start-webui.sh /app/start.sh
 RUN chmod +x /app/start.sh
 
-# Expose ports
-EXPOSE 3000 8000
+# Expose frontend port only - backend is internal
+EXPOSE 3000
 
-# Health check
+# Health check via frontend
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:3000 || exit 1
 
 # Default command
 CMD ["/app/start.sh"]

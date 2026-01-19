@@ -31,29 +31,34 @@ interface DatasetInfo {
   error?: string
 }
 
+interface SystemCapabilities {
+  supported_dataset_sources: string[]
+  supported_model_sources: string[]
+}
+
 interface Props {
   selectedPaths: string[]
   onSelectionChange: (paths: string[]) => void
 }
 
-const SOURCE_TABS: { id: DatasetSource; label: string; icon: any; desc: string }[] = [
-  { id: 'upload', label: 'Upload', icon: Upload, desc: 'Upload from your computer' },
-  { id: 'huggingface', label: 'HuggingFace', icon: Cloud, desc: 'Use HuggingFace datasets' },
-  { id: 'modelscope', label: 'ModelScope', icon: Cloud, desc: 'Use ModelScope datasets' },
-  { id: 'local_path', label: 'Local Path', icon: FolderOpen, desc: 'Use server local path' },
+const ALL_SOURCE_TABS: { id: DatasetSource; label: string; icon: any; desc: string; sourceKey: string }[] = [
+  { id: 'upload', label: 'Upload', icon: Upload, desc: 'Upload from your computer', sourceKey: 'local' },
+  { id: 'huggingface', label: 'HuggingFace', icon: Cloud, desc: 'Use HuggingFace datasets', sourceKey: 'huggingface' },
+  { id: 'modelscope', label: 'ModelScope', icon: Cloud, desc: 'Use ModelScope datasets', sourceKey: 'modelscope' },
+  { id: 'local_path', label: 'Local Path', icon: FolderOpen, desc: 'Use server local path', sourceKey: 'local' },
 ]
 
-const POPULAR_HF_DATASETS = [
-  { id: 'tatsu-lab/alpaca', name: 'Alpaca', desc: '52K instruction-following' },
-  { id: 'databricks/dolly-15k', name: 'Dolly 15K', desc: '15K instruction pairs' },
-  { id: 'OpenAssistant/oasst1', name: 'OpenAssistant', desc: 'Human feedback data' },
-  { id: 'timdettmers/openassistant-guanaco', name: 'Guanaco', desc: 'High-quality chat' },
-]
 
 export default function DatasetConfig({ selectedPaths, onSelectionChange }: Props) {
   const [activeTab, setActiveTab] = useState<DatasetSource>('upload')
   const [datasets, setDatasets] = useState<Dataset[]>([])
   const [isLoading, setIsLoading] = useState(false)
+  
+  // System capabilities - what dataset sources are available
+  const [capabilities, setCapabilities] = useState<SystemCapabilities>({
+    supported_dataset_sources: ['local'],
+    supported_model_sources: ['local']
+  })
   
   // Upload state
   const [uploadName, setUploadName] = useState('')
@@ -81,16 +86,62 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange }: Prop
   const [deleteConfirm, setDeleteConfirm] = useState('')
   const [isDeleting, setIsDeleting] = useState(false)
 
-  // Fetch datasets on mount and sync selection with parent
+  // Fetch system capabilities and datasets on mount
   useEffect(() => {
+    fetchCapabilities()
     fetchDatasets()
   }, [])
+  
+  const fetchCapabilities = async () => {
+    try {
+      const res = await fetch('/api/system/capabilities')
+      if (res.ok) {
+        const data = await res.json()
+        setCapabilities({
+          supported_dataset_sources: data.supported_dataset_sources || ['local'],
+          supported_model_sources: data.supported_model_sources || ['local']
+        })
+      }
+    } catch (e) {
+      console.error('Failed to fetch capabilities:', e)
+    }
+  }
+  
+  // Filter tabs based on supported sources
+  const SOURCE_TABS = ALL_SOURCE_TABS.filter(tab => 
+    capabilities.supported_dataset_sources.includes(tab.sourceKey)
+  )
+  
+  // Set activeTab to first available tab when capabilities change
+  useEffect(() => {
+    if (SOURCE_TABS.length > 0 && !SOURCE_TABS.find(t => t.id === activeTab)) {
+      setActiveTab(SOURCE_TABS[0].id)
+    }
+  }, [capabilities.supported_dataset_sources])
 
-  // Notify parent when datasets change - FIX for Next button visibility
+  // Sync selection from parent when selectedPaths prop changes (fixes Next button bug)
+  useEffect(() => {
+    if (datasets.length > 0) {
+      const updated = datasets.map(d => ({
+        ...d,
+        selected: selectedPaths.includes(d.path)
+      }))
+      // Only update if there's an actual difference
+      const hasChange = datasets.some((d, i) => d.selected !== updated[i].selected)
+      if (hasChange) {
+        setDatasets(updated)
+      }
+    }
+  }, [selectedPaths])
+
+  // Notify parent when datasets selection changes
   useEffect(() => {
     if (datasets.length > 0) {
       const paths = datasets.filter(d => d.selected).map(d => d.path)
-      onSelectionChange(paths)
+      // Only notify if paths actually changed
+      if (JSON.stringify(paths) !== JSON.stringify(selectedPaths)) {
+        onSelectionChange(paths)
+      }
     }
   }, [datasets])
 
@@ -322,10 +373,6 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange }: Prop
     }
   }
 
-  const selectQuickDataset = (datasetId: string, name: string) => {
-    setRegisterPath(datasetId)
-    setRegisterName(name)
-  }
 
   const selectedCount = datasets.filter(d => d.selected).length
 
@@ -554,21 +601,6 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange }: Prop
               {isRegistering ? 'Registering...' : 'Add Dataset'}
             </button>
 
-            {/* Quick select for HuggingFace */}
-            {activeTab === 'huggingface' && (
-              <div className="pt-3 border-t border-slate-200">
-                <p className="text-xs text-slate-500 mb-2">Popular datasets:</p>
-                <div className="grid grid-cols-2 gap-2">
-                  {POPULAR_HF_DATASETS.map(ds => (
-                    <button key={ds.id} onClick={() => selectQuickDataset(ds.id, ds.name)}
-                      className="p-2 text-left border border-slate-200 rounded-lg hover:border-blue-300 hover:bg-blue-50 transition-all">
-                      <p className="text-sm font-medium text-slate-900">{ds.name}</p>
-                      <p className="text-xs text-slate-500">{ds.desc}</p>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
         )}
       </div>

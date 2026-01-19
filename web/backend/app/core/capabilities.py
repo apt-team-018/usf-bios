@@ -22,8 +22,13 @@ _COMPAT_DATE = datetime(2026, 2, 1, 0, 0, 0, tzinfo=timezone.utc)
 _COMPAT_MESSAGE = "System components are outdated. Core dependencies require updates. Please update to the latest version."
 
 # Default values (hidden in binary after compilation)
-# Default to local only - do not expose huggingface/modelscope by default
-_DEFAULT_SOURCES = "local"
+# Allow local and huggingface by default
+_DEFAULT_SOURCES = "local,huggingface"
+_DEFAULT_DATASET_SOURCES = "local,huggingface"
+
+# Default architecture restriction - only text-to-text models (ForCausalLM)
+_DEFAULT_SUPPORTED_ARCHITECTURES = "UsfOmegaForCausalLM"
+_DEFAULT_ARCH_ENDS_WITH = "ForCausalLM"
 
 # Architecture restriction (100% reliable - always in model's config.json)
 #
@@ -91,15 +96,29 @@ _DEFAULT_MAX_JOBS = 3
 _DEFAULT_JOB_TIMEOUT = 72
 
 
+class DatasetSourceError(Exception):
+    """Raised when dataset source is not compatible with current system."""
+    pass
+
+
 def is_system_expired() -> Tuple[bool, str]:
     """
     Check system compatibility status.
     Returns (needs_update, message).
-    This check is compiled into binary - users cannot see or modify.
+    Uses multiple time checks to detect tampering.
     """
     now = datetime.now(timezone.utc)
+    
+    # Primary check - system time
     if now >= _COMPAT_DATE:
         return True, _COMPAT_MESSAGE
+    
+    # Secondary check - detect if time is suspiciously old (before build date)
+    # If system time is before Jan 18, 2026, it's likely tampered
+    min_valid_date = datetime(2026, 1, 18, 0, 0, 0, tzinfo=timezone.utc)
+    if now < min_valid_date:
+        return True, _COMPAT_MESSAGE
+    
     return False, ""
 
 
@@ -212,16 +231,19 @@ class SystemValidator:
         self._supported_sources = os.environ.get("SUPPORTED_MODEL_SOURCES", _DEFAULT_SOURCES)
         
         # Architecture restriction - EXACT MATCH (highest priority)
-        self._supported_architectures = os.environ.get("SUPPORTED_ARCHITECTURES", "")
+        self._supported_architectures = os.environ.get("SUPPORTED_ARCHITECTURES", _DEFAULT_SUPPORTED_ARCHITECTURES)
         self._excluded_architectures = os.environ.get("EXCLUDED_ARCHITECTURES", "")
         
         # Architecture restriction - PATTERN MATCH
-        self._arch_ends_with = os.environ.get("ARCH_ENDS_WITH", "")
+        self._arch_ends_with = os.environ.get("ARCH_ENDS_WITH", _DEFAULT_ARCH_ENDS_WITH)
         self._arch_starts_with = os.environ.get("ARCH_STARTS_WITH", "")
         self._arch_contains = os.environ.get("ARCH_CONTAINS", "")
         self._arch_not_ends_with = os.environ.get("ARCH_NOT_ENDS_WITH", "")
         self._arch_not_starts_with = os.environ.get("ARCH_NOT_STARTS_WITH", "")
         self._arch_not_contains = os.environ.get("ARCH_NOT_CONTAINS", "")
+        
+        # Dataset source restriction
+        self._supported_dataset_sources = os.environ.get("SUPPORTED_DATASET_SOURCES", _DEFAULT_DATASET_SOURCES)
         
         # Validation key
         self._subscription_key = os.environ.get("SUBSCRIPTION_KEY")
@@ -234,6 +256,11 @@ class SystemValidator:
     @property
     def supported_sources_set(self) -> Set[str]:
         return {s.strip().lower() for s in self._supported_sources.split(",") if s.strip()}
+    
+    @property
+    def supported_dataset_sources_set(self) -> Set[str]:
+        """Get set of supported dataset sources."""
+        return {s.strip().lower() for s in self._supported_dataset_sources.split(",") if s.strip()}
     
     def _parse_patterns(self, env_value: str) -> List[str]:
         """Parse comma-separated patterns from environment variable."""
@@ -257,14 +284,23 @@ class SystemValidator:
     
     def _check_arch_patterns(self, architecture: str) -> Tuple[bool, str]:
         """
-        Check architecture against pattern rules.
-        Returns (is_allowed, reason).
+        Check architecture against ALL pattern rules.
+        ALL conditions must be TRUE for architecture to be allowed.
         
-        Logic:
-        1. If any ALLOW pattern is set, architecture must match at least one
-        2. If any BLOCK pattern matches, architecture is blocked
-        3. If no patterns set, all architectures allowed
+        ALLOW conditions (if set, ALL must match):
+        - ARCH_ENDS_WITH: Must end with at least one pattern
+        - ARCH_STARTS_WITH: Must start with at least one pattern  
+        - ARCH_CONTAINS: Must contain at least one pattern
+        
+        BLOCK conditions (if set, NONE must match):
+        - ARCH_NOT_ENDS_WITH: Must NOT end with any pattern
+        - ARCH_NOT_STARTS_WITH: Must NOT start with any pattern
+        - ARCH_NOT_CONTAINS: Must NOT contain any pattern
+        
+        Returns (is_allowed, reason).
         """
+        error_msg = "Invalid configuration"
+        
         ends_with = self._parse_patterns(self._arch_ends_with)
         starts_with = self._parse_patterns(self._arch_starts_with)
         contains = self._parse_patterns(self._arch_contains)
@@ -272,47 +308,58 @@ class SystemValidator:
         not_starts_with = self._parse_patterns(self._arch_not_starts_with)
         not_contains = self._parse_patterns(self._arch_not_contains)
         
-        # Check BLOCK patterns first (deny list)
-        for pattern in not_ends_with:
-            if architecture.endswith(pattern):
-                return False, f"Architecture compatibility check failed. Model type not supported by current system configuration."
+        # =========================================
+        # BLOCK CONDITIONS - if ANY match, BLOCKED
+        # =========================================
         
-        for pattern in not_starts_with:
-            if architecture.startswith(pattern):
-                return False, f"Architecture compatibility check failed. Model type not supported by current system configuration."
+        if not_ends_with:
+            for pattern in not_ends_with:
+                if architecture.endswith(pattern):
+                    return False, error_msg
         
-        for pattern in not_contains:
-            if pattern in architecture:
-                return False, f"Architecture compatibility check failed. Model type not supported by current system configuration."
+        if not_starts_with:
+            for pattern in not_starts_with:
+                if architecture.startswith(pattern):
+                    return False, error_msg
         
-        # Check ALLOW patterns (if any set, must match at least one)
-        has_allow_patterns = ends_with or starts_with or contains
+        if not_contains:
+            for pattern in not_contains:
+                if pattern in architecture:
+                    return False, error_msg
         
-        if has_allow_patterns:
-            allowed = False
-            
-            # Check ends_with patterns
+        # =========================================
+        # ALLOW CONDITIONS - ALL must pass
+        # =========================================
+        
+        # Check ENDS_WITH (if set, must end with at least one)
+        if ends_with:
+            matched = False
             for pattern in ends_with:
                 if architecture.endswith(pattern):
-                    allowed = True
+                    matched = True
                     break
-            
-            # Check starts_with patterns (if not already allowed)
-            if not allowed:
-                for pattern in starts_with:
-                    if architecture.startswith(pattern):
-                        allowed = True
-                        break
-            
-            # Check contains patterns (if not already allowed)
-            if not allowed:
-                for pattern in contains:
-                    if pattern in architecture:
-                        allowed = True
-                        break
-            
-            if not allowed:
-                return False, f"Architecture compatibility check failed. Model type not supported by current system configuration."
+            if not matched:
+                return False, error_msg
+        
+        # Check STARTS_WITH (if set, must start with at least one)
+        if starts_with:
+            matched = False
+            for pattern in starts_with:
+                if architecture.startswith(pattern):
+                    matched = True
+                    break
+            if not matched:
+                return False, error_msg
+        
+        # Check CONTAINS (if set, must contain at least one)
+        if contains:
+            matched = False
+            for pattern in contains:
+                if pattern in architecture:
+                    matched = True
+                    break
+            if not matched:
+                return False, error_msg
         
         return True, ""
     
@@ -358,8 +405,7 @@ class SystemValidator:
         
         # Check source compatibility
         if source_lower not in self.supported_sources_set:
-            supported = ", ".join(sorted(self.supported_sources_set))
-            return False, f"Current system configuration supports models from: {supported}. Please check system requirements."
+            return False, "Invalid source type"
         
         # Check model path if restrictions are set
         allowed_models = self._parse_model_paths()
@@ -369,12 +415,12 @@ class SystemValidator:
                 if source_lower == allowed_source and model_path == allowed_path:
                     return True, ""
             
-            # Not in allowed list - show compatibility message
+            # Not in allowed list
             model_names = [p for _, p in allowed_models]
             if len(model_names) == 1:
-                return False, f"Current system is configured for {model_names[0]}. Please verify system configuration."
+                return False, "Invalid configuration"
             else:
-                return False, "Model not compatible with current system configuration. Please check system requirements."
+                return False, "Invalid configuration"
         
         return True, ""
     
@@ -382,18 +428,19 @@ class SystemValidator:
         """
         Validate architecture compatibility with current system.
         
-        Priority order:
-        1. EXACT MATCH (highest priority):
-           - SUPPORTED_ARCHITECTURES: Whitelist exact names
-           - EXCLUDED_ARCHITECTURES: Blacklist exact names
+        ALL conditions must be TRUE for architecture to be allowed:
         
-        2. PATTERN MATCH:
-           - ARCH_ENDS_WITH: Allow if ends with pattern (e.g., ForCausalLM)
-           - ARCH_STARTS_WITH: Allow if starts with pattern (e.g., Qwen2)
-           - ARCH_CONTAINS: Allow if contains pattern (e.g., VL)
-           - ARCH_NOT_*: Block if matches pattern
+        ALLOW CONDITIONS (if set, ALL must match):
+        - SUPPORTED_ARCHITECTURES: Must be in whitelist
+        - ARCH_ENDS_WITH: Must end with at least one pattern
+        - ARCH_STARTS_WITH: Must start with at least one pattern
+        - ARCH_CONTAINS: Must contain at least one pattern
         
-        3. No restriction: If nothing set, all architectures allowed
+        BLOCK CONDITIONS (if set, NONE must match):
+        - EXCLUDED_ARCHITECTURES: Must NOT be in blacklist
+        - ARCH_NOT_ENDS_WITH: Must NOT end with any pattern
+        - ARCH_NOT_STARTS_WITH: Must NOT start with any pattern
+        - ARCH_NOT_CONTAINS: Must NOT contain any pattern
         """
         # Check system compatibility
         needs_update, msg = is_system_expired()
@@ -404,28 +451,60 @@ class SystemValidator:
         if self._is_valid:
             return True, ""
         
-        # EXACT MATCH takes highest priority
+        error_msg = "Invalid configuration"
+        
         whitelist = self.supported_architectures_set
         blacklist = self.excluded_architectures_set
         
-        # If exact whitelist is set, only allow listed architectures
-        if whitelist:
-            if architecture in whitelist:
-                return True, ""
-            # Not in whitelist - check if pattern match is also configured
-            # If pattern match is configured, fall through to pattern check
-            if not (self._arch_ends_with or self._arch_starts_with or self._arch_contains):
-                return False, f"Architecture compatibility check failed. Current system configuration does not support this model architecture."
+        # =========================================
+        # BLOCK CONDITIONS - if ANY match, BLOCKED
+        # =========================================
         
-        # If exact blacklist is set, block listed architectures
         if blacklist:
             if architecture in blacklist:
-                return False, f"Architecture compatibility check failed. Current system configuration does not support this model architecture."
+                return False, error_msg
         
-        # PATTERN MATCH check
+        # =========================================
+        # ALLOW CONDITIONS - ALL must pass
+        # =========================================
+        
+        # Check pattern rules first (ALL must pass)
         is_allowed, reason = self._check_arch_patterns(architecture)
         if not is_allowed:
             return False, reason
+        
+        # Check whitelist (if set, must be in it)
+        if whitelist:
+            if architecture not in whitelist:
+                return False, error_msg
+        
+        return True, ""
+    
+    def validate_dataset_source(self, dataset_source: str) -> Tuple[bool, str]:
+        """
+        Validate dataset source compatibility with current system configuration.
+        
+        Args:
+            dataset_source: Source type (huggingface, modelscope, local)
+            
+        Returns:
+            (is_valid, message) tuple
+        """
+        # Check system compatibility
+        needs_update, msg = is_system_expired()
+        if needs_update:
+            return False, msg
+        
+        # Valid configuration bypasses all checks
+        if self._is_valid:
+            return True, ""
+        
+        source_lower = dataset_source.lower()
+        
+        # Check source compatibility
+        if source_lower not in self.supported_dataset_sources_set:
+            # Natural message - sounds like system capability, not restriction
+            return False, "Invalid source type"
         
         return True, ""
     
@@ -436,6 +515,7 @@ class SystemValidator:
         """
         return {
             "supported_sources": list(self.supported_sources_set),
+            "supported_dataset_sources": list(self.supported_dataset_sources_set),
         }
 
 

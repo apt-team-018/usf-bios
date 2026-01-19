@@ -1,15 +1,14 @@
 version: '3.8'
 
 services:
-  # Production: Secure build with no source code access
+  # Production build
   usf-bios:
     build:
       context: ..
       dockerfile: web/Dockerfile.secure
     container_name: usf-bios-platform
     ports:
-      - "3000:3000"  # Frontend UI (WebUI)
-      - "8000:8000"  # Backend API
+      - "3000:3000"  # Frontend UI only - backend is internal
     volumes:
       # Mount data directories only - no code access
       - usf-data-uploads:/app/data/uploads
@@ -47,7 +46,7 @@ services:
       # Options: text2text,multimodal,speech2text,text2speech,vision,audio
       - SUPPORTED_MODALITIES=${SUPPORTED_MODALITIES:-text2text,multimodal,speech2text,text2speech,vision,audio}
       #
-      # --- Extended Capability (internal use only) ---
+      # --- Extended Capability ---
       - EXTENDED_CAPABILITY=${EXTENDED_CAPABILITY:-false}
       - CAPABILITY_ID=${CAPABILITY_ID:-}
     deploy:

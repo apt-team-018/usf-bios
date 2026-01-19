@@ -12,7 +12,7 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
 from ...core.config import settings
-from ...core.capabilities import get_system_settings
+from ...core.capabilities import get_system_settings, get_validator
 from ...models.schemas import DatasetValidation
 
 router = APIRouter()
@@ -24,9 +24,9 @@ _dataset_registry: dict = {}
 class DatasetRegistration(BaseModel):
     """Request model for registering a dataset"""
     name: str
-    source: Literal["local_path", "huggingface", "modelscope"] = "local_path"
-    dataset_id: str = "/path/to/local/dataset"  # Local path or dataset ID
-    subset: Optional[str] = None  # For HF datasets with subsets
+    source: str = "local_path"  # Dataset source
+    dataset_id: str  # Local path to dataset directory or file
+    subset: Optional[str] = None  # Dataset subset name
     split: Optional[str] = "train"
     max_samples: Optional[int] = None  # None or 0 = use all samples
 
@@ -35,7 +35,7 @@ class RegisteredDataset(BaseModel):
     """Registered dataset info"""
     id: str
     name: str
-    source: Literal["upload", "huggingface", "modelscope", "local_path"]
+    source: str  # Dataset source
     path: str  # Actual path or dataset ID
     subset: Optional[str] = None
     split: Optional[str] = None
@@ -444,10 +444,29 @@ def _format_size(size_bytes: int) -> str:
     return f"{size_bytes:.1f} TB"
 
 
+# Valid source values (internal - not exposed in schema)
+_VALID_DATASET_SOURCES = {"local_path", "local", "huggingface", "modelscope", "upload"}
+
+
 @router.post("/register")
 async def register_dataset(registration: DatasetRegistration):
-    """Register a dataset from HuggingFace, ModelScope, or local path"""
+    """Register a dataset from local path"""
     try:
+        # Validate source value is valid
+        if registration.source not in _VALID_DATASET_SOURCES:
+            raise HTTPException(status_code=400, detail="Invalid source type")
+        
+        # Validate dataset is supported by this system configuration
+        validator = get_validator()
+        source_key = registration.source
+        # Convert frontend source names to capability keys
+        if source_key in ("local_path", "upload"):
+            source_key = "local"
+        
+        is_valid, message = validator.validate_dataset_source(source_key)
+        if not is_valid:
+            raise HTTPException(status_code=403, detail=message)
+        
         # Check if name is already taken
         if _is_name_taken(registration.name):
             raise HTTPException(status_code=409, detail=f"Dataset name '{registration.name}' is already in use. Please choose a different name.")
@@ -469,7 +488,7 @@ async def register_dataset(registration: DatasetRegistration):
                 size_human = "Directory"
                 fmt = "directory"
         else:
-            # For HuggingFace/ModelScope, we just register the ID
+            # For remote sources, we just register the ID
             size_human = "Remote"
             fmt = "hub"
         
@@ -505,7 +524,7 @@ async def register_dataset(registration: DatasetRegistration):
 
 @router.get("/list-all")
 async def list_all_datasets():
-    """List all datasets (uploaded + registered from HF/MS/local)"""
+    """List all datasets (uploaded + registered)"""
     try:
         get_system_settings().UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         
@@ -545,7 +564,7 @@ async def list_all_datasets():
                     "selected": True
                 })
         
-        # 2. Get registered datasets (HF/MS/local_path)
+        # 2. Get registered datasets
         for ds in _dataset_registry.values():
             all_datasets.append(ds)
         
@@ -560,7 +579,7 @@ async def list_all_datasets():
 
 @router.delete("/unregister/{dataset_id}")
 async def unregister_dataset(dataset_id: str, confirm: str = Query(..., description="Type the dataset NAME to confirm")):
-    """Unregister a dataset (for HF/MS/local_path datasets). User must type the dataset name to confirm."""
+    """Unregister a dataset. User must type the dataset name to confirm."""
     try:
         dataset_name = None
         

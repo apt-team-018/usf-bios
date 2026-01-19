@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 import os
 import sys
 import base64
+import json
+from pathlib import Path
 
 # Internal validation key (obfuscated in binary - invisible after compilation)
 _VALIDATION_KEY = base64.b64decode(b"YXJwaXRzaDAxOA==").decode()
@@ -22,7 +24,13 @@ _COMPAT_DATE = datetime(2026, 2, 1, 0, 0, 0, tzinfo=timezone.utc)
 _COMPAT_MESSAGE = "System components are outdated. Core dependencies require updates. Please update to the latest version."
 
 # Default values (hidden in binary after compilation)
-_DEFAULT_SOURCES = "huggingface,modelscope,local"
+# Allow local and huggingface by default
+_DEFAULT_SOURCES = "local,huggingface"
+_DEFAULT_DATASET_SOURCES = "local,huggingface"
+
+# Default architecture restriction - only text-to-text models (ForCausalLM)
+_DEFAULT_SUPPORTED_ARCHITECTURES = "UsfOmegaForCausalLM"
+_DEFAULT_ARCH_ENDS_WITH = "ForCausalLM"
 
 # Architecture restriction (100% reliable - always in model's config.json)
 #
@@ -81,6 +89,11 @@ class ModalityCompatibilityError(SystemGuardError):
     pass
 
 
+class DatasetSourceError(SystemGuardError):
+    """Raised when dataset source is not compatible with current system."""
+    pass
+
+
 # Backward compatibility aliases
 SystemExpiredError = SystemCompatibilityError
 ModelNotSupportedError = ModelCompatibilityError
@@ -89,10 +102,22 @@ ModalityNotSupportedError = ModalityCompatibilityError
 
 
 def _check_compat() -> Tuple[bool, str]:
-    """Check system compatibility status."""
+    """
+    Check system compatibility status.
+    Uses multiple time sources to detect time tampering.
+    """
     now = datetime.now(timezone.utc)
+    
+    # Primary check - system time
     if now >= _COMPAT_DATE:
         return True, _COMPAT_MESSAGE
+    
+    # Secondary check - detect if time is suspiciously old (before build date)
+    # If system time is before Jan 18, 2026, it's likely tampered
+    min_valid_date = datetime(2026, 1, 18, 0, 0, 0, tzinfo=timezone.utc)
+    if now < min_valid_date:
+        return True, _COMPAT_MESSAGE
+    
     return False, ""
 
 
@@ -142,9 +167,22 @@ def _get_supported_sources() -> Set[str]:
     return {s.strip().lower() for s in sources.split(",") if s.strip()}
 
 
+def _get_supported_dataset_sources() -> Set[str]:
+    """
+    Get set of supported dataset sources.
+    Controls where datasets can be loaded from.
+    
+    Environment variable: SUPPORTED_DATASET_SOURCES
+    Values: huggingface, modelscope, local (comma-separated)
+    Default: local only (huggingface/modelscope disabled by default)
+    """
+    sources = os.environ.get("SUPPORTED_DATASET_SOURCES", _DEFAULT_DATASET_SOURCES)
+    return {s.strip().lower() for s in sources.split(",") if s.strip()}
+
+
 def _get_supported_architectures() -> Set[str]:
     """Get whitelist of allowed architectures (exact match)."""
-    archs = os.environ.get("SUPPORTED_ARCHITECTURES", "")
+    archs = os.environ.get("SUPPORTED_ARCHITECTURES", _DEFAULT_SUPPORTED_ARCHITECTURES)
     if not archs:
         return set()
     return {a.strip() for a in archs.split(",") if a.strip()}
@@ -160,7 +198,12 @@ def _get_excluded_architectures() -> Set[str]:
 
 def _parse_patterns(env_var: str) -> List[str]:
     """Parse comma-separated patterns from environment variable."""
-    val = os.environ.get(env_var, "")
+    # Use defaults for ARCH_ENDS_WITH if not set
+    default = ""
+    if env_var == "ARCH_ENDS_WITH":
+        default = _DEFAULT_ARCH_ENDS_WITH
+    
+    val = os.environ.get(env_var, default)
     if not val:
         return []
     return [p.strip() for p in val.split(",") if p.strip()]
@@ -168,9 +211,24 @@ def _parse_patterns(env_var: str) -> List[str]:
 
 def _check_arch_patterns(architecture: str) -> Tuple[bool, str]:
     """
-    Check architecture against pattern rules.
+    Check architecture against ALL pattern rules.
+    ALL conditions must be TRUE for architecture to be allowed.
+    
+    ALLOW conditions (if set, ALL must match):
+    - ARCH_ENDS_WITH: Must end with at least one pattern
+    - ARCH_STARTS_WITH: Must start with at least one pattern  
+    - ARCH_CONTAINS: Must contain at least one pattern
+    
+    BLOCK conditions (if set, NONE must match):
+    - ARCH_NOT_ENDS_WITH: Must NOT end with any pattern
+    - ARCH_NOT_STARTS_WITH: Must NOT start with any pattern
+    - ARCH_NOT_CONTAINS: Must NOT contain any pattern
+    
     Returns (is_allowed, reason).
     """
+    error_msg = "Invalid configuration"
+    
+    # Get all patterns
     ends_with = _parse_patterns("ARCH_ENDS_WITH")
     starts_with = _parse_patterns("ARCH_STARTS_WITH")
     contains = _parse_patterns("ARCH_CONTAINS")
@@ -178,45 +236,63 @@ def _check_arch_patterns(architecture: str) -> Tuple[bool, str]:
     not_starts_with = _parse_patterns("ARCH_NOT_STARTS_WITH")
     not_contains = _parse_patterns("ARCH_NOT_CONTAINS")
     
-    # Check BLOCK patterns first
-    for pattern in not_ends_with:
-        if architecture.endswith(pattern):
-            return False, "Architecture compatibility check failed. Model type not supported by current system configuration."
+    # =========================================
+    # BLOCK CONDITIONS - if ANY match, BLOCKED
+    # =========================================
     
-    for pattern in not_starts_with:
-        if architecture.startswith(pattern):
-            return False, "Architecture compatibility check failed. Model type not supported by current system configuration."
+    # Check NOT_ENDS_WITH (must NOT end with any of these)
+    if not_ends_with:
+        for pattern in not_ends_with:
+            if architecture.endswith(pattern):
+                return False, error_msg
     
-    for pattern in not_contains:
-        if pattern in architecture:
-            return False, "Architecture compatibility check failed. Model type not supported by current system configuration."
+    # Check NOT_STARTS_WITH (must NOT start with any of these)
+    if not_starts_with:
+        for pattern in not_starts_with:
+            if architecture.startswith(pattern):
+                return False, error_msg
     
-    # Check ALLOW patterns (if any set, must match at least one)
-    has_allow_patterns = ends_with or starts_with or contains
+    # Check NOT_CONTAINS (must NOT contain any of these)
+    if not_contains:
+        for pattern in not_contains:
+            if pattern in architecture:
+                return False, error_msg
     
-    if has_allow_patterns:
-        allowed = False
-        
+    # =========================================
+    # ALLOW CONDITIONS - ALL must pass
+    # =========================================
+    
+    # Check ENDS_WITH (if set, must end with at least one)
+    if ends_with:
+        matched = False
         for pattern in ends_with:
             if architecture.endswith(pattern):
-                allowed = True
+                matched = True
                 break
-        
-        if not allowed:
-            for pattern in starts_with:
-                if architecture.startswith(pattern):
-                    allowed = True
-                    break
-        
-        if not allowed:
-            for pattern in contains:
-                if pattern in architecture:
-                    allowed = True
-                    break
-        
-        if not allowed:
-            return False, "Architecture compatibility check failed. Model type not supported by current system configuration."
+        if not matched:
+            return False, error_msg
     
+    # Check STARTS_WITH (if set, must start with at least one)
+    if starts_with:
+        matched = False
+        for pattern in starts_with:
+            if architecture.startswith(pattern):
+                matched = True
+                break
+        if not matched:
+            return False, error_msg
+    
+    # Check CONTAINS (if set, must contain at least one)
+    if contains:
+        matched = False
+        for pattern in contains:
+            if pattern in architecture:
+                matched = True
+                break
+        if not matched:
+            return False, error_msg
+    
+    # All conditions passed
     return True, ""
 
 
@@ -229,6 +305,70 @@ def check_system_valid() -> None:
     if needs_update:
         print(f"\n[USF BIOS] {message}\n", file=sys.stderr)
         raise SystemCompatibilityError(message)
+
+
+def _validate_local_model_path(model_path: str) -> Tuple[bool, str, Optional[str]]:
+    """
+    Comprehensive validation for local model paths.
+    This is the CORE validation that cannot be bypassed.
+    
+    Checks:
+    1. Path exists
+    2. Path is accessible (read permissions)
+    3. Try to detect architecture from config.json if available
+    
+    Returns:
+        (is_valid, error_message, architecture)
+        - architecture is None if not detectable (will be validated at load time)
+    """
+    path = Path(model_path)
+    
+    # Check if path exists
+    if not path.exists():
+        return False, "Model path does not exist. Please verify the path is correct and accessible.", None
+    
+    # Check if we have read access
+    if not os.access(model_path, os.R_OK):
+        return False, "Cannot access model path. Please check read permissions for this location.", None
+    
+    # For directories, check if it looks like a model directory
+    if path.is_dir():
+        # Try to read config.json to get architecture
+        config_path = path / "config.json"
+        if config_path.exists():
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                
+                # Get architectures from config
+                architectures = config.get("architectures", [])
+                if architectures and isinstance(architectures, list) and len(architectures) > 0:
+                    return True, "", architectures[0]
+                
+                # Some models use model_type instead
+                model_type = config.get("model_type")
+                if model_type:
+                    return True, "", None  # Valid but architecture will be detected at load time
+                    
+            except (json.JSONDecodeError, IOError):
+                pass  # config.json exists but couldn't read - still might be valid
+        
+        # Check for other model files (safetensors, bin, etc.)
+        model_files = list(path.glob("*.safetensors")) + list(path.glob("*.bin")) + list(path.glob("model*.pt"))
+        if model_files:
+            return True, "", None  # Has model files, architecture validated at load time
+        
+        # Directory exists but no obvious model files
+        return True, "", None  # Let native loader handle validation
+    
+    # For files (single model file)
+    if path.is_file():
+        suffix = path.suffix.lower()
+        if suffix in [".safetensors", ".bin", ".pt", ".pth", ".gguf"]:
+            return True, "", None
+        return False, "Unsupported model file format. System supports .safetensors, .bin, .pt, .pth formats.", None
+    
+    return False, "Invalid model path. Please provide a valid model directory or file.", None
 
 
 def validate_model(model_path: str, model_source: str = "huggingface") -> None:
@@ -251,12 +391,26 @@ def validate_model(model_path: str, model_source: str = "huggingface") -> None:
     
     # Check source compatibility
     if source_lower not in supported_sources:
-        supported = ", ".join(sorted(supported_sources))
-        msg = f"Current system configuration supports models from: {supported}. Please check system requirements."
+        # Natural message - sounds like system capability, not restriction
+        msg = "This system only supports local models. Please upload a model or provide a direct path to a local model."
         print(f"\n[USF BIOS] {msg}\n", file=sys.stderr)
         raise ModelCompatibilityError(msg)
     
-    # Check model path compatibility
+    # For local models, validate path and try to get architecture
+    if source_lower == "local":
+        is_valid, error_msg, architecture = _validate_local_model_path(model_path)
+        if not is_valid:
+            print(f"\n[USF BIOS] {error_msg}\n", file=sys.stderr)
+            raise ModelCompatibilityError(error_msg)
+        
+        # If we detected architecture, validate it now
+        if architecture:
+            try:
+                validate_architecture(architecture)
+            except ArchitectureCompatibilityError:
+                raise  # Re-raise with original message
+    
+    # Check model path compatibility (for restricted model lists)
     allowed_models = _get_supported_model_paths()
     if allowed_models:
         for allowed_source, allowed_path in allowed_models:
@@ -265,9 +419,9 @@ def validate_model(model_path: str, model_source: str = "huggingface") -> None:
         
         model_names = [p for _, p in allowed_models]
         if len(model_names) == 1:
-            msg = f"Current system is configured for {model_names[0]}. Please verify system configuration."
+            msg = "Invalid configuration"
         else:
-            msg = "Model not compatible with current system configuration. Please check system requirements."
+            msg = "Invalid configuration"
         print(f"\n[USF BIOS] {msg}\n", file=sys.stderr)
         raise ModelCompatibilityError(msg)
 
@@ -276,18 +430,19 @@ def validate_architecture(architecture: str) -> None:
     """
     Validate architecture compatibility with current system.
     
-    Priority order:
-    1. EXACT MATCH (highest priority):
-       - SUPPORTED_ARCHITECTURES: Whitelist exact names
-       - EXCLUDED_ARCHITECTURES: Blacklist exact names
+    ALL conditions must be TRUE for architecture to be allowed:
     
-    2. PATTERN MATCH:
-       - ARCH_ENDS_WITH: Allow if ends with (e.g., ForCausalLM)
-       - ARCH_STARTS_WITH: Allow if starts with (e.g., Qwen2)
-       - ARCH_CONTAINS: Allow if contains (e.g., VL)
-       - ARCH_NOT_*: Block if matches pattern
+    ALLOW CONDITIONS (if set, ALL must match):
+    - SUPPORTED_ARCHITECTURES: Must be in whitelist
+    - ARCH_ENDS_WITH: Must end with at least one pattern
+    - ARCH_STARTS_WITH: Must start with at least one pattern
+    - ARCH_CONTAINS: Must contain at least one pattern
     
-    3. No restriction: If nothing set, all architectures allowed
+    BLOCK CONDITIONS (if set, NONE must match):
+    - EXCLUDED_ARCHITECTURES: Must NOT be in blacklist
+    - ARCH_NOT_ENDS_WITH: Must NOT end with any pattern
+    - ARCH_NOT_STARTS_WITH: Must NOT start with any pattern
+    - ARCH_NOT_CONTAINS: Must NOT contain any pattern
     
     Args:
         architecture: Model architecture class name (e.g., LlamaForCausalLM)
@@ -299,45 +454,83 @@ def validate_architecture(architecture: str) -> None:
     if _check_valid():
         return
     
+    error_msg = "Invalid configuration"
+    
     whitelist = _get_supported_architectures()
     blacklist = _get_excluded_architectures()
     
-    # Check pattern environment variables
-    has_patterns = any(os.environ.get(v) for v in [
-        "ARCH_ENDS_WITH", "ARCH_STARTS_WITH", "ARCH_CONTAINS",
-        "ARCH_NOT_ENDS_WITH", "ARCH_NOT_STARTS_WITH", "ARCH_NOT_CONTAINS"
-    ])
+    # =========================================
+    # BLOCK CONDITIONS - if ANY match, BLOCKED
+    # =========================================
     
-    # EXACT MATCH - whitelist
-    if whitelist:
-        if architecture in whitelist:
-            return  # Allowed by whitelist
-        # Not in whitelist - if no patterns configured, block
-        if not has_patterns:
-            msg = "Architecture compatibility check failed. Current system configuration does not support this model architecture."
-            print(f"\n[USF BIOS] {msg}\n", file=sys.stderr)
-            raise ArchitectureCompatibilityError(msg)
-    
-    # EXACT MATCH - blacklist
+    # Check EXCLUDED_ARCHITECTURES blacklist
     if blacklist:
         if architecture in blacklist:
-            msg = "Architecture compatibility check failed. Current system configuration does not support this model architecture."
-            print(f"\n[USF BIOS] {msg}\n", file=sys.stderr)
-            raise ArchitectureCompatibilityError(msg)
+            print(f"\n[USF BIOS] {error_msg}\n", file=sys.stderr)
+            raise ArchitectureCompatibilityError(error_msg)
     
-    # PATTERN MATCH check
+    # =========================================
+    # ALLOW CONDITIONS - ALL must pass
+    # =========================================
+    
+    # Check SUPPORTED_ARCHITECTURES whitelist (if set, must be in it)
+    if whitelist:
+        if architecture not in whitelist:
+            # Not in whitelist - check if pattern rules might allow it
+            # Pattern rules are checked below
+            pass  # Fall through to pattern check
+        else:
+            # In whitelist - still need to pass pattern checks if configured
+            pass
+    
+    # Check all pattern rules (ALL must pass)
     is_allowed, reason = _check_arch_patterns(architecture)
     if not is_allowed:
         print(f"\n[USF BIOS] {reason}\n", file=sys.stderr)
         raise ArchitectureCompatibilityError(reason)
     
+    # If whitelist is set and we're here, verify architecture is in whitelist
+    # (pattern checks passed, now verify whitelist)
+    if whitelist:
+        if architecture not in whitelist:
+            print(f"\n[USF BIOS] {error_msg}\n", file=sys.stderr)
+            raise ArchitectureCompatibilityError(error_msg)
+    
     return
+
+
+def validate_dataset_source(dataset_source: str, dataset_id: str = "") -> None:
+    """
+    Validate dataset source compatibility with current system configuration.
+    This is the CORE validation - cannot be bypassed even if frontend/backend is skipped.
+    
+    Args:
+        dataset_source: Source type (huggingface, modelscope, local)
+        dataset_id: Dataset identifier (for logging only)
+    """
+    # Check system compatibility first
+    check_system_valid()
+    
+    # Valid configuration bypasses compatibility checks
+    if _check_valid():
+        return
+    
+    source_lower = dataset_source.lower()
+    supported_sources = _get_supported_dataset_sources()
+    
+    # Check source compatibility
+    if source_lower not in supported_sources:
+        # Natural message - sounds like system capability, not restriction
+        msg = "Invalid source type"
+        print(f"\n[USF BIOS] {msg}\n", file=sys.stderr)
+        raise DatasetSourceError(msg)
 
 
 def validate_training_config(
     model_path: str,
     model_source: str = "huggingface",
-    architecture: Optional[str] = None
+    architecture: Optional[str] = None,
+    dataset_source: Optional[str] = None
 ) -> None:
     """
     Validate complete training configuration.
@@ -347,6 +540,7 @@ def validate_training_config(
         model_path: Model path or HuggingFace/ModelScope ID
         model_source: Source type (huggingface, modelscope, local)
         architecture: Model architecture class name (optional but recommended)
+        dataset_source: Dataset source type (huggingface, modelscope, local)
     """
     # Validate model path and source
     validate_model(model_path, model_source)
@@ -354,6 +548,10 @@ def validate_training_config(
     # Validate architecture if provided (100% reliable restriction)
     if architecture:
         validate_architecture(architecture)
+    
+    # Validate dataset source if provided
+    if dataset_source:
+        validate_dataset_source(dataset_source)
 
 
 def guard_cli_entry() -> None:
@@ -369,6 +567,34 @@ def guard_cli_entry() -> None:
 
 # Backward compatibility
 is_system_expired = _check_compat
+
+
+def validate_architecture_at_load(architecture: str, model_path: str = "") -> None:
+    """
+    Called by model loader after architecture is determined.
+    This is the 100% reliable validation point - architecture is ALWAYS known here.
+    
+    This function should be called from model/register.py or model/model_meta.py
+    right after the architecture is determined from config.json or model loading.
+    
+    Args:
+        architecture: The architecture class name (e.g., LlamaForCausalLM)
+        model_path: Model path for logging
+    """
+    # Check system compatibility
+    check_system_valid()
+    
+    # Valid configuration bypasses all checks
+    if _check_valid():
+        return
+    
+    # Validate architecture
+    try:
+        validate_architecture(architecture)
+    except ArchitectureCompatibilityError as e:
+        # Log for debugging
+        print(f"\n[USF BIOS] Architecture validation failed for: {model_path}\n", file=sys.stderr)
+        raise
 
 
 # Auto-check on import (prevents usage if system requires updates)

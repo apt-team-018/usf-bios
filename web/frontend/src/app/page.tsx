@@ -80,6 +80,8 @@ interface SystemStatus {
 interface SystemCapabilities {
   supported_model: string | null
   supported_sources: string[]
+  supported_model_sources: string[]
+  supported_dataset_sources: string[]
   supported_architectures: string[] | null
   supported_modalities: string[]
   has_model_restriction: boolean
@@ -226,7 +228,9 @@ export default function Home() {
   // System capabilities - what this system can fine-tune
   const [systemCapabilities, setSystemCapabilities] = useState<SystemCapabilities>({
     supported_model: null,
-    supported_sources: ['huggingface', 'modelscope', 'local'],
+    supported_sources: ['local'],
+    supported_model_sources: ['local'],
+    supported_dataset_sources: ['local'],
     supported_architectures: null,
     supported_modalities: ['text2text', 'multimodal', 'speech2text', 'text2speech', 'vision', 'audio'],
     has_model_restriction: false,
@@ -236,6 +240,10 @@ export default function Home() {
     storage_path: null,
     storage_writable: false
   })
+  
+  // System expiration - COMPLETE LOCKDOWN when expired
+  const [systemExpired, setSystemExpired] = useState(false)
+  const [expirationChecked, setExpirationChecked] = useState(false)
   
   // Training metrics for graphs
   const [trainingMetrics, setTrainingMetrics] = useState<TrainingMetric[]>([])
@@ -254,10 +262,34 @@ export default function Home() {
     }
   }, [mainTab, currentStep])
 
+  // Check system expiration - MUST run first before any other API calls
+  const checkSystemExpiration = useCallback(async () => {
+    try {
+      const res = await fetch('/api/system/status')
+      if (res.status === 503) {
+        const data = await res.json()
+        if (data.error === 'system_expired' || data.blocked) {
+          setSystemExpired(true)
+        }
+      }
+      setExpirationChecked(true)
+    } catch (e) {
+      // If we can't reach the server, still mark as checked
+      setExpirationChecked(true)
+    }
+  }, [])
+
   // Fetch system status - check if system is ready for training
   const fetchSystemStatus = useCallback(async () => {
     try {
       const res = await fetch('/api/system/status')
+      if (res.status === 503) {
+        const data = await res.json()
+        if (data.error === 'system_expired' || data.blocked) {
+          setSystemExpired(true)
+          return
+        }
+      }
       if (res.ok) {
         const data = await res.json()
         setSystemStatus(data)
@@ -290,12 +322,22 @@ export default function Home() {
       if (res.ok) {
         const data = await res.json()
         setSystemCapabilities(data)
+        
+        // Get the supported model sources
+        const supportedSources = data.supported_model_sources || data.supported_sources || ['local']
+        
         // If system is designed for a specific model, pre-fill the config
         if (data.has_model_restriction && data.supported_model) {
           setConfig(prev => ({
             ...prev,
             model_path: data.supported_model,
-            model_source: data.supported_sources?.[0] || 'huggingface'
+            model_source: supportedSources[0] || 'local'
+          }))
+        } else if (!supportedSources.includes('huggingface')) {
+          // If huggingface is not supported, switch to first available source
+          setConfig(prev => ({
+            ...prev,
+            model_source: supportedSources[0] || 'local'
           }))
         }
       }
@@ -328,13 +370,19 @@ export default function Home() {
     }
   }, [])
 
-  // Fetch system status and capabilities on mount
+  // Check system expiration FIRST on mount - blocks everything if expired
   useEffect(() => {
+    checkSystemExpiration()
+  }, [checkSystemExpiration])
+
+  // Fetch system status and capabilities on mount (only if not expired)
+  useEffect(() => {
+    if (systemExpired) return
     fetchSystemStatus()
     fetchSystemCapabilities()
     const interval = setInterval(fetchSystemStatus, 10000) // Check every 10 seconds
     return () => clearInterval(interval)
-  }, [fetchSystemStatus, fetchSystemCapabilities])
+  }, [fetchSystemStatus, fetchSystemCapabilities, systemExpired])
 
   // Poll system metrics during training or inference
   useEffect(() => {
@@ -787,6 +835,38 @@ export default function Home() {
     return h > 0 ? `${h}h ${m}m` : `${m}m ${s}s`
   }
 
+  // SYSTEM LOCKDOWN - Complete block when expired
+  if (systemExpired) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+        <div className="text-center p-8">
+          <div className="w-20 h-20 bg-red-500/20 rounded-full flex items-center justify-center mx-auto mb-6">
+            <XCircle className="w-10 h-10 text-red-500" />
+          </div>
+          <h1 className="text-2xl font-bold text-white mb-3">System Requires Upgrade</h1>
+          <p className="text-slate-400 max-w-md">
+            This system version has expired. Please contact support to upgrade your system.
+          </p>
+          <p className="text-slate-500 text-sm mt-6">
+            USF BIOS - Powered by US Inc
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  // Wait for expiration check before showing anything
+  if (!expirationChecked) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+        <div className="text-center">
+          <Loader2 className="w-8 h-8 text-blue-500 animate-spin mx-auto mb-4" />
+          <p className="text-slate-400">Initializing system...</p>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-white">
       {/* Delete Confirmation Modal */}
@@ -986,15 +1066,15 @@ export default function Home() {
                     <p className="text-slate-600 text-sm">Choose the base model for fine-tuning</p>
                   </div>
                   
-                  {/* System Capability Notice */}
-                  {systemCapabilities.has_model_restriction && (
+                  {/* System Capability Notice - Only show when specific model path is locked */}
+                  {systemCapabilities.has_model_restriction && systemCapabilities.supported_model && (
                     <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
                       <div className="flex items-start gap-3">
                         <Lock className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
                         <div>
-                          <p className="font-medium text-blue-800">System Configuration</p>
+                          <p className="font-medium text-blue-800">Supported Model</p>
                           <p className="text-sm text-blue-700 mt-1">
-                            This system is designed to fine-tune the model shown below. The system does not have the capability to fine-tune other models.
+                            This system only supports the model shown below. Please use the supported model for fine-tuning.
                           </p>
                         </div>
                       </div>
@@ -1005,35 +1085,44 @@ export default function Home() {
                     <div>
                       <label className="block text-sm font-medium text-slate-700 mb-2">
                         Model Source
-                        {systemCapabilities.has_model_restriction && <Lock className="w-3 h-3 inline ml-1 text-slate-400" />}
+                        {systemCapabilities.has_model_restriction && systemCapabilities.supported_model && <Lock className="w-3 h-3 inline ml-1 text-slate-400" />}
                       </label>
                       <div className="grid grid-cols-3 gap-2">
-                        {['huggingface', 'modelscope', 'local'].map((source) => (
+                        {['huggingface', 'modelscope', 'local'].filter(source => 
+                          (systemCapabilities.supported_model_sources || systemCapabilities.supported_sources || ['local']).includes(source)
+                        ).map((source) => {
+                          const isLocked = !!(systemCapabilities.has_model_restriction && systemCapabilities.supported_model)
+                          return (
                           <button key={source} 
-                            onClick={() => !systemCapabilities.has_model_restriction && setConfig({ ...config, model_source: source as any })}
-                            disabled={systemCapabilities.has_model_restriction || !(systemCapabilities.supported_sources || []).includes(source)}
+                            onClick={() => !isLocked && setConfig({ ...config, model_source: source as any })}
+                            disabled={isLocked}
                             className={`p-3 rounded-lg border-2 text-center transition-all ${
                               config.model_source === source ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-600 hover:border-slate-300'
-                            } ${systemCapabilities.has_model_restriction || !(systemCapabilities.supported_sources || []).includes(source) ? 'opacity-60 cursor-not-allowed' : ''}`}>
+                            } ${isLocked ? 'opacity-60 cursor-not-allowed' : ''}`}>
                             <span className="capitalize font-medium text-sm">{source}</span>
                           </button>
-                        ))}
+                        )})}
                       </div>
                     </div>
                     
                     <div>
                       <label className="block text-sm font-medium text-slate-700 mb-2">
                         Model Path / ID
-                        {systemCapabilities.has_model_restriction && <Lock className="w-3 h-3 inline ml-1 text-slate-400" />}
+                        {systemCapabilities.has_model_restriction && systemCapabilities.supported_model && <Lock className="w-3 h-3 inline ml-1 text-slate-400" />}
                       </label>
                       <input type="text" value={config.model_path}
-                        onChange={(e) => !systemCapabilities.has_model_restriction && setConfig({ ...config, model_path: e.target.value })}
-                        disabled={systemCapabilities.has_model_restriction}
-                        placeholder={config.model_source === 'local' ? '/path/to/model' : 'organization/model-name'}
+                        onChange={(e) => !(systemCapabilities.has_model_restriction && systemCapabilities.supported_model) && setConfig({ ...config, model_path: e.target.value })}
+                        disabled={!!(systemCapabilities.has_model_restriction && systemCapabilities.supported_model)}
+                        placeholder={config.model_source === 'local' ? '/path/to/model (e.g., /mnt/storage/models/llama-7b)' : 'organization/model-name'}
                         className={`w-full px-4 py-3 border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${
-                          systemCapabilities.has_model_restriction ? 'bg-slate-100 cursor-not-allowed' : ''
+                          (systemCapabilities.has_model_restriction && systemCapabilities.supported_model) ? 'bg-slate-100 cursor-not-allowed' : ''
                         }`}
                       />
+                      {config.model_source === 'local' && !(systemCapabilities.has_model_restriction && systemCapabilities.supported_model) && (
+                        <p className="text-xs text-slate-500 mt-1">
+                          Enter the full path to your model directory (e.g., external storage mount point)
+                        </p>
+                      )}
                       {systemCapabilities.has_model_restriction && systemCapabilities.supported_model && (
                         <p className="text-xs text-slate-500 mt-1">
                           Supported model: {systemCapabilities.supported_model}
@@ -1041,25 +1130,21 @@ export default function Home() {
                       )}
                     </div>
                     
-                    {/* Quick Select - Hidden when system has model restriction */}
-                    {!systemCapabilities.has_model_restriction && (
-                      <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-2">Quick Select</label>
-                        <div className="grid grid-cols-2 gap-2">
-                          {[
-                            { id: 'Qwen/Qwen2.5-7B-Instruct', name: 'Qwen 2.5 7B' },
-                            { id: 'meta-llama/Llama-3.1-8B-Instruct', name: 'Llama 3.1 8B' },
-                            { id: 'mistralai/Mistral-7B-Instruct-v0.3', name: 'Mistral 7B' },
-                            { id: 'deepseek-ai/DeepSeek-R1-Distill-Qwen-7B', name: 'DeepSeek R1 7B' },
-                          ].map((model) => (
-                            <button key={model.id} onClick={() => setConfig({ ...config, model_path: model.id, model_source: 'huggingface' })}
-                              className={`p-2 rounded-lg border text-left transition-all ${
-                                config.model_path === model.id ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-700 hover:border-slate-300'
-                              }`}>
-                              <span className="font-medium text-sm">{model.name}</span>
-                            </button>
-                          ))}
-                        </div>
+                    {/* Local Model Info - Show when local source is selected */}
+                    {!systemCapabilities.has_model_restriction && 
+                     config.model_source === 'local' && (
+                      <div className="bg-slate-50 rounded-lg p-4 border border-slate-200">
+                        <p className="text-sm text-slate-700">
+                          <strong>Local Model:</strong> Enter the path to your model directory. 
+                          This should be a directory containing the model files (config.json, model weights, etc.).
+                        </p>
+                        <p className="text-xs text-slate-500 mt-2">
+                          Example paths:
+                        </p>
+                        <ul className="text-xs text-slate-500 mt-1 space-y-1">
+                          <li>• <code className="bg-slate-200 px-1 rounded">/mnt/storage/models/llama-7b</code> (external storage)</li>
+                          <li>• <code className="bg-slate-200 px-1 rounded">/app/models/my-finetuned-model</code> (container path)</li>
+                        </ul>
                       </div>
                     )}
                   </div>

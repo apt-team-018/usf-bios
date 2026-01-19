@@ -1,8 +1,4 @@
-# USF BIOS Web UI - Secure Build (Frontend + Backend with Cython)
-# - Compiles Python backend to native .so binaries (Cython)
-# - Does NOT include usf_bios training library
-# - Same security approach as Dockerfile.secure
-# - Use this to test Cython compilation before full build
+# USF BIOS Web UI - Build (Frontend + Backend)
 # Copyright (c) US Inc. All rights reserved.
 
 # ============================================================================
@@ -57,13 +53,13 @@ RUN find /compile -name "*.pyc" -delete && \
     rm -f /compile/compile_backend_only.py
 
 # ============================================================================
-# Stage 3: Production Image (Secure Web UI)
+# Stage 3: Production Image
 # ============================================================================
 FROM python:3.11-slim
 
 LABEL maintainer="US Inc <support@us.inc>"
-LABEL description="USF BIOS Web UI - Secure Build (Cython compiled)"
-LABEL version="1.0.0-webui-secure"
+LABEL description="USF BIOS Web UI"
+LABEL version="1.0.0"
 
 # Security: Create non-root user
 RUN groupadd -r usf && useradd -r -g usf usf
@@ -144,12 +140,12 @@ RUN mkdir -p /app/data/uploads \
 # Switch to non-root user
 USER usf
 
-# Expose ports
-EXPOSE 3000 8000
+# Expose frontend port only - backend is internal
+EXPOSE 3000
 
-# Health check
+# Health check via frontend
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:3000 || exit 1
 
 # Entry point
 ENTRYPOINT ["/app/entrypoint.sh"]
