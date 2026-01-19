@@ -14,14 +14,11 @@ export USF_UI_ONLY=1
 export DATABASE_URL="${DATABASE_URL:-sqlite:////app/data/db/usf_bios.db}"
 
 # ============================================================================
-# Backend URL Detection
-# Backend detects its own external URL from incoming HTTP requests
-# and writes to /app/web/frontend/public/runtime-config.json
-# Frontend reads this file ONCE at startup and caches forever
-# This works with ANY cloud provider - no env var detection needed
+# API Proxy Architecture (No Runtime Config Needed)
+# Browser → Next.js (port 3000) /api/* → Python Backend (localhost:8000)
+# Frontend uses relative URLs, Next.js server proxies to backend internally
+# No public URL detection needed - backend stays internal
 # ============================================================================
-echo "[Config] Backend will detect external URL from first HTTP request"
-echo "[Config] Frontend will read /runtime-config.json once at startup"
 
 # Create required directories
 mkdir -p /app/data/db /app/data/uploads /app/data/datasets \
@@ -91,13 +88,12 @@ echo "=============================================="
 echo "  Services Started Successfully!"
 echo "=============================================="
 echo ""
-echo "  Access via your cloud provider's external URL"
-echo "  (Backend URL auto-detected from first request)"
+echo "  Architecture: Next.js API Proxy"
+echo "  Browser → /api/* → localhost:8000 (internal)"
 echo ""
-echo "  Internal ports:"
-echo "    Frontend: 3000"
-echo "    Backend:  8000"
-echo "    Health:   /health"
+echo "  Frontend: http://0.0.0.0:3000 (exposed)"
+echo "  Backend:  localhost:8000 (internal only)"
+echo "  Health:   http://0.0.0.0:8000/health"
 echo ""
 echo "=============================================="
 
