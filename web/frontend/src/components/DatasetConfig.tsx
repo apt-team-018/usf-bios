@@ -7,7 +7,8 @@ import {
   Plus, ExternalLink
 } from 'lucide-react'
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+// Use relative URLs - Next.js rewrites proxy /api/* to backend
+const API_URL = ''
 
 type DatasetSource = 'upload' | 'huggingface' | 'modelscope' | 'local_path'
 
