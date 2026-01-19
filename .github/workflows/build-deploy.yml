@@ -1,0 +1,134 @@
+name: USF BIOS - Build & Deploy
+
+# =============================================================================
+# USF BIOS Docker Build Workflow
+# =============================================================================
+# Build Types:
+#   - production: Full secure build with Cython compilation (DEFAULT)
+#   - staging: Backend + Frontend with Cython (no training packages)
+#   - development: Quick build without Cython (for UI testing only)
+# =============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Configuration'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production      # Full: Cython + USF BIOS training (RECOMMENDED)
+          - staging         # Backend + Frontend with Cython
+          - development     # Fast: No Cython (UI testing only)
+
+env:
+  DOCKER_IMAGE: arpitsh018/usf-bios
+  REGISTRY: docker.io
+
+jobs:
+  build-and-deploy:
+    name: Build ${{ inputs.build_type }} image
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set build configuration
+        id: config
+        run: |
+          if [[ "${{ inputs.build_type }}" == "development" ]]; then
+            echo "dockerfile=web/Dockerfile.webui-test" >> $GITHUB_OUTPUT
+            echo "tag_suffix=-dev" >> $GITHUB_OUTPUT
+            echo "description=Development build (no Cython, UI testing only)" >> $GITHUB_OUTPUT
+          elif [[ "${{ inputs.build_type }}" == "staging" ]]; then
+            echo "dockerfile=web/Dockerfile.webui-secure" >> $GITHUB_OUTPUT
+            echo "tag_suffix=-staging" >> $GITHUB_OUTPUT
+            echo "description=Staging build (Cython compiled backend)" >> $GITHUB_OUTPUT
+          else
+            # production (default)
+            echo "dockerfile=web/Dockerfile.secure" >> $GITHUB_OUTPUT
+            echo "tag_suffix=" >> $GITHUB_OUTPUT
+            echo "description=Production build (Full Cython + USF BIOS training)" >> $GITHUB_OUTPUT
+          fi
+          echo "sha_short=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./${{ steps.config.outputs.dockerfile }}
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.DOCKER_IMAGE }}:latest${{ steps.config.outputs.tag_suffix }}
+            ${{ env.DOCKER_IMAGE }}:${{ steps.config.outputs.sha_short }}${{ steps.config.outputs.tag_suffix }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify built image
+        if: success()
+        run: |
+          echo "Verifying built image..."
+          docker pull ${{ env.DOCKER_IMAGE }}:latest${{ steps.config.outputs.tag_suffix }}
+          
+          # Start container
+          docker run -d --name usf-bios-verify \
+            -p 3000:3000 -p 8000:8000 \
+            ${{ env.DOCKER_IMAGE }}:latest${{ steps.config.outputs.tag_suffix }}
+          
+          # Wait for services to start
+          echo "Waiting for services to start..."
+          sleep 20
+          
+          # Test health endpoint
+          echo "Testing health endpoint..."
+          curl -f http://localhost:8000/health || (docker logs usf-bios-verify && exit 1)
+          
+          # Test frontend
+          echo "Testing frontend..."
+          curl -f http://localhost:3000 || (docker logs usf-bios-verify && exit 1)
+          
+          echo "✓ All verification tests passed!"
+          
+          # Cleanup
+          docker stop usf-bios-verify
+          docker rm usf-bios-verify
+
+      - name: Build Summary
+        run: |
+          echo "## 🚀 USF BIOS Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | ${{ inputs.build_type }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Description** | ${{ steps.config.outputs.description }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Dockerfile** | \`${{ steps.config.outputs.dockerfile }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Image** | \`${{ env.DOCKER_IMAGE }}:latest${{ steps.config.outputs.tag_suffix }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | \`${{ steps.config.outputs.sha_short }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Docker Pull Command" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.DOCKER_IMAGE }}:latest${{ steps.config.outputs.tag_suffix }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
