@@ -14,27 +14,39 @@ export USF_UI_ONLY=1
 export DATABASE_URL="${DATABASE_URL:-sqlite:////app/data/db/usf_bios.db}"
 
 # ============================================================================
-# Auto-detect RunPod/Cloud Proxy URL (no manual configuration needed)
+# Auto-detect Backend URL and write to shared config file
+# Frontend will read this config at startup
 # ============================================================================
+BACKEND_URL=""
+FRONTEND_URL=""
+
 if [ -n "$RUNPOD_POD_ID" ]; then
     # RunPod environment detected
-    export NEXT_PUBLIC_API_URL="https://${RUNPOD_POD_ID}-8000.proxy.runpod.net"
-    echo "[Auto-Config] RunPod detected: API URL set to $NEXT_PUBLIC_API_URL"
+    BACKEND_URL="https://${RUNPOD_POD_ID}-8000.proxy.runpod.net"
+    FRONTEND_URL="https://${RUNPOD_POD_ID}-3000.proxy.runpod.net"
+    echo "[Auto-Config] RunPod detected"
 elif [ -n "$VAST_CONTAINERLABEL" ]; then
     # Vast.ai environment detected
-    export NEXT_PUBLIC_API_URL="https://${VAST_CONTAINERLABEL}-8000.direct.vast.ai"
-    echo "[Auto-Config] Vast.ai detected: API URL set to $NEXT_PUBLIC_API_URL"
+    BACKEND_URL="https://${VAST_CONTAINERLABEL}-8000.direct.vast.ai"
+    FRONTEND_URL="https://${VAST_CONTAINERLABEL}-3000.direct.vast.ai"
+    echo "[Auto-Config] Vast.ai detected"
 elif [ -n "$LAMBDA_INSTANCE_ID" ]; then
     # Lambda Labs environment
-    export NEXT_PUBLIC_API_URL="http://localhost:8000"
-    echo "[Auto-Config] Lambda Labs detected: Using localhost"
-elif [ -z "$NEXT_PUBLIC_API_URL" ]; then
-    # Default: localhost (for local development or same-machine deployment)
-    export NEXT_PUBLIC_API_URL="http://localhost:8000"
-    echo "[Auto-Config] Using default localhost API URL"
+    BACKEND_URL="http://localhost:8000"
+    FRONTEND_URL="http://localhost:3000"
+    echo "[Auto-Config] Lambda Labs detected"
 else
-    echo "[Auto-Config] Using provided API URL: $NEXT_PUBLIC_API_URL"
+    # Default: localhost (for local development)
+    BACKEND_URL="${BACKEND_URL:-http://localhost:8000}"
+    FRONTEND_URL="${FRONTEND_URL:-http://localhost:3000}"
+    echo "[Auto-Config] Using localhost"
 fi
+
+# Write config to shared file that frontend can access
+CONFIG_FILE="/app/web/frontend/public/runtime-config.json"
+echo "{\"backendUrl\": \"${BACKEND_URL}\", \"frontendUrl\": \"${FRONTEND_URL}\", \"timestamp\": \"$(date -Iseconds)\"}" > "$CONFIG_FILE"
+echo "[Auto-Config] Backend URL: $BACKEND_URL"
+echo "[Auto-Config] Config written to: $CONFIG_FILE"
 
 # Create required directories
 mkdir -p /app/data/db /app/data/uploads /app/data/datasets \
