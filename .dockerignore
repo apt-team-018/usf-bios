@@ -98,3 +98,4 @@ Jenkinsfile
 # Scripts not needed in production
 scripts/
 !scripts/compile_to_so.py
+!scripts/compile_backend_only.py
