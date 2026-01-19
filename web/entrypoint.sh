@@ -13,6 +13,29 @@ export USF_UI_ONLY=1
 # Database configuration
 export DATABASE_URL="${DATABASE_URL:-sqlite:////app/data/db/usf_bios.db}"
 
+# ============================================================================
+# Auto-detect RunPod/Cloud Proxy URL (no manual configuration needed)
+# ============================================================================
+if [ -n "$RUNPOD_POD_ID" ]; then
+    # RunPod environment detected
+    export NEXT_PUBLIC_API_URL="https://${RUNPOD_POD_ID}-8000.proxy.runpod.net"
+    echo "[Auto-Config] RunPod detected: API URL set to $NEXT_PUBLIC_API_URL"
+elif [ -n "$VAST_CONTAINERLABEL" ]; then
+    # Vast.ai environment detected
+    export NEXT_PUBLIC_API_URL="https://${VAST_CONTAINERLABEL}-8000.direct.vast.ai"
+    echo "[Auto-Config] Vast.ai detected: API URL set to $NEXT_PUBLIC_API_URL"
+elif [ -n "$LAMBDA_INSTANCE_ID" ]; then
+    # Lambda Labs environment
+    export NEXT_PUBLIC_API_URL="http://localhost:8000"
+    echo "[Auto-Config] Lambda Labs detected: Using localhost"
+elif [ -z "$NEXT_PUBLIC_API_URL" ]; then
+    # Default: localhost (for local development or same-machine deployment)
+    export NEXT_PUBLIC_API_URL="http://localhost:8000"
+    echo "[Auto-Config] Using default localhost API URL"
+else
+    echo "[Auto-Config] Using provided API URL: $NEXT_PUBLIC_API_URL"
+fi
+
 # Create required directories
 mkdir -p /app/data/db /app/data/uploads /app/data/datasets \
          /app/data/output /app/data/checkpoints /app/data/logs \

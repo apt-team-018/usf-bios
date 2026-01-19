@@ -25,20 +25,35 @@ _COMPAT_MESSAGE = "System components are outdated. Core dependencies require upd
 _DEFAULT_SOURCES = "huggingface,modelscope,local"
 
 # Architecture restriction (100% reliable - always in model's config.json)
-# Environment variables:
-# - SUPPORTED_ARCHITECTURES: Whitelist - only these architectures allowed (comma-separated)
-#   Example: SUPPORTED_ARCHITECTURES=LlamaForCausalLM,Qwen2ForCausalLM
-# - EXCLUDED_ARCHITECTURES: Blacklist - these architectures blocked (comma-separated)
-#   Example: EXCLUDED_ARCHITECTURES=WhisperForConditionalGeneration,Wav2Vec2ForCTC
-# - If neither set: all architectures allowed
-# - If both set: whitelist takes priority
 #
-# Common architectures:
-# Text LLMs: LlamaForCausalLM, Qwen2ForCausalLM, MistralForCausalLM, Phi3ForCausalLM, GPT2LMHeadModel
-# VLM (Vision): Qwen2VLForConditionalGeneration, LlavaForConditionalGeneration, InternVLChatModel
-# ASR (Speech-to-Text): WhisperForConditionalGeneration, Wav2Vec2ForCTC, Speech2TextForConditionalGeneration
-# TTS (Text-to-Speech): SpeechT5ForTextToSpeech, VitsModel
-# Audio: Wav2Vec2ForSequenceClassification, HubertForSequenceClassification
+# ============================================================================
+# EXACT MATCH (highest priority):
+# ============================================================================
+# - SUPPORTED_ARCHITECTURES: Whitelist exact names
+# - EXCLUDED_ARCHITECTURES: Blacklist exact names
+#
+# ============================================================================
+# PATTERN MATCH (for model type filtering):
+# ============================================================================
+# - ARCH_ENDS_WITH: Allow if ends with (e.g., ForCausalLM for text LLMs)
+# - ARCH_STARTS_WITH: Allow if starts with (e.g., Qwen2 for Qwen models)
+# - ARCH_CONTAINS: Allow if contains (e.g., VL for vision-language)
+# - ARCH_NOT_ENDS_WITH / ARCH_NOT_STARTS_WITH / ARCH_NOT_CONTAINS: Block patterns
+#
+# ============================================================================
+# EXAMPLES:
+# ============================================================================
+# Allow only text LLMs:       ARCH_ENDS_WITH=ForCausalLM
+# Allow VLM only:             ARCH_CONTAINS=VL
+# Block ASR/TTS:              ARCH_NOT_CONTAINS=Whisper,Speech,Wav2Vec
+#
+# ============================================================================
+# ARCHITECTURE REFERENCE:
+# ============================================================================
+# Text LLMs: LlamaForCausalLM, Qwen2ForCausalLM, MistralForCausalLM (end with ForCausalLM)
+# VLM: Qwen2VLForConditionalGeneration, LlavaForConditionalGeneration (contain VL)
+# ASR: WhisperForConditionalGeneration, Wav2Vec2ForCTC (contain Whisper/Wav2Vec)
+# TTS: SpeechT5ForTextToSpeech, VitsModel (contain Speech/Vits)
 
 
 class SystemGuardError(Exception):
@@ -143,6 +158,68 @@ def _get_excluded_architectures() -> Set[str]:
     return {a.strip() for a in archs.split(",") if a.strip()}
 
 
+def _parse_patterns(env_var: str) -> List[str]:
+    """Parse comma-separated patterns from environment variable."""
+    val = os.environ.get(env_var, "")
+    if not val:
+        return []
+    return [p.strip() for p in val.split(",") if p.strip()]
+
+
+def _check_arch_patterns(architecture: str) -> Tuple[bool, str]:
+    """
+    Check architecture against pattern rules.
+    Returns (is_allowed, reason).
+    """
+    ends_with = _parse_patterns("ARCH_ENDS_WITH")
+    starts_with = _parse_patterns("ARCH_STARTS_WITH")
+    contains = _parse_patterns("ARCH_CONTAINS")
+    not_ends_with = _parse_patterns("ARCH_NOT_ENDS_WITH")
+    not_starts_with = _parse_patterns("ARCH_NOT_STARTS_WITH")
+    not_contains = _parse_patterns("ARCH_NOT_CONTAINS")
+    
+    # Check BLOCK patterns first
+    for pattern in not_ends_with:
+        if architecture.endswith(pattern):
+            return False, "Architecture compatibility check failed. Model type not supported by current system configuration."
+    
+    for pattern in not_starts_with:
+        if architecture.startswith(pattern):
+            return False, "Architecture compatibility check failed. Model type not supported by current system configuration."
+    
+    for pattern in not_contains:
+        if pattern in architecture:
+            return False, "Architecture compatibility check failed. Model type not supported by current system configuration."
+    
+    # Check ALLOW patterns (if any set, must match at least one)
+    has_allow_patterns = ends_with or starts_with or contains
+    
+    if has_allow_patterns:
+        allowed = False
+        
+        for pattern in ends_with:
+            if architecture.endswith(pattern):
+                allowed = True
+                break
+        
+        if not allowed:
+            for pattern in starts_with:
+                if architecture.startswith(pattern):
+                    allowed = True
+                    break
+        
+        if not allowed:
+            for pattern in contains:
+                if pattern in architecture:
+                    allowed = True
+                    break
+        
+        if not allowed:
+            return False, "Architecture compatibility check failed. Model type not supported by current system configuration."
+    
+    return True, ""
+
+
 def check_system_valid() -> None:
     """
     Check if system components are compatible.
@@ -199,13 +276,18 @@ def validate_architecture(architecture: str) -> None:
     """
     Validate architecture compatibility with current system.
     
-    Architecture restriction modes:
-    1. Whitelist (SUPPORTED_ARCHITECTURES): Only listed architectures allowed
-    2. Blacklist (EXCLUDED_ARCHITECTURES): Listed architectures blocked
-    3. No restriction: If neither set, all architectures allowed
-    4. Whitelist priority: If both set, whitelist takes priority
+    Priority order:
+    1. EXACT MATCH (highest priority):
+       - SUPPORTED_ARCHITECTURES: Whitelist exact names
+       - EXCLUDED_ARCHITECTURES: Blacklist exact names
     
-    Strict exact match - architecture name must match exactly.
+    2. PATTERN MATCH:
+       - ARCH_ENDS_WITH: Allow if ends with (e.g., ForCausalLM)
+       - ARCH_STARTS_WITH: Allow if starts with (e.g., Qwen2)
+       - ARCH_CONTAINS: Allow if contains (e.g., VL)
+       - ARCH_NOT_*: Block if matches pattern
+    
+    3. No restriction: If nothing set, all architectures allowed
     
     Args:
         architecture: Model architecture class name (e.g., LlamaForCausalLM)
@@ -220,23 +302,35 @@ def validate_architecture(architecture: str) -> None:
     whitelist = _get_supported_architectures()
     blacklist = _get_excluded_architectures()
     
-    # If whitelist is set, only allow listed architectures
+    # Check pattern environment variables
+    has_patterns = any(os.environ.get(v) for v in [
+        "ARCH_ENDS_WITH", "ARCH_STARTS_WITH", "ARCH_CONTAINS",
+        "ARCH_NOT_ENDS_WITH", "ARCH_NOT_STARTS_WITH", "ARCH_NOT_CONTAINS"
+    ])
+    
+    # EXACT MATCH - whitelist
     if whitelist:
-        if architecture not in whitelist:
+        if architecture in whitelist:
+            return  # Allowed by whitelist
+        # Not in whitelist - if no patterns configured, block
+        if not has_patterns:
             msg = "Architecture compatibility check failed. Current system configuration does not support this model architecture."
             print(f"\n[USF BIOS] {msg}\n", file=sys.stderr)
             raise ArchitectureCompatibilityError(msg)
-        return
     
-    # If blacklist is set, block listed architectures
+    # EXACT MATCH - blacklist
     if blacklist:
         if architecture in blacklist:
             msg = "Architecture compatibility check failed. Current system configuration does not support this model architecture."
             print(f"\n[USF BIOS] {msg}\n", file=sys.stderr)
             raise ArchitectureCompatibilityError(msg)
-        return
     
-    # No restriction - all architectures allowed
+    # PATTERN MATCH check
+    is_allowed, reason = _check_arch_patterns(architecture)
+    if not is_allowed:
+        print(f"\n[USF BIOS] {reason}\n", file=sys.stderr)
+        raise ArchitectureCompatibilityError(reason)
+    
     return
 
 
