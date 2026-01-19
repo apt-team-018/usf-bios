@@ -112,9 +112,10 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange }: Prop
     capabilities.supported_dataset_sources.includes(tab.sourceKey)
   )
   
-  // Set activeTab to first available tab when capabilities change
+  // Always auto-select first available tab when capabilities load
+  // User can change it if they want, but first option is pre-selected
   useEffect(() => {
-    if (SOURCE_TABS.length > 0 && !SOURCE_TABS.find(t => t.id === activeTab)) {
+    if (SOURCE_TABS.length > 0) {
       setActiveTab(SOURCE_TABS[0].id)
     }
   }, [capabilities.supported_dataset_sources])

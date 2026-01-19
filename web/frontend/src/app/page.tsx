@@ -326,15 +326,16 @@ export default function Home() {
         // Get the supported model sources
         const supportedSources = data.supported_model_sources || data.supported_sources || ['local']
         
-        // If system is designed for a specific model, pre-fill the config
+        // Always auto-select the first supported source by default
+        // User can change it if they want, but first option is pre-selected
         if (data.has_model_restriction && data.supported_model) {
           setConfig(prev => ({
             ...prev,
             model_path: data.supported_model,
             model_source: supportedSources[0] || 'local'
           }))
-        } else if (!supportedSources.includes('huggingface')) {
-          // If huggingface is not supported, switch to first available source
+        } else {
+          // Auto-select first available source
           setConfig(prev => ({
             ...prev,
             model_source: supportedSources[0] || 'local'
