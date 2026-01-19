@@ -6,6 +6,7 @@ import os
 import subprocess
 
 from ...core.config import settings
+from ...core.capabilities import get_validator
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -261,115 +262,80 @@ async def readiness_check():
 # Users should perceive these as hardware/software specifications.
 # =============================================================================
 
-class SystemCapabilities(BaseModel):
-    """System capability information - what this system can fine-tune"""
+class SystemInfo(BaseModel):
+    """System information - what this system is designed for"""
     supported_model: Optional[str] = None
     supported_sources: List[str]
-    supported_architectures: Optional[List[str]] = None
     supported_modalities: List[str]
-    has_model_restriction: bool
-    has_architecture_restriction: bool
-    has_modality_restriction: bool
 
 
-class CapabilityValidationRequest(BaseModel):
-    """Request to validate if system supports a configuration"""
+class ValidationRequest(BaseModel):
+    """Request to check if configuration works with this system"""
     model_path: str
     model_source: str = "huggingface"
     architecture: Optional[str] = None
     modality: str = "text2text"
 
 
-class CapabilityValidationResponse(BaseModel):
-    """Response indicating if system supports the configuration"""
+class ValidationResponse(BaseModel):
+    """Response indicating if configuration is compatible"""
     is_supported: bool
-    capability_message: Optional[str] = None
-    supported_model: Optional[str] = None
-    supported_architectures: Optional[List[str]] = None
-    supported_modalities: Optional[List[str]] = None
+    message: Optional[str] = None
 
 
-@router.get("/capabilities", response_model=SystemCapabilities)
+@router.get("/info", response_model=SystemInfo, include_in_schema=False)
+async def get_system_info():
+    """Get system design information (hidden from docs)."""
+    validator = get_validator()
+    info = validator.get_info()
+    return SystemInfo(**info)
+
+
+@router.get("/capabilities", include_in_schema=False)
 async def get_system_capabilities():
-    """
-    Get what this system is capable of fine-tuning.
-    
-    Returns information about:
-    - Supported model (if system is designed for a specific model)
-    - Supported model sources (huggingface, modelscope, local)
-    - Supported architectures (if system is designed for specific architectures)
-    - Supported modalities (text2text, multimodal, speech, etc.)
-    
-    Frontend should use this to:
-    - Pre-fill model selection with supported model
-    - Hide/disable unsupported options
-    - Show system capability information
-    """
-    info = settings.get_capability_info()
-    return SystemCapabilities(**info)
+    """Hidden - use /info instead."""
+    validator = get_validator()
+    return validator.get_info()
 
 
-@router.get("/model-lock", response_model=SystemCapabilities, include_in_schema=False)
+@router.get("/model-lock", include_in_schema=False)
 async def get_model_capabilities_legacy():
-    """
-    Legacy endpoint for backward compatibility.
-    Use /capabilities instead.
-    """
-    info = settings.get_capability_info()
-    return SystemCapabilities(**info)
+    """Legacy endpoint - hidden from docs."""
+    validator = get_validator()
+    return validator.get_info()
 
 
-@router.post("/validate-capability", response_model=CapabilityValidationResponse)
-async def validate_system_capability(request: CapabilityValidationRequest):
-    """
-    Validate if this system supports the requested fine-tuning configuration.
+@router.post("/validate", response_model=ValidationResponse, include_in_schema=False)
+async def validate_configuration(request: ValidationRequest):
+    """Validate if configuration works with this system (hidden from docs)."""
+    validator = get_validator()
     
-    Checks:
-    1. Model path - is this model supported?
-    2. Model source - is this source supported?
-    3. Architecture - is this architecture supported?
-    4. Modality - is this modality supported?
-    
-    Returns capability information if not supported.
-    """
     # Validate model path and source
-    is_valid, message = settings.validate_model_path(
-        request.model_path, 
-        request.model_source
-    )
+    is_valid, message = validator.validate_model_path(request.model_path, request.model_source)
     if not is_valid:
-        return CapabilityValidationResponse(
-            is_supported=False,
-            capability_message=message,
-            supported_model=settings.SUPPORTED_MODEL_PATH
-        )
+        return ValidationResponse(is_supported=False, message=message)
     
     # Validate architecture if provided
     if request.architecture:
-        is_valid, message = settings.validate_architecture(request.architecture)
+        is_valid, message = validator.validate_architecture(request.architecture)
         if not is_valid:
-            return CapabilityValidationResponse(
-                is_supported=False,
-                capability_message=message,
-                supported_architectures=list(settings.supported_architectures_set) if settings.supported_architectures_set else None
-            )
+            return ValidationResponse(is_supported=False, message=message)
     
     # Validate modality
-    is_valid, message = settings.validate_modality(request.modality)
+    is_valid, message = validator.validate_modality(request.modality)
     if not is_valid:
-        return CapabilityValidationResponse(
-            is_supported=False,
-            capability_message=message,
-            supported_modalities=list(settings.supported_modalities_set)
-        )
+        return ValidationResponse(is_supported=False, message=message)
     
-    return CapabilityValidationResponse(is_supported=True)
+    return ValidationResponse(is_supported=True)
 
 
-@router.post("/validate-model", response_model=CapabilityValidationResponse)
-async def validate_model_for_training(request: CapabilityValidationRequest):
-    """
-    Legacy endpoint - redirects to /validate-capability.
-    Maintained for backward compatibility.
-    """
-    return await validate_system_capability(request)
+@router.post("/validate-capability", include_in_schema=False)
+async def validate_system_capability(request: ValidationRequest):
+    """Legacy endpoint - hidden from docs."""
+    return await validate_configuration(request)
+
+
+@router.post("/validate-model", include_in_schema=False)
+async def validate_model_for_training(request: ValidationRequest):
+    """Legacy endpoint - hidden from docs."""
+    return await validate_configuration(request)
