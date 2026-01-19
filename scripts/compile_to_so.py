@@ -24,7 +24,8 @@ def get_py_files(directory):
     # Directories to skip
     skip_dirs = {'__pycache__', 'venv', 'env', '.venv', '.env', 'node_modules', '.git', 'build', 'dist', 'egg-info'}
     # Files to skip (Pydantic models with methods don't work well with Cython)
-    skip_files = {'__init__.py', 'config.py'}
+    # db_models.py - SQLAlchemy ORM models with declarative base don't compile well
+    skip_files = {'__init__.py', 'config.py', 'db_models.py'}
     
     for root, dirs, files in os.walk(directory):
         # Skip excluded directories

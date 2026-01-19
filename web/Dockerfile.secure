@@ -95,19 +95,21 @@ COPY --from=python-compiler /compile/usf_bios/ /app/usf_bios/
 COPY --from=python-compiler /compile/web/backend/ /app/web/backend/
 
 # VERIFICATION: Ensure all critical files exist after Cython compilation
-RUN echo "=== VERIFICATION: Checking compiled files ==="  && \
-    echo "Checking backend app structure..." && \
+RUN echo "=== VERIFICATION: Checking compiled files ===" && \
+    echo "Backend app structure:" && \
     ls -la /app/web/backend/app/ && \
-    echo "Checking models directory..." && \
+    echo "Models directory:" && \
     ls -la /app/web/backend/app/models/ && \
-    echo "Checking for db_models .so file..." && \
-    find /app/web/backend/app/models -name "db_models*" -type f && \
-    echo "Checking __init__.py files exist..." && \
+    echo "Looking for .so files:" && \
+    find /app/web/backend -name "*.so" | head -20 && \
+    echo "Checking __init__.py files:" && \
     test -f /app/web/backend/app/__init__.py && echo "  ✓ app/__init__.py" && \
     test -f /app/web/backend/app/models/__init__.py && echo "  ✓ app/models/__init__.py" && \
     test -f /app/web/backend/app/api/__init__.py && echo "  ✓ app/api/__init__.py" && \
     test -f /app/web/backend/app/core/__init__.py && echo "  ✓ app/core/__init__.py" && \
     test -f /app/web/backend/app/services/__init__.py && echo "  ✓ app/services/__init__.py" && \
+    echo "Checking db_models.py exists (kept as .py - SQLAlchemy ORM):" && \
+    test -f /app/web/backend/app/models/db_models.py && echo "  ✓ db_models.py found" && \
     echo "=== VERIFICATION PASSED ==="
 
 # Copy frontend build
