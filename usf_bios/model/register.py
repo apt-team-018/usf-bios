@@ -261,7 +261,7 @@ class ModelLoader(BaseModelLoader):
             arch_str = str(getattr(config, 'architectures', [])).lower()
             if 'mistral' in model_type or 'mistral' in arch_str:
                 should_fix_regex = True
-            elif 'usf' in arch_str or 'omega' in arch_str:
+            elif model_type == 'usf_omega':
                 should_fix_regex = True
         except Exception:
             pass
