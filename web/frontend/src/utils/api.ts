@@ -1,122 +1,71 @@
 /**
- * API URL Detection Utility
+ * API URL Configuration
  * 
- * Reads backend URL from /runtime-config.json which is written by the
- * entrypoint script at container startup. This is the most reliable method
- * as the backend knows its own external URL from environment variables.
- * 
- * Fallback: hostname-based detection for cases where config isn't available.
+ * Reads backend URL from /runtime-config.json ONCE at startup.
+ * This file is written by entrypoint.sh which knows the external URL.
+ * The URL is cached permanently - no re-reading after startup.
  */
 
-// Cached API URL - loaded once at startup, used for entire runtime
-let _cachedApiUrl: string | null = null
-let _configPromise: Promise<string> | null = null
-
-interface RuntimeConfig {
-  backendUrl: string
-  frontendUrl: string
-  timestamp: string
-}
+// PERMANENT cache - set once at startup, never changes
+let _backendUrl: string | null = null
+let _initPromise: Promise<string> | null = null
 
 /**
- * Get fallback backend URL based on current hostname.
- * Used only when runtime-config.json is not available.
+ * Fallback URL based on hostname (only used if config file missing)
  */
-function getFallbackBackendUrl(): string {
+function getFallbackUrl(): string {
   if (typeof window === 'undefined') return ''
-  
-  const hostname = window.location.hostname
-  const protocol = window.location.protocol
-  
-  // RunPod, Vast.ai, etc. - port is in hostname
-  if (hostname.includes('-3000')) {
-    return `${protocol}//${hostname.replace(/-3000/g, '-8000')}`
-  }
-  
-  // Local development
-  if (hostname === 'localhost' || hostname === '127.0.0.1') {
-    return 'http://localhost:8000'
-  }
-  
-  // Default: same hostname, port 8000
-  return `${protocol}//${hostname}:8000`
+  const h = window.location.hostname
+  const p = window.location.protocol
+  if (h.includes('-3000')) return `${p}//${h.replace(/-3000/g, '-8000')}`
+  if (h === 'localhost' || h === '127.0.0.1') return 'http://localhost:8000'
+  return `${p}//${h}:8000`
 }
 
 /**
- * Load backend URL from runtime config file.
- * This file is written by entrypoint.sh at container startup.
- */
-async function loadRuntimeConfig(): Promise<string> {
-  try {
-    console.log('[API] Loading runtime config from /runtime-config.json...')
-    
-    const response = await fetch('/runtime-config.json', {
-      cache: 'no-store', // Always get fresh config
-    })
-    
-    if (!response.ok) {
-      throw new Error(`Config not found: ${response.status}`)
-    }
-    
-    const config: RuntimeConfig = await response.json()
-    console.log('[API] Runtime config loaded:', config)
-    console.log('[API] Backend URL:', config.backendUrl)
-    
-    return config.backendUrl
-  } catch (error) {
-    console.warn('[API] Failed to load runtime config, using fallback:', error)
-    const fallback = getFallbackBackendUrl()
-    console.log('[API] Fallback backend URL:', fallback)
-    return fallback
-  }
-}
-
-/**
- * Initialize API URL. Call this once at app startup.
- * Loads from runtime-config.json written by entrypoint script.
+ * Initialize: Read config file ONCE, cache forever.
+ * Called automatically on first API call.
  */
 export async function initApiUrl(): Promise<string> {
-  if (_cachedApiUrl !== null) {
-    return _cachedApiUrl
-  }
+  // Already initialized - return cached value
+  if (_backendUrl !== null) return _backendUrl
   
-  // Prevent multiple simultaneous loads
-  if (_configPromise === null) {
-    _configPromise = loadRuntimeConfig().then(url => {
-      _cachedApiUrl = url
-      return url
-    })
-  }
+  // Already initializing - wait for it
+  if (_initPromise !== null) return _initPromise
   
-  return _configPromise
+  // First call - read config ONCE
+  _initPromise = (async (): Promise<string> => {
+    try {
+      console.log('[API] Reading config (ONE TIME ONLY)...')
+      const res = await fetch('/runtime-config.json')
+      if (!res.ok) throw new Error('Config not found')
+      const cfg = await res.json()
+      _backendUrl = cfg.backendUrl || getFallbackUrl()
+      console.log('[API] Backend URL (cached permanently):', _backendUrl)
+    } catch {
+      _backendUrl = getFallbackUrl()
+      console.log('[API] Using fallback (cached permanently):', _backendUrl)
+    }
+    return _backendUrl as string
+  })()
+  
+  return _initPromise
 }
 
 /**
- * Get the cached API URL synchronously.
- * Returns fallback if not yet loaded.
+ * Get cached backend URL. Returns fallback if not yet initialized.
  */
 export function getApiUrl(): string {
-  if (_cachedApiUrl !== null) {
-    return _cachedApiUrl
-  }
-  
-  // Start loading in background if not already started
-  if (_configPromise === null && typeof window !== 'undefined') {
-    initApiUrl()
-  }
-  
-  // Return fallback synchronously while config loads
-  return getFallbackBackendUrl()
+  if (_backendUrl !== null) return _backendUrl
+  if (typeof window !== 'undefined') initApiUrl() // Start loading
+  return getFallbackUrl()
 }
 
-/**
- * Pre-computed API URL for use in components.
- * This starts detection and returns best guess synchronously.
- */
+/** Cached API URL for components */
 export const API_URL = typeof window !== 'undefined' ? getApiUrl() : ''
 
 /**
- * Helper to make API calls with the correct base URL.
+ * Make API call - waits for URL init on first call.
  * Waits for URL detection to complete on first call.
  */
 export async function apiFetch(endpoint: string, options?: RequestInit): Promise<Response> {
