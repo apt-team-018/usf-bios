@@ -85,6 +85,16 @@ The platform is designed to work with most transformer-based architectures out o
 pip install usf-bios -U
 ```
 
+#### For UltraSafe Models (USF Omega, etc.)
+
+UltraSafe models require a custom transformers fork with architecture support. After installing usf-bios, run:
+
+```bash
+pip install git+https://github.com/apt-team-018/transformers.git
+```
+
+> **Note**: The standard PyPI transformers package does not include UltraSafe model architectures. This step is required for training/inference with US Inc proprietary models.
+
 ### Install from Source
 
 ```bash

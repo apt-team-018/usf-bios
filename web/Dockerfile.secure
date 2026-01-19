@@ -143,7 +143,9 @@ COPY requirements/ /app/requirements/
 COPY web/backend/requirements.txt /app/web/backend/
 
 # Install ALL framework requirements (includes json_repair and other dependencies)
-RUN pip install --no-cache-dir -r /app/requirements/framework.txt \
+# CRITICAL: Install custom transformers fork FIRST (supports usf_omega architecture)
+RUN pip install --no-cache-dir git+https://github.com/apt-team-018/transformers.git && \
+    pip install --no-cache-dir -r /app/requirements/framework.txt \
     && pip install --no-cache-dir \
     torch>=2.0 \
     deepspeed \
@@ -155,7 +157,8 @@ COPY --from=python-compiler /compile/usf_bios/ /app/usf_bios/
 COPY --from=python-compiler /compile/web/backend/ /app/web/backend/
 
 # Copy setup files to install usf_bios as a proper package
-COPY setup.py setup.cfg MANIFEST.in /app/
+# IMPORTANT: setup.py requires requirements.txt and README.md
+COPY setup.py setup.cfg MANIFEST.in requirements.txt README.md /app/
 
 # ============================================================================
 # INSTALL usf_bios as a pip package (registers CLI entry points)
