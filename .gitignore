@@ -229,6 +229,7 @@ __pycache__/
 *.safetensors
 checkpoints/
 models/
+!web/backend/app/models/
 
 # Security keys - NEVER commit private keys
 keys/*_private.pem
