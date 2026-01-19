@@ -1,0 +1,123 @@
+name: Docker Build Test (Frontend + Backend Only)
+
+# This workflow builds ONLY frontend + backend for quick testing
+# Does NOT include USF BIOS training code or Cython compilation
+# Use this to verify the web UI works before full build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'webui-secure'
+        type: choice
+        options:
+          - webui-secure    # Backend + Frontend with Cython (recommended test)
+          - webui-only      # Fast: Frontend + Backend only (no Cython)
+          - full-secure     # Full: Complete with Cython + USF BIOS training
+
+env:
+  DOCKER_IMAGE: arpitsh018/usf-bios
+  REGISTRY: docker.io
+
+jobs:
+  build-test:
+    # Use larger runner for Pro subscription (faster builds)
+    runs-on: ubuntu-latest-4-cores
+    timeout-minutes: 60
+    
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set build configuration
+        id: config
+        run: |
+          if [[ "${{ inputs.build_type }}" == "webui-only" ]]; then
+            echo "dockerfile=web/Dockerfile.webui-test" >> $GITHUB_OUTPUT
+            echo "tag_suffix=-webui-test" >> $GITHUB_OUTPUT
+            echo "description=Frontend + Backend only (no Cython, no training)" >> $GITHUB_OUTPUT
+          elif [[ "${{ inputs.build_type }}" == "webui-secure" ]]; then
+            echo "dockerfile=web/Dockerfile.webui-secure" >> $GITHUB_OUTPUT
+            echo "tag_suffix=-webui-secure" >> $GITHUB_OUTPUT
+            echo "description=Frontend + Backend with Cython compilation (no training)" >> $GITHUB_OUTPUT
+          else
+            echo "dockerfile=web/Dockerfile.secure" >> $GITHUB_OUTPUT
+            echo "tag_suffix=-secure" >> $GITHUB_OUTPUT
+            echo "description=Full secure build with Cython + USF BIOS training" >> $GITHUB_OUTPUT
+          fi
+          echo "sha_short=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./${{ steps.config.outputs.dockerfile }}
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.DOCKER_IMAGE }}:test${{ steps.config.outputs.tag_suffix }}
+            ${{ env.DOCKER_IMAGE }}:${{ steps.config.outputs.sha_short }}${{ steps.config.outputs.tag_suffix }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Test the built image
+        if: success()
+        run: |
+          echo "Testing built image..."
+          docker pull ${{ env.DOCKER_IMAGE }}:test${{ steps.config.outputs.tag_suffix }}
+          
+          # Start container
+          docker run -d --name test-container \
+            -p 3000:3000 -p 8000:8000 \
+            ${{ env.DOCKER_IMAGE }}:test${{ steps.config.outputs.tag_suffix }}
+          
+          # Wait for services to start
+          echo "Waiting for services to start..."
+          sleep 20
+          
+          # Test health endpoint
+          echo "Testing health endpoint..."
+          curl -f http://localhost:8000/health || (docker logs test-container && exit 1)
+          
+          # Test frontend
+          echo "Testing frontend..."
+          curl -f http://localhost:3000 || (docker logs test-container && exit 1)
+          
+          echo "✓ All tests passed!"
+          
+          # Cleanup
+          docker stop test-container
+          docker rm test-container
+
+      - name: Build Summary
+        run: |
+          echo "## Docker Build Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Build Type** | ${{ inputs.build_type }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Description** | ${{ steps.config.outputs.description }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Dockerfile** | ${{ steps.config.outputs.dockerfile }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Image** | ${{ env.DOCKER_IMAGE }}:test${{ steps.config.outputs.tag_suffix }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY

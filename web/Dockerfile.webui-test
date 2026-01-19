@@ -1,0 +1,94 @@
+# USF BIOS Web UI Test - Frontend + Backend ONLY
+# NO USF BIOS training code, NO Cython compilation
+# Purpose: Quick test build to verify web UI works
+# Build: docker build -f web/Dockerfile.webui-test -t usf-bios-webui-test .
+# Run: docker run -p 3000:3000 -p 8000:8000 usf-bios-webui-test
+
+# ============================================================================
+# Stage 1: Frontend Builder
+# ============================================================================
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /app/frontend
+
+# Copy package files first for caching
+COPY web/frontend/package*.json ./
+
+# Install dependencies
+RUN npm ci
+
+# Copy frontend source
+COPY web/frontend/ ./
+
+# Build the frontend
+RUN npm run build
+
+# ============================================================================
+# Stage 2: Production Image (Web UI Only)
+# ============================================================================
+FROM python:3.11-slim
+
+LABEL maintainer="US Inc <support@us.inc>"
+LABEL description="USF BIOS Web UI Test - Frontend + Backend Only"
+LABEL version="1.0.0-test"
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app/backend
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy backend requirements (web UI only - no ML dependencies)
+COPY web/backend/requirements-webui.txt /app/backend/requirements-webui.txt
+RUN pip install --no-cache-dir -r /app/backend/requirements-webui.txt
+
+# Copy backend code
+COPY web/backend/ /app/backend/
+
+# VERIFICATION: Ensure all critical backend files exist
+RUN echo "=== VERIFICATION: Checking backend files ===" && \
+    echo "Backend structure:" && \
+    ls -la /app/backend/app/ && \
+    echo "Models directory:" && \
+    ls -la /app/backend/app/models/ && \
+    echo "Checking critical files..." && \
+    test -f /app/backend/app/__init__.py && echo "  ✓ app/__init__.py" && \
+    test -f /app/backend/app/main.py && echo "  ✓ app/main.py" && \
+    test -f /app/backend/app/models/__init__.py && echo "  ✓ app/models/__init__.py" && \
+    test -f /app/backend/app/models/db_models.py && echo "  ✓ app/models/db_models.py" && \
+    test -f /app/backend/app/models/schemas.py && echo "  ✓ app/models/schemas.py" && \
+    test -f /app/backend/app/api/__init__.py && echo "  ✓ app/api/__init__.py" && \
+    test -f /app/backend/app/core/__init__.py && echo "  ✓ app/core/__init__.py" && \
+    test -f /app/backend/app/services/__init__.py && echo "  ✓ app/services/__init__.py" && \
+    echo "=== VERIFICATION PASSED ==="
+
+# Copy built frontend from builder stage
+COPY --from=frontend-builder /app/frontend/.next/standalone /app/frontend/
+COPY --from=frontend-builder /app/frontend/.next/static /app/frontend/.next/static
+COPY --from=frontend-builder /app/frontend/public /app/frontend/public
+
+# Create data directories (for SQLite database)
+RUN mkdir -p /app/data/datasets /app/data/output /app/data/checkpoints \
+    /app/data/logs /app/data/terminal_logs /app/data/db /app/backend/data
+
+# Create startup script
+COPY web/start-webui.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
+# Expose ports
+EXPOSE 3000 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Default command
+CMD ["/app/start.sh"]

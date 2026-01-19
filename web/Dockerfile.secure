@@ -94,6 +94,22 @@ RUN pip install --no-cache-dir \
 COPY --from=python-compiler /compile/usf_bios/ /app/usf_bios/
 COPY --from=python-compiler /compile/web/backend/ /app/web/backend/
 
+# VERIFICATION: Ensure all critical files exist after Cython compilation
+RUN echo "=== VERIFICATION: Checking compiled files ==="  && \
+    echo "Checking backend app structure..." && \
+    ls -la /app/web/backend/app/ && \
+    echo "Checking models directory..." && \
+    ls -la /app/web/backend/app/models/ && \
+    echo "Checking for db_models .so file..." && \
+    find /app/web/backend/app/models -name "db_models*" -type f && \
+    echo "Checking __init__.py files exist..." && \
+    test -f /app/web/backend/app/__init__.py && echo "  ✓ app/__init__.py" && \
+    test -f /app/web/backend/app/models/__init__.py && echo "  ✓ app/models/__init__.py" && \
+    test -f /app/web/backend/app/api/__init__.py && echo "  ✓ app/api/__init__.py" && \
+    test -f /app/web/backend/app/core/__init__.py && echo "  ✓ app/core/__init__.py" && \
+    test -f /app/web/backend/app/services/__init__.py && echo "  ✓ app/services/__init__.py" && \
+    echo "=== VERIFICATION PASSED ==="
+
 # Copy frontend build
 COPY --from=frontend-builder /build/frontend/.next/standalone /app/web/frontend/
 COPY --from=frontend-builder /build/frontend/.next/static /app/web/frontend/.next/static
@@ -108,6 +124,7 @@ RUN chmod -R 555 /app/usf_bios /app/web
 
 # Create all data directories AFTER chmod (must match docker-compose volumes)
 # These need to be writable by the usf user for database and uploads
+# ALSO create /app/web/backend/data for SQLite if using relative path
 RUN mkdir -p /app/data/uploads \
     /app/data/datasets \
     /app/data/output \
@@ -115,9 +132,10 @@ RUN mkdir -p /app/data/uploads \
     /app/data/logs \
     /app/data/terminal_logs \
     /app/data/models \
-    /app/data/db && \
-    chown -R usf:usf /app/data && \
-    chmod -R 755 /app/data
+    /app/data/db \
+    /app/web/backend/data && \
+    chown -R usf:usf /app/data /app/web/backend/data && \
+    chmod -R 755 /app/data /app/web/backend/data
 
 # Switch to non-root user
 USER usf

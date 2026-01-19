@@ -1,0 +1,145 @@
+# USF BIOS Web UI - Secure Build (Frontend + Backend with Cython)
+# - Compiles Python backend to native .so binaries (Cython)
+# - Does NOT include usf_bios training library
+# - Same security approach as Dockerfile.secure
+# - Use this to test Cython compilation before full build
+# Copyright (c) US Inc. All rights reserved.
+
+# ============================================================================
+# Stage 1: Frontend Builder
+# ============================================================================
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /build/frontend
+COPY web/frontend/package*.json ./
+RUN npm ci
+COPY web/frontend/ ./
+RUN npm run build
+
+# ============================================================================
+# Stage 2: Python Compiler - Compile backend to native .so files using Cython
+# ============================================================================
+FROM python:3.11-slim AS python-compiler
+
+WORKDIR /compile
+
+# Install build tools and Cython
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir cython setuptools
+
+# Copy compilation script (backend only version)
+COPY scripts/compile_backend_only.py /compile/compile_backend_only.py
+
+# Copy ONLY web backend source (NO usf_bios)
+COPY web/backend/ /compile/web/backend/
+
+# Show what we're compiling
+RUN echo "=== Files to compile ===" && \
+    find /compile/web/backend -name "*.py" | head -30
+
+# Run the Cython compilation (converts .py to native .so files)
+RUN python /compile/compile_backend_only.py
+
+# Verify compilation success
+RUN echo "=== Compiled .so files ===" && \
+    find /compile/web/backend -name "*.so" && \
+    echo "=== Remaining __init__.py files ===" && \
+    find /compile/web/backend -name "__init__.py"
+
+# Clean up
+RUN find /compile -name "*.pyc" -delete && \
+    find /compile -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true && \
+    find /compile -name "build" -type d -exec rm -rf {} + 2>/dev/null || true && \
+    rm -f /compile/compile_backend_only.py
+
+# ============================================================================
+# Stage 3: Production Image (Secure Web UI)
+# ============================================================================
+FROM python:3.11-slim
+
+LABEL maintainer="US Inc <support@us.inc>"
+LABEL description="USF BIOS Web UI - Secure Build (Cython compiled)"
+LABEL version="1.0.0-webui-secure"
+
+# Security: Create non-root user
+RUN groupadd -r usf && useradd -r -g usf usf
+
+# Environment
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV HOME=/app
+ENV PYTHONPATH=/app/backend
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Copy and install web UI requirements (no ML dependencies)
+COPY web/backend/requirements-webui.txt /app/backend/requirements-webui.txt
+RUN pip install --no-cache-dir -r /app/backend/requirements-webui.txt
+
+# Copy compiled .so binaries (no source code)
+COPY --from=python-compiler /compile/web/backend/ /app/backend/
+
+# VERIFICATION: Ensure all critical files exist after Cython compilation
+RUN echo "=== VERIFICATION: Checking compiled backend ===" && \
+    echo "Backend app structure:" && \
+    ls -la /app/backend/app/ && \
+    echo "Models directory:" && \
+    ls -la /app/backend/app/models/ && \
+    echo "Looking for .so files:" && \
+    find /app/backend -name "*.so" | head -20 && \
+    echo "Checking __init__.py files:" && \
+    test -f /app/backend/app/__init__.py && echo "  ✓ app/__init__.py" && \
+    test -f /app/backend/app/models/__init__.py && echo "  ✓ app/models/__init__.py" && \
+    test -f /app/backend/app/api/__init__.py && echo "  ✓ app/api/__init__.py" && \
+    test -f /app/backend/app/core/__init__.py && echo "  ✓ app/core/__init__.py" && \
+    test -f /app/backend/app/services/__init__.py && echo "  ✓ app/services/__init__.py" && \
+    echo "Checking db_models .so exists:" && \
+    find /app/backend/app/models -name "db_models*.so" | grep -q . && echo "  ✓ db_models.so found" && \
+    echo "=== VERIFICATION PASSED ==="
+
+# Copy frontend build
+COPY --from=frontend-builder /build/frontend/.next/standalone /app/frontend/
+COPY --from=frontend-builder /build/frontend/.next/static /app/frontend/.next/static
+COPY --from=frontend-builder /build/frontend/public /app/frontend/public
+
+# Copy entrypoint script
+COPY web/entrypoint-webui.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+# Create data directories (writable by usf user)
+RUN mkdir -p /app/data/uploads \
+    /app/data/datasets \
+    /app/data/output \
+    /app/data/checkpoints \
+    /app/data/logs \
+    /app/data/terminal_logs \
+    /app/data/models \
+    /app/data/db \
+    /app/backend/data && \
+    chown -R usf:usf /app/data /app/backend/data && \
+    chmod -R 755 /app/data /app/backend/data
+
+# Switch to non-root user
+USER usf
+
+# Expose ports
+EXPOSE 3000 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Entry point
+ENTRYPOINT ["/app/entrypoint.sh"]
