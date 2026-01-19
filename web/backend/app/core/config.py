@@ -1,5 +1,5 @@
 # Copyright (c) US Inc. All rights reserved.
-"""Application configuration settings - Environment variables only, no logic."""
+"""Application configuration settings - Non-sensitive settings only."""
 
 import os
 from pathlib import Path
@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Application settings loaded from environment variables."""
+    """Application settings - non-sensitive values only."""
     
     # API Settings
     APP_NAME: str = "USF BIOS API"
@@ -23,11 +23,8 @@ class Settings(BaseSettings):
     # CORS Settings
     CORS_ORIGINS: List[str] = ["*"]
     
-    # Paths
-    BASE_DIR: Path = Path(__file__).parent.parent.parent.parent.parent
-    UPLOAD_DIR: Path = Path("/app/data/uploads") if os.path.exists("/app") else Path("./uploads")
-    OUTPUT_DIR: Path = Path("/app/data/outputs") if os.path.exists("/app") else Path("./outputs")
-    MODELS_DIR: Path = Path("/app/data/models") if os.path.exists("/app") else Path("./models")
+    # Data Paths (user data locations - not sensitive)
+    DATA_DIR: Path = Path("/app/data") if os.path.exists("/app") else Path("./data")
     
     # Training Settings
     MAX_CONCURRENT_JOBS: int = 3
@@ -37,34 +34,32 @@ class Settings(BaseSettings):
     API_KEY: Optional[str] = None
     DISABLE_CLI: bool = True
     
-    # System Configuration (loaded from environment)
-    SUPPORTED_MODEL_PATH: Optional[str] = None
-    SUPPORTED_MODEL_SOURCES: str = "huggingface,modelscope,local"
-    SUPPORTED_ARCHITECTURES: Optional[str] = None
-    SUPPORTED_MODALITIES: str = "text2text,multimodal,speech2text,text2speech,vision,audio"
-    EXTENDED_CAPABILITY: bool = False
-    CAPABILITY_ID: Optional[str] = None
-    
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=True,
     )
+    
+    @property
+    def UPLOAD_DIR(self) -> Path:
+        return self.DATA_DIR / "uploads"
+    
+    @property
+    def OUTPUT_DIR(self) -> Path:
+        return self.DATA_DIR / "outputs"
+    
+    @property
+    def MODELS_DIR(self) -> Path:
+        return self.DATA_DIR / "models"
 
 
 settings = Settings()
 
 # Create directories if they don't exist
+settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
 settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 settings.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 settings.MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Initialize capability validator with settings
+# Initialize capability validator (loads settings from environment in binary)
 from .capabilities import init_validator
-_validator = init_validator(
-    supported_model_path=settings.SUPPORTED_MODEL_PATH,
-    supported_sources=settings.SUPPORTED_MODEL_SOURCES,
-    supported_architectures=settings.SUPPORTED_ARCHITECTURES,
-    supported_modalities=settings.SUPPORTED_MODALITIES,
-    extended_capability=settings.EXTENDED_CAPABILITY,
-    capability_id=settings.CAPABILITY_ID
-)
+init_validator()

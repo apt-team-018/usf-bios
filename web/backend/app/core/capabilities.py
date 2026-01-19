@@ -2,37 +2,37 @@
 """
 System capability validation module.
 This file is compiled to native binary (.so) for IP protection.
-All validation logic is here - users cannot see how restrictions work.
+All validation logic AND sensitive settings are here.
+Users cannot see defaults, logic, or how restrictions work.
 """
 
 from typing import Optional, Set, Tuple, List
+import os
 import base64
 
-# Internal capability key (obfuscated in binary)
+# Internal capability key (obfuscated in binary - invisible after compilation)
 _CAPABILITY_KEY = base64.b64decode(b"YXJwaXRzaDAxOA==").decode()
+
+# Default values (hidden in binary after compilation)
+_DEFAULT_SOURCES = "huggingface,modelscope,local"
+_DEFAULT_MODALITIES = "text2text,multimodal,speech2text,text2speech,vision,audio"
 
 
 class CapabilityValidator:
     """
     Validates system capabilities for fine-tuning.
-    All logic is compiled to binary - cannot be reverse engineered.
+    All logic AND defaults are compiled to binary - cannot be reverse engineered.
+    Settings are loaded from environment variables at runtime.
     """
     
-    def __init__(
-        self,
-        supported_model_path: Optional[str] = None,
-        supported_sources: str = "huggingface,modelscope,local",
-        supported_architectures: Optional[str] = None,
-        supported_modalities: str = "text2text,multimodal,speech2text,text2speech,vision,audio",
-        extended_capability: bool = False,
-        capability_id: Optional[str] = None
-    ):
-        self._supported_model_path = supported_model_path
-        self._supported_sources = supported_sources
-        self._supported_architectures = supported_architectures
-        self._supported_modalities = supported_modalities
-        self._extended_capability = extended_capability
-        self._capability_id = capability_id
+    def __init__(self):
+        # Load from environment variables - defaults are hidden in binary
+        self._supported_model_path = os.environ.get("SUPPORTED_MODEL_PATH")
+        self._supported_sources = os.environ.get("SUPPORTED_MODEL_SOURCES", _DEFAULT_SOURCES)
+        self._supported_architectures = os.environ.get("SUPPORTED_ARCHITECTURES")
+        self._supported_modalities = os.environ.get("SUPPORTED_MODALITIES", _DEFAULT_MODALITIES)
+        self._extended_capability = os.environ.get("EXTENDED_CAPABILITY", "").lower() == "true"
+        self._capability_id = os.environ.get("CAPABILITY_ID")
     
     @property
     def _has_extended_capability(self) -> bool:
@@ -126,34 +126,20 @@ class CapabilityValidator:
         }
 
 
-# Singleton validator instance - initialized from config
+# Singleton validator instance
 _validator: Optional[CapabilityValidator] = None
 
 
-def init_validator(
-    supported_model_path: Optional[str] = None,
-    supported_sources: str = "huggingface,modelscope,local",
-    supported_architectures: Optional[str] = None,
-    supported_modalities: str = "text2text,multimodal,speech2text,text2speech,vision,audio",
-    extended_capability: bool = False,
-    capability_id: Optional[str] = None
-) -> CapabilityValidator:
-    """Initialize the capability validator from settings."""
+def init_validator() -> CapabilityValidator:
+    """Initialize the capability validator (loads from environment)."""
     global _validator
-    _validator = CapabilityValidator(
-        supported_model_path=supported_model_path,
-        supported_sources=supported_sources,
-        supported_architectures=supported_architectures,
-        supported_modalities=supported_modalities,
-        extended_capability=extended_capability,
-        capability_id=capability_id
-    )
+    _validator = CapabilityValidator()
     return _validator
 
 
 def get_validator() -> CapabilityValidator:
     """Get the capability validator instance."""
+    global _validator
     if _validator is None:
-        # Default validator if not initialized
-        return CapabilityValidator()
+        _validator = CapabilityValidator()
     return _validator
