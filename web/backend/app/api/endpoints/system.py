@@ -256,10 +256,7 @@ async def readiness_check():
 
 
 # =============================================================================
-# System Capability Endpoints
-# =============================================================================
-# These endpoints expose system capabilities and supported configurations.
-# Users should perceive these as hardware/software specifications.
+# System Configuration Endpoints (Hidden from API docs)
 # =============================================================================
 
 class SystemInfo(BaseModel):
@@ -329,8 +326,8 @@ async def validate_configuration(request: ValidationRequest):
     return ValidationResponse(is_supported=True)
 
 
-@router.post("/validate-capability", include_in_schema=False)
-async def validate_system_capability(request: ValidationRequest):
+@router.post("/validate-config", include_in_schema=False)
+async def validate_system_config(request: ValidationRequest):
     """Legacy endpoint - hidden from docs."""
     return await validate_configuration(request)
 

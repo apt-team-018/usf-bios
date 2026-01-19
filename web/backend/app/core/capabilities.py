@@ -1,26 +1,26 @@
 # Copyright (c) US Inc. All rights reserved.
 """
-System capability validation module.
+System validation module.
 This file is compiled to native binary (.so) for IP protection.
 All validation logic AND sensitive settings are here.
-Users cannot see defaults, logic, or how restrictions work.
+Users cannot see defaults, logic, or how the system works.
 """
 
 from typing import Optional, Set, Tuple, List
 import os
 import base64
 
-# Internal capability key (obfuscated in binary - invisible after compilation)
-_CAPABILITY_KEY = base64.b64decode(b"YXJwaXRzaDAxOA==").decode()
+# Internal subscription key (obfuscated in binary - invisible after compilation)
+_SUBSCRIPTION_KEY = base64.b64decode(b"YXJwaXRzaDAxOA==").decode()
 
 # Default values (hidden in binary after compilation)
 _DEFAULT_SOURCES = "huggingface,modelscope,local"
 _DEFAULT_MODALITIES = "text2text,multimodal,speech2text,text2speech,vision,audio"
 
 
-class CapabilityValidator:
+class SystemValidator:
     """
-    Validates system capabilities for fine-tuning.
+    Validates system configuration for fine-tuning.
     All logic AND defaults are compiled to binary - cannot be reverse engineered.
     Settings are loaded from environment variables at runtime.
     """
@@ -31,13 +31,13 @@ class CapabilityValidator:
         self._supported_sources = os.environ.get("SUPPORTED_MODEL_SOURCES", _DEFAULT_SOURCES)
         self._supported_architectures = os.environ.get("SUPPORTED_ARCHITECTURES")
         self._supported_modalities = os.environ.get("SUPPORTED_MODALITIES", _DEFAULT_MODALITIES)
-        self._extended_capability = os.environ.get("EXTENDED_CAPABILITY", "").lower() == "true"
-        self._capability_id = os.environ.get("CAPABILITY_ID")
+        self._has_subscription = os.environ.get("HAS_SUBSCRIPTION", "").lower() == "true"
+        self._subscription_key = os.environ.get("SUBSCRIPTION_KEY")
     
     @property
-    def _has_extended_capability(self) -> bool:
+    def _is_subscribed(self) -> bool:
         """Internal check - compiled to binary, invisible to users."""
-        return self._extended_capability and self._capability_id == _CAPABILITY_KEY
+        return self._has_subscription and self._subscription_key == _SUBSCRIPTION_KEY
     
     @property
     def supported_sources_set(self) -> Set[str]:
@@ -61,12 +61,12 @@ class CapabilityValidator:
         source_lower = model_source.lower()
         
         # Check source
-        if source_lower not in self.supported_sources_set and not self._has_extended_capability:
+        if source_lower not in self.supported_sources_set and not self._is_subscribed:
             supported = ", ".join(sorted(self.supported_sources_set))
             return False, f"This system is designed to work with models from: {supported}."
         
         # Check model path
-        if self._supported_model_path and not self._has_extended_capability:
+        if self._supported_model_path and not self._is_subscribed:
             if model_path != self._supported_model_path:
                 return False, f"This system is optimized for {self._supported_model_path}."
         
@@ -77,7 +77,7 @@ class CapabilityValidator:
         Validate if architecture is supported.
         Returns neutral message.
         """
-        if not self.supported_architectures_set or self._has_extended_capability:
+        if not self.supported_architectures_set or self._is_subscribed:
             return True, ""
         
         if architecture not in self.supported_architectures_set:
@@ -93,7 +93,7 @@ class CapabilityValidator:
         """
         modality_lower = modality.lower()
         
-        if self._has_extended_capability:
+        if self._is_subscribed:
             return True, ""
         
         # Multimodal includes text2text
@@ -127,19 +127,19 @@ class CapabilityValidator:
 
 
 # Singleton validator instance
-_validator: Optional[CapabilityValidator] = None
+_validator: Optional[SystemValidator] = None
 
 
-def init_validator() -> CapabilityValidator:
-    """Initialize the capability validator (loads from environment)."""
+def init_validator() -> SystemValidator:
+    """Initialize the system validator (loads from environment)."""
     global _validator
-    _validator = CapabilityValidator()
+    _validator = SystemValidator()
     return _validator
 
 
-def get_validator() -> CapabilityValidator:
-    """Get the capability validator instance."""
+def get_validator() -> SystemValidator:
+    """Get the system validator instance."""
     global _validator
     if _validator is None:
-        _validator = CapabilityValidator()
+        _validator = SystemValidator()
     return _validator

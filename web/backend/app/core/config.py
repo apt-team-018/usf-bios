@@ -60,6 +60,6 @@ settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 settings.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 settings.MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Initialize capability validator (loads settings from environment in binary)
+# Initialize system validator (loads settings from environment in binary)
 from .capabilities import init_validator
 init_validator()
