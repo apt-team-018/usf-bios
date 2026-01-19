@@ -3,8 +3,55 @@
 # Powered by US Inc
 # !/usr/bin/env python
 import os
+import subprocess
+import sys
 from setuptools import find_packages, setup
+from setuptools.command.install import install
+from setuptools.command.develop import develop
 from typing import List
+
+# Custom transformers fork URL (required for UltraSafe models like USF Omega)
+CUSTOM_TRANSFORMERS_URL = "git+https://github.com/apt-team-018/transformers.git"
+
+
+def install_custom_transformers():
+    """Uninstall standard transformers and install custom fork."""
+    print("\n" + "=" * 60)
+    print("  USF BIOS - Installing Custom Transformers Fork")
+    print("  Required for UltraSafe model support (USF Omega, etc.)")
+    print("=" * 60 + "\n")
+    try:
+        # Step 1: Uninstall any existing transformers
+        print("  [1/2] Removing standard transformers...")
+        subprocess.call([
+            sys.executable, "-m", "pip", "uninstall", "-y", "transformers"
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        # Step 2: Install custom fork
+        print("  [2/2] Installing custom transformers fork...")
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", 
+            CUSTOM_TRANSFORMERS_URL
+        ])
+        print("\n✓ Custom transformers fork installed successfully!\n")
+    except subprocess.CalledProcessError as e:
+        print(f"\n⚠ Warning: Could not install custom transformers: {e}")
+        print("  You may need to manually run:")
+        print(f"  pip install {CUSTOM_TRANSFORMERS_URL}\n")
+
+
+class PostInstallCommand(install):
+    """Post-installation: install custom transformers fork."""
+    def run(self):
+        install.run(self)
+        install_custom_transformers()
+
+
+class PostDevelopCommand(develop):
+    """Post-develop installation: install custom transformers fork."""
+    def run(self):
+        develop.run(self)
+        install_custom_transformers()
 
 
 def readme():
@@ -47,6 +94,9 @@ def parse_requirements(fname='requirements.txt', with_version=True):
         """
         Parse information from a line in a requirements text file
         """
+        # Skip git URLs - they will be handled by post-install hook
+        if line.startswith('git+') or 'github.com' in line:
+            return
         if line.startswith('-r '):
             # Allow specifying requirements in other files
             target = line.split(' ')[1]
@@ -164,6 +214,10 @@ if __name__ == '__main__':
         extras_require=extra_requires,
         entry_points={
             'console_scripts': ['usf_bios=usf_bios.cli.main:cli_main', 'usf_bios_megatron=usf_bios.cli._megatron.main:cli_main']
+        },
+        cmdclass={
+            'install': PostInstallCommand,
+            'develop': PostDevelopCommand,
         },
         dependency_links=deps_link,
         zip_safe=False)
