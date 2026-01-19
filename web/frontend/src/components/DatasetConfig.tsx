@@ -6,7 +6,6 @@ import {
   Database, Cloud, FolderOpen, Loader2, AlertCircle,
   Plus, ExternalLink
 } from 'lucide-react'
-import { API_URL } from '@/utils/api'
 
 type DatasetSource = 'upload' | 'huggingface' | 'modelscope' | 'local_path'
 
@@ -154,7 +153,7 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange }: Prop
   const fetchDatasets = async () => {
     setIsLoading(true)
     try {
-      const res = await fetch(`${API_URL}/api/datasets/list-all`)
+      const res = await fetch('/api/datasets/list-all')
       if (res.ok) {
         const data = await res.json()
         // Preserve selection state
@@ -182,7 +181,7 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange }: Prop
 
   const checkNameAvailable = async (name: string): Promise<boolean> => {
     try {
-      const res = await fetch(`${API_URL}/api/datasets/check-name?name=${encodeURIComponent(name)}`)
+      const res = await fetch(`/api/datasets/check-name?name=${encodeURIComponent(name)}`)
       if (res.ok) {
         const data = await res.json()
         return data.available
@@ -211,7 +210,7 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange }: Prop
 
       const formData = new FormData()
       formData.append('file', uploadFile)
-      const res = await fetch(`${API_URL}/api/datasets/upload?dataset_name=${encodeURIComponent(uploadName.trim())}`, {
+      const res = await fetch(`/api/datasets/upload?dataset_name=${encodeURIComponent(uploadName.trim())}`, {
         method: 'POST', body: formData
       })
       
@@ -254,7 +253,7 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange }: Prop
 
       const maxSamples = registerMaxSamples.trim() ? parseInt(registerMaxSamples) : null
       
-      const res = await fetch(`${API_URL}/api/datasets/register`, {
+      const res = await fetch('/api/datasets/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -305,7 +304,7 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange }: Prop
     setIsDeleting(true)
     try {
       // Pass the dataset name as confirmation (not "delete")
-      const res = await fetch(`${API_URL}/api/datasets/unregister/${encodeURIComponent(deleteTarget.id)}?confirm=${encodeURIComponent(deleteTarget.name)}`, {
+      const res = await fetch(`/api/datasets/unregister/${encodeURIComponent(deleteTarget.id)}?confirm=${encodeURIComponent(deleteTarget.name)}`, {
         method: 'DELETE'
       })
       if (res.ok) {

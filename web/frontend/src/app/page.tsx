@@ -13,7 +13,6 @@ import {
 } from 'lucide-react'
 import TrainingSettingsStep from '@/components/TrainingSettings'
 import DatasetConfig from '@/components/DatasetConfig'
-import { API_URL } from '@/utils/api'
 
 // Types
 interface TrainingConfig {
@@ -252,7 +251,7 @@ export default function Home() {
   // Fetch system status - check if system is ready for training
   const fetchSystemStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/api/system/status`)
+      const res = await fetch('/api/system/status')
       if (res.ok) {
         const data = await res.json()
         setSystemStatus(data)
@@ -281,7 +280,7 @@ export default function Home() {
   // Fetch system capabilities - what this system can fine-tune
   const fetchSystemCapabilities = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/api/system/capabilities`)
+      const res = await fetch('/api/system/capabilities')
       if (res.ok) {
         const data = await res.json()
         setSystemCapabilities(data)
@@ -302,7 +301,7 @@ export default function Home() {
   // Fetch system metrics periodically - only set if data is valid
   const fetchSystemMetrics = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/api/system/metrics`)
+      const res = await fetch('/api/system/metrics')
       if (res.ok) {
         const data = await res.json()
         // Only update if we have actual data, mark as available
@@ -343,8 +342,8 @@ export default function Home() {
   // WebSocket for training updates
   useEffect(() => {
     if (jobStatus?.job_id && isTraining) {
-      const wsUrl = API_URL.replace('http', 'ws')
-      const ws = new WebSocket(`${wsUrl}/api/jobs/ws/${jobStatus.job_id}`)
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const ws = new WebSocket(`${wsProtocol}//${window.location.host}/api/jobs/ws/${jobStatus.job_id}`)
       
       ws.onmessage = (event) => {
         try {
@@ -406,7 +405,7 @@ export default function Home() {
   const fetchDatasets = async () => {
     setIsLoadingDatasets(true)
     try {
-      const res = await fetch(`${API_URL}/api/datasets/list`)
+      const res = await fetch('/api/datasets/list')
       if (res.ok) {
         const data = await res.json()
         // Preserve selection state
@@ -451,7 +450,7 @@ export default function Home() {
       const formData = new FormData()
       formData.append('file', uploadFile)
       
-      const res = await fetch(`${API_URL}/api/datasets/upload?dataset_name=${encodeURIComponent(uploadName.trim())}`, {
+      const res = await fetch(`/api/datasets/upload?dataset_name=${encodeURIComponent(uploadName.trim())}`, {
         method: 'POST',
         body: formData,
       })
@@ -514,7 +513,7 @@ export default function Home() {
     try {
       // Pass the dataset name as confirmation (not "delete")
       const res = await fetch(
-        `${API_URL}/api/datasets/delete/${encodeURIComponent(deleteTarget.id)}?confirm=${encodeURIComponent(deleteTarget.name)}`,
+        `/api/datasets/delete/${encodeURIComponent(deleteTarget.id)}?confirm=${encodeURIComponent(deleteTarget.name)}`,
         { method: 'DELETE' }
       )
       
@@ -554,7 +553,7 @@ export default function Home() {
         name: trainingName.trim() || undefined,
       }
       
-      const createRes = await fetch(`${API_URL}/api/jobs/create`, {
+      const createRes = await fetch('/api/jobs/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(jobConfig),
@@ -565,7 +564,7 @@ export default function Home() {
       }
       const job = await createRes.json()
       
-      const startRes = await fetch(`${API_URL}/api/jobs/${job.job_id}/start`, {
+      const startRes = await fetch(`/api/jobs/${job.job_id}/start`, {
         method: 'POST',
       })
       if (!startRes.ok) throw new Error(`Start failed: ${startRes.status}`)
@@ -591,7 +590,7 @@ export default function Home() {
   const stopTraining = async () => {
     if (!jobStatus?.job_id) return
     try {
-      await fetch(`${API_URL}/api/jobs/${jobStatus.job_id}/stop`, { method: 'POST' })
+      await fetch(`/api/jobs/${jobStatus.job_id}/stop`, { method: 'POST' })
       setIsTraining(false)
     } catch (e) {
       alert(`Failed to stop: ${e}`)
@@ -601,7 +600,7 @@ export default function Home() {
   // Inference functions
   const fetchInferenceStatus = async () => {
     try {
-      const res = await fetch(`${API_URL}/api/inference/status`)
+      const res = await fetch('/api/inference/status')
       if (res.ok) {
         const data = await res.json()
         setInferenceStatus(data)
@@ -613,7 +612,7 @@ export default function Home() {
 
   const clearMemory = async () => {
     try {
-      const res = await fetch(`${API_URL}/api/inference/clear-memory`, { method: 'POST' })
+      const res = await fetch('/api/inference/clear-memory', { method: 'POST' })
       if (res.ok) {
         await fetchInferenceStatus()
         alert('Memory cleared successfully')
@@ -628,7 +627,7 @@ export default function Home() {
     if (!inferenceModel.trim()) return
     setIsModelLoading(true)
     try {
-      const res = await fetch(`${API_URL}/api/inference/load`, {
+      const res = await fetch('/api/inference/load', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model_path: inferenceModel })
@@ -650,7 +649,7 @@ export default function Home() {
   const loadAdapter = async () => {
     if (!adapterPath.trim() || !inferenceStatus.model_loaded) return
     try {
-      const res = await fetch(`${API_URL}/api/inference/load-adapter`, {
+      const res = await fetch('/api/inference/load-adapter', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ adapter_path: adapterPath })
@@ -679,7 +678,7 @@ export default function Home() {
     const adapter = loadedAdapters.find(a => a.id === adapterId)
     if (!adapter) return
     try {
-      const res = await fetch(`${API_URL}/api/inference/switch-adapter`, {
+      const res = await fetch('/api/inference/switch-adapter', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ adapter_path: adapter.path })
@@ -726,7 +725,7 @@ export default function Home() {
       const activeAdapter = loadedAdapters.find(a => a.active)
       const endpoint = chatMode === 'chat' ? '/api/inference/chat' : '/api/inference/generate'
       
-      const res = await fetch(`${API_URL}${endpoint}`, {
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
