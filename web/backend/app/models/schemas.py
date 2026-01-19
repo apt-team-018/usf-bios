@@ -47,8 +47,8 @@ class TrainingConfig(BaseModel):
     name: Optional[str] = Field(default=None, description="Custom training name (auto-generated if empty)")
     
     # Model settings
-    model_path: str = Field(..., description="Model path (HF, MS, or local)")
-    model_source: ModelSource = ModelSource.HUGGINGFACE
+    model_path: str = Field("/path/to/local/model", description="Local model path")
+    model_source: ModelSource = ModelSource.LOCAL
     modality: Modality = Modality.TEXT
     
     # Training type

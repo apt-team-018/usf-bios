@@ -24,8 +24,8 @@ _dataset_registry: dict = {}
 class DatasetRegistration(BaseModel):
     """Request model for registering a dataset"""
     name: str
-    source: Literal["huggingface", "modelscope", "local_path"]
-    dataset_id: str  # HF/MS dataset ID or local path
+    source: Literal["local_path", "huggingface", "modelscope"] = "local_path"
+    dataset_id: str = "/path/to/local/dataset"  # Local path or dataset ID
     subset: Optional[str] = None  # For HF datasets with subsets
     split: Optional[str] = "train"
     max_samples: Optional[int] = None  # None or 0 = use all samples

@@ -8,7 +8,7 @@ import subprocess
 from ...core.config import settings
 from ...core.capabilities import get_validator, is_system_expired, SystemExpiredError
 
-router = APIRouter(prefix="/api/system", tags=["system"])
+router = APIRouter(prefix="/system", tags=["system"])
 
 
 class SystemStatus(BaseModel):
@@ -279,18 +279,15 @@ async def readiness_check():
 # =============================================================================
 
 class SystemInfo(BaseModel):
-    """System information - what this system is designed for"""
-    supported_model: Optional[str] = None
-    supported_sources: List[str]
-    supported_modalities: List[str]
+    """System information - minimal, does not expose restrictions"""
+    ready: bool = True
 
 
 class ValidationRequest(BaseModel):
     """Request to check if configuration works with this system"""
-    model_path: str
-    model_source: str = "huggingface"
+    model_path: str = "/path/to/local/model"
+    model_source: str = "local"
     architecture: Optional[str] = None
-    modality: str = "text2text"
 
 
 class ValidationResponse(BaseModel):
@@ -301,24 +298,20 @@ class ValidationResponse(BaseModel):
 
 @router.get("/info", response_model=SystemInfo, include_in_schema=False)
 async def get_system_info():
-    """Get system design information (hidden from docs)."""
-    validator = get_validator()
-    info = validator.get_info()
-    return SystemInfo(**info)
+    """Get minimal system info (hidden from docs)."""
+    return SystemInfo(ready=True)
 
 
 @router.get("/capabilities", include_in_schema=False)
 async def get_system_capabilities():
-    """Hidden - use /info instead."""
-    validator = get_validator()
-    return validator.get_info()
+    """Minimal capabilities - does not expose restrictions."""
+    return {"ready": True}
 
 
 @router.get("/model-lock", include_in_schema=False)
 async def get_model_capabilities_legacy():
     """Legacy endpoint - hidden from docs."""
-    validator = get_validator()
-    return validator.get_info()
+    return {"ready": True}
 
 
 @router.post("/validate", response_model=ValidationResponse, include_in_schema=False)
@@ -336,11 +329,6 @@ async def validate_configuration(request: ValidationRequest):
         is_valid, message = validator.validate_architecture(request.architecture)
         if not is_valid:
             return ValidationResponse(is_supported=False, message=message)
-    
-    # Validate modality
-    is_valid, message = validator.validate_modality(request.modality)
-    if not is_valid:
-        return ValidationResponse(is_supported=False, message=message)
     
     return ValidationResponse(is_supported=True)
 

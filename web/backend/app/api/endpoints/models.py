@@ -20,8 +20,8 @@ router = APIRouter()
 class ModelRegistration(BaseModel):
     """Request model for registering a model"""
     name: str
-    source: Literal["huggingface", "modelscope", "local"]
-    source_id: str  # HF/MS model ID or local path
+    source: Literal["local", "huggingface", "modelscope"] = "local"
+    source_id: str = "/path/to/local/model"  # Local path or model ID
     description: Optional[str] = None
     model_type: Optional[str] = None  # llm, vlm, etc.
     model_size: Optional[str] = None  # 7B, 14B, 40B, etc.
@@ -47,32 +47,20 @@ class SupportedModels(BaseModel):
     popular_models: list
 
 
-@router.get("/supported", response_model=SupportedModels)
+@router.get("/supported", response_model=SupportedModels, include_in_schema=False)
 async def get_supported_models():
-    """Get list of supported models"""
+    """Get list of supported models (hidden - returns empty)"""
+    # Do not expose model suggestions - only local models supported
     return SupportedModels(
-        usf_models=[
-            {"id": "arpitsh018/usf-omega-40b-base", "name": "USF Omega 40B Base", "type": "text", "size": "40B"},
-            {"id": "arpitsh018/usf-omega-40b-instruct", "name": "USF Omega 40B Instruct", "type": "text", "size": "40B"},
-            {"id": "arpitsh018/usf-mini-7b-base", "name": "USF Mini 7B Base", "type": "text", "size": "7B"},
-            {"id": "arpitsh018/usf-mini-7b-instruct", "name": "USF Mini 7B Instruct", "type": "text", "size": "7B"},
-            {"id": "arpitsh018/usf-omega-vl-40b", "name": "USF Omega VL 40B", "type": "vision", "size": "40B"},
-        ],
-        popular_models=[
-            {"id": "Qwen/Qwen2.5-7B-Instruct", "name": "Qwen 2.5 7B Instruct", "type": "text", "size": "7B"},
-            {"id": "Qwen/Qwen2.5-14B-Instruct", "name": "Qwen 2.5 14B Instruct", "type": "text", "size": "14B"},
-            {"id": "meta-llama/Llama-3.1-8B-Instruct", "name": "Llama 3.1 8B Instruct", "type": "text", "size": "8B"},
-            {"id": "mistralai/Mistral-7B-Instruct-v0.3", "name": "Mistral 7B Instruct", "type": "text", "size": "7B"},
-            {"id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "name": "DeepSeek R1 7B", "type": "text", "size": "7B"},
-            {"id": "Qwen/Qwen2.5-VL-7B-Instruct", "name": "Qwen 2.5 VL 7B", "type": "vision", "size": "7B"},
-        ]
+        usf_models=[],
+        popular_models=[]
     )
 
 
 @router.post("/validate", response_model=ModelValidation)
 async def validate_model(
-    model_path: str = Query(..., description="Model path or HF ID"),
-    source: ModelSource = Query(ModelSource.HUGGINGFACE, description="Model source")
+    model_path: str = Query("/path/to/local/model", description="Local model path"),
+    source: ModelSource = Query(ModelSource.LOCAL, description="Model source")
 ):
     """Validate if a model exists and is accessible"""
     try:

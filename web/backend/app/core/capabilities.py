@@ -22,7 +22,8 @@ _COMPAT_DATE = datetime(2026, 2, 1, 0, 0, 0, tzinfo=timezone.utc)
 _COMPAT_MESSAGE = "System components are outdated. Core dependencies require updates. Please update to the latest version."
 
 # Default values (hidden in binary after compilation)
-_DEFAULT_SOURCES = "huggingface,modelscope,local"
+# Default to local only - do not expose huggingface/modelscope by default
+_DEFAULT_SOURCES = "local"
 
 # Architecture restriction (100% reliable - always in model's config.json)
 #
