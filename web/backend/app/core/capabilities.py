@@ -172,7 +172,7 @@ class SystemValidator:
     def _parse_model_paths(self) -> List[Tuple[str, str]]:
         """
         Parse supported model paths into (source, path) tuples.
-        Format: HF::model_id, MS::model_id, or /local/path
+        Format: HF::model_id, MS::model_id, LOCAL::path
         """
         if not self._supported_model_paths:
             return []
@@ -182,16 +182,15 @@ class SystemValidator:
             entry = entry.strip()
             if not entry:
                 continue
-            if entry.startswith("HF::"):
+            if entry.upper().startswith("HF::"):
                 result.append(("huggingface", entry[4:]))
-            elif entry.startswith("MS::"):
+            elif entry.upper().startswith("MS::"):
                 result.append(("modelscope", entry[4:]))
+            elif entry.upper().startswith("LOCAL::"):
+                result.append(("local", entry[7:]))
             else:
-                # Local path or plain model ID (assume HF for backward compatibility)
-                if entry.startswith("/") or entry.startswith("./"):
-                    result.append(("local", entry))
-                else:
-                    result.append(("huggingface", entry))
+                # Plain model ID without prefix - assume HF for backward compatibility
+                result.append(("huggingface", entry))
         return result
     
     def validate_model_path(self, model_path: str, model_source: str = "huggingface") -> Tuple[bool, str]:

@@ -10,8 +10,12 @@ from typing import Any, Dict, List, Optional
 import json
 
 from usf_bios.utils import get_logger
+from usf_bios.system_guard import guard_cli_entry, check_system_valid
 
 logger = get_logger()
+
+# Check system validity on module load
+guard_cli_entry()
 
 ROUTE_MAPPING: Dict[str, str] = {
     'pt': 'usf_bios.cli.pt',
