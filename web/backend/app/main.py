@@ -17,14 +17,30 @@ from .core.database import init_db, engine
 # Detected backend URL - stored in memory, served via API endpoint
 _detected_backend_url: str | None = None
 
+def _is_internal_request(host: str) -> bool:
+    """Check if request is from internal health check (not external browser)"""
+    if not host:
+        return True
+    # Skip localhost, 127.0.0.1, internal docker IPs, container hostnames
+    host_lower = host.lower().split(":")[0]  # Remove port
+    if host_lower in ("localhost", "127.0.0.1", "0.0.0.0"):
+        return True
+    if host_lower.startswith("172.") or host_lower.startswith("10.") or host_lower.startswith("192.168."):
+        return True
+    # Skip container hostnames (hex strings like 043ab22f9f6a)
+    if len(host_lower) == 12 and all(c in "0123456789abcdef" for c in host_lower):
+        return True
+    return False
+
 class DetectExternalUrlMiddleware(BaseHTTPMiddleware):
-    """Middleware to detect backend's external URL from first request"""
+    """Middleware to detect backend's external URL from EXTERNAL request only"""
     async def dispatch(self, request: Request, call_next):
         global _detected_backend_url
         if _detected_backend_url is None:
             host = request.headers.get("host", "")
-            scheme = request.headers.get("x-forwarded-proto", "https")
-            if host:
+            # Only detect from external requests (browser), not internal health checks
+            if host and not _is_internal_request(host):
+                scheme = request.headers.get("x-forwarded-proto", "https")
                 _detected_backend_url = f"{scheme}://{host}"
                 print(f"[Backend] External URL detected: {_detected_backend_url}")
         return await call_next(request)
