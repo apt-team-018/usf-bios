@@ -1096,15 +1096,15 @@ export default function Home() {
                       };
                       
                       const getPlaceholder = () => {
-                        if (config.model_source === 'local') return '/path/to/model (e.g., /root/models/usf-omega)';
-                        if (config.model_source === 'huggingface') return 'organization/model-name (e.g., meta-llama/Llama-2-7b)';
+                        if (config.model_source === 'local') return '/path/to/model';
+                        if (config.model_source === 'huggingface') return 'organization/model-name';
                         if (config.model_source === 'modelscope') return 'organization/model-name';
                         return 'Enter model path or ID';
                       };
                       
                       const getHelpText = () => {
                         if (config.model_source === 'local') return 'Enter the full path to your model directory on the server';
-                        if (config.model_source === 'huggingface') return 'Enter the HuggingFace model ID (e.g., meta-llama/Llama-2-7b)';
+                        if (config.model_source === 'huggingface') return 'Enter the HuggingFace model ID';
                         if (config.model_source === 'modelscope') return 'Enter the ModelScope model ID';
                         return '';
                       };
@@ -1166,8 +1166,8 @@ export default function Home() {
                               </p>
                               <p className="text-xs text-slate-500 mt-2">Example paths:</p>
                               <ul className="text-xs text-slate-500 mt-1 space-y-1">
-                                <li>• <code className="bg-slate-200 px-1 rounded">/root/models/usf-omega-40b</code></li>
-                                <li>• <code className="bg-slate-200 px-1 rounded">/mnt/storage/models/llama-7b</code></li>
+                                <li>• <code className="bg-slate-200 px-1 rounded">/root/models/my-model</code></li>
+                                <li>• <code className="bg-slate-200 px-1 rounded">/mnt/storage/models/my-model</code></li>
                               </ul>
                             </div>
                           )}
@@ -1269,7 +1269,7 @@ export default function Home() {
                       type="text"
                       value={trainingName}
                       onChange={(e) => setTrainingName(e.target.value)}
-                      placeholder="e.g., my-qwen-finetune (auto-generated if empty)"
+                      placeholder="e.g., my-training-run (auto-generated if empty)"
                       className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                       maxLength={255}
                     />
@@ -1478,7 +1478,7 @@ export default function Home() {
                 <label className="block text-sm font-medium text-slate-700">Base Model</label>
                 <input type="text" value={inferenceModel}
                   onChange={(e) => setInferenceModel(e.target.value)}
-                  placeholder="Qwen/Qwen2.5-7B-Instruct"
+                  placeholder="/path/to/model"
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg text-slate-900 text-sm placeholder-slate-400" />
                 <button onClick={loadModel} disabled={!inferenceModel.trim() || isModelLoading}
                   className="w-full py-2 bg-blue-500 text-white rounded-lg text-sm font-medium hover:bg-blue-600 disabled:opacity-50 flex items-center justify-center gap-2">
