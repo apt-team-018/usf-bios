@@ -62,8 +62,14 @@ RUN cd /app/usf_bios_src && pip3 install --no-cache-dir -e . && \
     echo "✓ usf_bios installed successfully" || \
     (echo "✗ usf_bios installation failed" && exit 1)
 
+# Copy RSA public key for log encryption (private key stays with US Inc)
+COPY keys/usf_bios_public.pem /app/keys/usf_bios_public.pem
+
+# Install cryptography for RSA encryption
+RUN pip3 install --no-cache-dir cryptography
+
 # Create necessary directories
-RUN mkdir -p /app/data/uploads /app/data/datasets /app/output
+RUN mkdir -p /app/data/uploads /app/data/datasets /app/output /app/data/encrypted_logs /app/data/terminal_logs
 
 # Expose port
 EXPOSE 8000

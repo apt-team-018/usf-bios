@@ -29,7 +29,7 @@ class TrainingService:
     def __init__(self):
         self._running_tasks: dict = {}
     
-    def _build_command(self, config: TrainingConfig, job_id: str) -> list:
+    def _build_command(self, config: TrainingConfig, job_id: str, resume_from_checkpoint: str = None) -> list:
         """Build the training command"""
         output_dir = str(get_system_settings().OUTPUT_DIR / job_id)
         
@@ -47,6 +47,10 @@ class TrainingService:
             "--torch_dtype", config.torch_dtype,
             "--logging_steps", "1",
         ]
+        
+        # Resume from checkpoint
+        if resume_from_checkpoint:
+            cmd.extend(["--resume_from_checkpoint", resume_from_checkpoint])
         
         # LoRA parameters
         if config.train_type.value in ["lora", "qlora", "adalora"]:
@@ -136,8 +140,58 @@ class TrainingService:
             await ws_manager.send_log(job_id, "Initializing training environment...")
             _debug_log(job_id, "Status set to INITIALIZING")
             
-            # Build command
-            cmd = self._build_command(job.config, job_id)
+            # ============================================================
+            # PRE-TRAINING VALIDATION - Catch issues early
+            # ============================================================
+            validation_errors = []
+            
+            # Check model path exists (for local models)
+            model_source = getattr(job.config.model_source, 'value', str(job.config.model_source))
+            if model_source == 'local':
+                model_path = job.config.model_path
+                if not os.path.exists(model_path):
+                    validation_errors.append(f"Model path does not exist: {model_path}")
+                elif not os.path.isdir(model_path):
+                    validation_errors.append(f"Model path is not a directory: {model_path}")
+                else:
+                    # Check for config.json which indicates a valid model directory
+                    config_path = os.path.join(model_path, "config.json")
+                    if not os.path.exists(config_path):
+                        await ws_manager.send_log(job_id, f"Warning: config.json not found in model directory")
+                        _debug_log(job_id, f"Warning: config.json not found at {config_path}")
+            
+            # Check dataset paths exist
+            dataset_paths = job.config.dataset_path.split(',') if job.config.dataset_path else []
+            for ds_path in dataset_paths:
+                ds_path = ds_path.strip()
+                if ds_path and not ds_path.upper().startswith(('HF::', 'MS::')):
+                    if not os.path.exists(ds_path):
+                        validation_errors.append(f"Dataset path does not exist: {ds_path}")
+            
+            # Report validation errors
+            if validation_errors:
+                error_msg = "Pre-training validation failed:\n" + "\n".join(f"  - {e}" for e in validation_errors)
+                await ws_manager.send_log(job_id, f"ERROR: {error_msg}")
+                await job_manager.add_log(job_id, f"ERROR: {error_msg}")
+                _debug_log(job_id, error_msg, "ERROR")
+                
+                await job_manager.update_job(job_id, 
+                    status=JobStatus.FAILED,
+                    error=error_msg,
+                    completed_at=datetime.now()
+                )
+                await ws_manager.send_status(job_id, "failed")
+                return
+            
+            await ws_manager.send_log(job_id, "Validation passed. Building training command...")
+            
+            # Build command (with resume checkpoint if set)
+            resume_checkpoint = getattr(job, 'resume_from_checkpoint', None)
+            if resume_checkpoint:
+                await ws_manager.send_log(job_id, f"Resuming from checkpoint: {resume_checkpoint}")
+                _debug_log(job_id, f"Resuming from checkpoint: {resume_checkpoint}")
+            
+            cmd = self._build_command(job.config, job_id, resume_from_checkpoint=resume_checkpoint)
             cmd_str = " ".join(cmd)
             _debug_log(job_id, f"Built command: {cmd_str}")
             
@@ -183,6 +237,14 @@ class TrainingService:
                 # ============================================================
                 encrypted_log_service.encrypt_and_format(line_str, job_id)
                 
+                # ============================================================
+                # SHOW ALL OUTPUT IN TERMINAL (for debugging training issues)
+                # This helps users see what's happening, especially errors
+                # ============================================================
+                # Always add raw output to job logs and send to websocket
+                await job_manager.add_log(job_id, line_str)
+                await ws_manager.send_log(job_id, line_str)
+                
                 # Parse metrics from output
                 metrics = self._parse_log_line(line_str, job_id)
                 
@@ -210,7 +272,7 @@ class TrainingService:
                     await job_manager.update_job(job_id, **update_fields)
                 
                 # ============================================================
-                # TERMINAL LOG: Minimal - only progress metrics (no sensitive info)
+                # TERMINAL LOG: Also save formatted progress metrics to sanitized log
                 # ============================================================
                 if metrics:
                     # Build minimal progress string for terminal
@@ -230,8 +292,7 @@ class TrainingService:
                     
                     if progress_parts:
                         terminal_line = " | ".join(progress_parts)
-                        await job_manager.add_log(job_id, terminal_line)
-                        await ws_manager.send_log(job_id, terminal_line)
+                        # Only save to sanitized log file (not websocket - raw output already sent)
                         sanitized_log_service.create_terminal_log(job_id, terminal_line, "INFO")
                 
                 # Send progress update to frontend

@@ -211,6 +211,12 @@ RUN echo "=== VERIFICATION: Checking frontend static files ===" && \
     find /app/web/frontend/.next/static/css -name "*.css" | head -3 && \
     echo "=== FRONTEND VERIFICATION PASSED ==="
 
+# Copy RSA public key for log encryption (private key stays with US Inc)
+COPY keys/usf_bios_public.pem /app/keys/usf_bios_public.pem
+
+# Install cryptography for RSA encryption
+RUN pip install --no-cache-dir cryptography
+
 # Copy and setup entrypoint script
 COPY web/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh

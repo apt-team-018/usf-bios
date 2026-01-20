@@ -4,6 +4,7 @@
 import asyncio
 import uuid
 import random
+import subprocess
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -31,6 +32,40 @@ class JobManager:
         self._logs: Dict[str, List[str]] = {}
         self._processes: Dict[str, asyncio.subprocess.Process] = {}
         self._lock = asyncio.Lock()
+    
+    def is_training_process_running(self) -> bool:
+        """Check if any usf_bios training process is running on the system.
+        
+        This is a fallback check that works even if the in-memory state is lost.
+        """
+        try:
+            # Check for running usf_bios sft processes
+            result = subprocess.run(
+                ["pgrep", "-f", "usf_bios.*sft"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            return result.returncode == 0 and result.stdout.strip() != ""
+        except Exception:
+            return False
+    
+    def get_running_training_pid(self) -> Optional[int]:
+        """Get the PID of running usf_bios training process if any."""
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "usf_bios.*sft"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                pids = result.stdout.strip().split('\n')
+                if pids:
+                    return int(pids[0])
+        except Exception:
+            pass
+        return None
     
     def _generate_name(self) -> str:
         """Generate a unique, meaningful training name."""
@@ -135,6 +170,28 @@ class JobManager:
         
         return False
     
+    def stop_training_process_by_pid(self, pid: int) -> bool:
+        """Stop a training process by its PID (fallback when job state is lost)."""
+        try:
+            import signal
+            import os
+            os.kill(pid, signal.SIGTERM)
+            return True
+        except Exception:
+            return False
+    
+    def stop_all_training_processes(self) -> bool:
+        """Stop all usf_bios training processes (emergency stop)."""
+        try:
+            result = subprocess.run(
+                ["pkill", "-f", "usf_bios.*sft"],
+                capture_output=True,
+                timeout=10
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+    
     async def delete_job(self, job_id: str) -> bool:
         """Delete a job (only if not running)"""
         async with self._lock:
@@ -145,6 +202,12 @@ class JobManager:
                 self._logs.pop(job_id, None)
                 return True
         return False
+    
+    async def clear_logs(self, job_id: str) -> None:
+        """Clear in-memory logs for a job (used when restarting)"""
+        async with self._lock:
+            if job_id in self._logs:
+                self._logs[job_id] = []
 
 
 # Global instance

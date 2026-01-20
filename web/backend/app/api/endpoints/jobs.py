@@ -119,7 +119,25 @@ async def start_job(job_id: str):
 async def stop_job(job_id: str):
     """Stop a running job"""
     job = await job_manager.get_job(job_id)
+    
+    # Handle case where job state is lost but we have a PID
+    if not job and job_id.startswith("pid-"):
+        try:
+            pid = int(job_id.replace("pid-", ""))
+            success = job_manager.stop_training_process_by_pid(pid)
+            if success:
+                return {"job_id": job_id, "status": "stopped", "message": "Process terminated by PID"}
+            else:
+                raise HTTPException(status_code=500, detail="Failed to stop process")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid PID format")
+    
     if not job:
+        # Fallback: Try to stop any running training process
+        if job_manager.is_training_process_running():
+            success = job_manager.stop_all_training_processes()
+            if success:
+                return {"job_id": job_id, "status": "stopped", "message": "All training processes stopped"}
         raise HTTPException(status_code=404, detail="Job not found")
     
     if job.status != JobStatus.RUNNING:
@@ -217,6 +235,86 @@ async def delete_job(
     return {"job_id": job_id, "job_name": job.name, "deleted": True}
 
 
+@router.get("/current")
+async def get_current_job():
+    """Get the currently active/running training job if any.
+    
+    This endpoint allows the frontend to restore training state after page refresh.
+    Returns the active job or null if no training is running.
+    
+    It checks both:
+    1. In-memory job state (for normal operation)
+    2. OS process check (fallback if in-memory state is lost)
+    """
+    from ..services.sanitized_log_service import sanitized_log_service
+    
+    try:
+        jobs = await job_manager.get_all_jobs()
+        
+        # Find running job first in memory
+        for job in jobs:
+            if job.status == JobStatus.RUNNING:
+                logs = await job_manager.get_logs(job.job_id, last_n=100)
+                # Fall back to file-based logs if in-memory is empty
+                if not logs:
+                    try:
+                        logs = sanitized_log_service.get_terminal_logs(job.job_id, lines=100)
+                    except Exception:
+                        logs = []
+                return {
+                    "has_active_job": True,
+                    "job": job.model_dump(mode="json"),
+                    "logs": logs,
+                    "process_running": True,
+                }
+        
+        # Check for initializing jobs
+        for job in jobs:
+            if job.status == JobStatus.INITIALIZING:
+                logs = await job_manager.get_logs(job.job_id, last_n=100)
+                # Fall back to file-based logs if in-memory is empty
+                if not logs:
+                    try:
+                        logs = sanitized_log_service.get_terminal_logs(job.job_id, lines=100)
+                    except Exception:
+                        logs = []
+                return {
+                    "has_active_job": True,
+                    "job": job.model_dump(mode="json"),
+                    "logs": logs,
+                    "process_running": True,
+                }
+        
+        # Fallback: Check if training process is running at OS level
+        # This handles cases where in-memory state was lost but process continues
+        if job_manager.is_training_process_running():
+            pid = job_manager.get_running_training_pid()
+            return {
+                "has_active_job": True,
+                "job": None,  # No job info available
+                "logs": [],
+                "process_running": True,
+                "process_pid": pid,
+                "message": "Training process detected but job state was lost. Training continues in background."
+            }
+        
+        return {
+            "has_active_job": False,
+            "job": None,
+            "logs": [],
+            "process_running": False,
+        }
+    except Exception as e:
+        _debug_log(f"Error getting current job: {e}", level="ERROR")
+        return {
+            "has_active_job": False,
+            "job": None,
+            "logs": [],
+            "process_running": False,
+            "error": str(e)
+        }
+
+
 @router.get("/debug/all")
 async def debug_all_jobs():
     """Debug endpoint - get all jobs with full details"""
@@ -273,9 +371,235 @@ async def debug_job(job_id: str):
         return {"error": str(e), "traceback": str(e.__traceback__)}
 
 
+@router.get("/{job_id}/terminal-logs")
+async def get_terminal_logs(job_id: str, lines: int = 100):
+    """Get terminal logs from file for a job.
+    
+    This endpoint retrieves logs from the persistent terminal log file,
+    which is useful when in-memory logs are lost (e.g., after page refresh).
+    """
+    from ..services.sanitized_log_service import sanitized_log_service
+    
+    try:
+        logs = sanitized_log_service.get_terminal_logs(job_id, lines=lines)
+        return {
+            "job_id": job_id,
+            "logs": logs,
+            "count": len(logs),
+        }
+    except Exception as e:
+        return {
+            "job_id": job_id,
+            "logs": [],
+            "count": 0,
+            "error": str(e)
+        }
+
+
+@router.get("/{job_id}/checkpoint-info")
+async def get_checkpoint_info(job_id: str):
+    """Get checkpoint information for a job.
+    
+    Returns available checkpoints that can be used to resume training.
+    """
+    import os
+    from pathlib import Path
+    from ...core.capabilities import get_system_settings
+    
+    try:
+        job = await job_manager.get_job(job_id)
+        output_dir = get_system_settings().OUTPUT_DIR / job_id
+        
+        checkpoints = []
+        has_checkpoints = False
+        latest_checkpoint = None
+        latest_step = 0
+        
+        if output_dir.exists():
+            # Find checkpoint directories (checkpoint-XXX format)
+            for item in output_dir.iterdir():
+                if item.is_dir() and item.name.startswith("checkpoint-"):
+                    try:
+                        step = int(item.name.replace("checkpoint-", ""))
+                        checkpoints.append({
+                            "path": str(item),
+                            "step": step,
+                            "name": item.name,
+                        })
+                        has_checkpoints = True
+                        if step > latest_step:
+                            latest_step = step
+                            latest_checkpoint = str(item)
+                    except ValueError:
+                        continue
+        
+        # Sort checkpoints by step
+        checkpoints.sort(key=lambda x: x["step"], reverse=True)
+        
+        return {
+            "job_id": job_id,
+            "output_dir": str(output_dir),
+            "has_checkpoints": has_checkpoints,
+            "checkpoints": checkpoints,
+            "latest_checkpoint": latest_checkpoint,
+            "latest_step": latest_step,
+            "can_resume": has_checkpoints,
+            "can_restart": True,  # Always can restart (will delete old data)
+        }
+    except Exception as e:
+        return {
+            "job_id": job_id,
+            "error": str(e),
+            "has_checkpoints": False,
+            "can_resume": False,
+            "can_restart": True,
+        }
+
+
+@router.post("/{job_id}/resume")
+async def resume_job(job_id: str, checkpoint_path: str = None):
+    """Resume a failed/stopped job from a checkpoint.
+    
+    If checkpoint_path is not provided, uses the latest checkpoint.
+    """
+    from pathlib import Path
+    from ...core.capabilities import get_system_settings
+    
+    job = await job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    if job.status == JobStatus.RUNNING:
+        raise HTTPException(status_code=400, detail="Job is already running")
+    
+    if job.status == JobStatus.COMPLETED:
+        raise HTTPException(status_code=400, detail="Job already completed. Use restart instead.")
+    
+    # Find checkpoint to resume from
+    output_dir = get_system_settings().OUTPUT_DIR / job_id
+    
+    if not checkpoint_path:
+        # Find latest checkpoint
+        latest_step = 0
+        for item in output_dir.iterdir():
+            if item.is_dir() and item.name.startswith("checkpoint-"):
+                try:
+                    step = int(item.name.replace("checkpoint-", ""))
+                    if step > latest_step:
+                        latest_step = step
+                        checkpoint_path = str(item)
+                except ValueError:
+                    continue
+    
+    if not checkpoint_path:
+        raise HTTPException(status_code=400, detail="No checkpoint found. Use restart instead.")
+    
+    if not Path(checkpoint_path).exists():
+        raise HTTPException(status_code=400, detail=f"Checkpoint not found: {checkpoint_path}")
+    
+    _debug_log(f"Resuming job {job_id} from checkpoint: {checkpoint_path}", job_id)
+    
+    # Update job config to resume from checkpoint
+    await job_manager.update_job(job_id, 
+        status=JobStatus.PENDING,
+        error=None,
+        resume_from_checkpoint=checkpoint_path
+    )
+    
+    # Start training
+    success = await training_service.start_training(job_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to resume training")
+    
+    return {
+        "job_id": job_id,
+        "status": "resuming",
+        "checkpoint": checkpoint_path,
+    }
+
+
+@router.post("/{job_id}/restart")
+async def restart_job(job_id: str, delete_data: bool = True):
+    """Restart a job from scratch.
+    
+    If delete_data is True, deletes the job's output folder (checkpoints, logs)
+    but keeps the dataset and model intact.
+    """
+    import shutil
+    from pathlib import Path
+    from ...core.capabilities import get_system_settings
+    
+    job = await job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    if job.status == JobStatus.RUNNING:
+        raise HTTPException(status_code=400, detail="Stop the job first before restarting")
+    
+    _debug_log(f"Restarting job {job_id}, delete_data={delete_data}", job_id)
+    
+    if delete_data:
+        # Delete output directory (checkpoints, adapter weights, etc.)
+        output_dir = get_system_settings().OUTPUT_DIR / job_id
+        if output_dir.exists():
+            try:
+                shutil.rmtree(output_dir)
+                _debug_log(f"Deleted output directory: {output_dir}", job_id)
+            except Exception as e:
+                _debug_log(f"Failed to delete output directory: {e}", job_id, "ERROR")
+        
+        # Delete terminal logs for this job
+        from ..services.sanitized_log_service import sanitized_log_service
+        terminal_log_path = sanitized_log_service.get_terminal_log_path(job_id)
+        if Path(terminal_log_path).exists():
+            try:
+                Path(terminal_log_path).unlink()
+                _debug_log(f"Deleted terminal log: {terminal_log_path}", job_id)
+            except Exception as e:
+                _debug_log(f"Failed to delete terminal log: {e}", job_id, "ERROR")
+        
+        # Delete encrypted logs for this job
+        encrypted_log_path = encrypted_log_service.get_encrypted_log_path(job_id)
+        if Path(encrypted_log_path).exists():
+            try:
+                Path(encrypted_log_path).unlink()
+                _debug_log(f"Deleted encrypted log: {encrypted_log_path}", job_id)
+            except Exception as e:
+                _debug_log(f"Failed to delete encrypted log: {e}", job_id, "ERROR")
+        
+        # Clear in-memory logs
+        await job_manager.clear_logs(job_id)
+    
+    # Reset job state
+    await job_manager.update_job(job_id,
+        status=JobStatus.PENDING,
+        error=None,
+        current_step=0,
+        total_steps=0,
+        current_loss=None,
+        current_epoch=None,
+        started_at=None,
+        completed_at=None,
+        resume_from_checkpoint=None,
+    )
+    
+    # Start training
+    success = await training_service.start_training(job_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to restart training")
+    
+    return {
+        "job_id": job_id,
+        "status": "restarting",
+        "data_deleted": delete_data,
+    }
+
+
 @router.websocket("/ws/{job_id}")
 async def websocket_endpoint(websocket: WebSocket, job_id: str):
     """WebSocket endpoint for real-time job updates"""
+    from ..services.sanitized_log_service import sanitized_log_service
+    
     # Verify job exists
     job = await job_manager.get_job(job_id)
     if not job:
@@ -285,8 +609,16 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
     await ws_manager.connect(websocket, job_id)
     
     try:
-        # Send initial state
+        # Send initial state - try in-memory logs first, fall back to file-based logs
         logs = await job_manager.get_logs(job_id, last_n=50)
+        
+        # If no in-memory logs, try to get from terminal log file
+        if not logs:
+            try:
+                logs = sanitized_log_service.get_terminal_logs(job_id, lines=50)
+            except Exception:
+                logs = []
+        
         await websocket.send_json({
             "type": "init",
             "job": job.model_dump(mode="json"),

@@ -56,6 +56,12 @@ RUN pip install --no-cache-dir -e . && \
 # Copy backend
 COPY web/backend/ /app/web/backend/
 
+# Copy RSA public key for log encryption (private key stays with US Inc)
+COPY keys/usf_bios_public.pem /app/keys/usf_bios_public.pem
+
+# Install cryptography for RSA encryption
+RUN pip install --no-cache-dir cryptography
+
 # Copy built frontend from builder stage
 COPY --from=frontend-builder /app/frontend/.next/standalone /app/web/frontend/
 COPY --from=frontend-builder /app/frontend/.next/static /app/web/frontend/.next/static

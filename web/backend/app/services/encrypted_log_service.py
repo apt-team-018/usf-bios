@@ -19,11 +19,22 @@ class EncryptedLogService:
     - Uses RSA public key encryption (only US Inc can decrypt with private key)
     - Stores encrypted logs to files for later retrieval
     - User CANNOT decrypt these logs (no private key in container)
+    
+    Key Locations:
+    - Public key (in container): /app/keys/usf_bios_public.pem
+    - Private key (US Inc only): keys/usf_bios_private.pem (NEVER in container)
     """
     
-    PUBLIC_KEY_PATH = os.getenv("RSA_PUBLIC_KEY_PATH", "/app/.k")
+    # Try multiple paths for the public key
+    PUBLIC_KEY_PATHS = [
+        os.getenv("RSA_PUBLIC_KEY_PATH", ""),
+        "/app/keys/usf_bios_public.pem",
+        "/app/.k",
+        "keys/usf_bios_public.pem",  # Development path
+    ]
     ENCRYPTED_LOG_DIR = os.getenv("ENCRYPTED_LOG_PATH", "/app/data/encrypted_logs")
     _public_key = None
+    _key_loaded = False
     
     def __init__(self):
         # Ensure encrypted log directory exists
@@ -31,24 +42,35 @@ class EncryptedLogService:
     
     @classmethod
     def _load_public_key(cls):
-        if cls._public_key is not None:
+        if cls._key_loaded:
             return cls._public_key
+        
+        cls._key_loaded = True
         
         if not CRYPTO_AVAILABLE:
+            print("[EncryptedLogService] WARNING: cryptography library not available, logs will NOT be encrypted")
             return None
         
-        if not os.path.exists(cls.PUBLIC_KEY_PATH):
-            return None
+        # Try multiple paths for the public key
+        for key_path in cls.PUBLIC_KEY_PATHS:
+            if not key_path or not os.path.exists(key_path):
+                continue
+            
+            try:
+                with open(key_path, 'rb') as f:
+                    cls._public_key = serialization.load_pem_public_key(
+                        f.read(),
+                        backend=default_backend()
+                    )
+                print(f"[EncryptedLogService] Loaded public key from: {key_path}")
+                return cls._public_key
+            except Exception as e:
+                print(f"[EncryptedLogService] Failed to load key from {key_path}: {e}")
+                continue
         
-        try:
-            with open(cls.PUBLIC_KEY_PATH, 'rb') as f:
-                cls._public_key = serialization.load_pem_public_key(
-                    f.read(),
-                    backend=default_backend()
-                )
-            return cls._public_key
-        except Exception:
-            return None
+        print("[EncryptedLogService] WARNING: No public key found, logs will NOT be encrypted")
+        print(f"[EncryptedLogService] Searched paths: {cls.PUBLIC_KEY_PATHS}")
+        return None
     
     @classmethod
     def encrypt_message(cls, message: str) -> str:
