@@ -467,9 +467,8 @@ export default function Home() {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data)
-          if (data.type === 'log' && data.message) {
-            setTrainingLogs(prev => [...prev.slice(-500), data.message])
-          }
+          // Note: Logs are now handled by file-based polling (no duplicates)
+          // WebSocket only handles progress and status updates
           if (data.type === 'progress') {
             // Update job status
             setJobStatus(prev => prev ? {
@@ -484,15 +483,8 @@ export default function Home() {
               eta_seconds: data.eta_seconds ?? prev.eta_seconds,
             } : null)
             
-            // Collect metrics for graphs
-            if (data.step && data.loss !== undefined) {
-              setTrainingMetrics(prev => [...prev.slice(-200), {
-                step: data.step,
-                loss: data.loss,
-                learning_rate: data.learning_rate || 0,
-                timestamp: Date.now()
-              }])
-            }
+            // Note: Metrics for graphs are now fetched from database via polling
+            // WebSocket progress only updates the current status display
           }
           if (data.type === 'status') {
             if (data.status === 'completed' || data.status === 'failed' || data.status === 'stopped') {
@@ -512,6 +504,119 @@ export default function Home() {
     }
   }, [jobStatus?.job_id, isTraining])
 
+  // Poll for terminal logs from file (single source of truth - replaces WebSocket logs)
+  // This ensures no duplicates - file-based logs are the authoritative source
+  useEffect(() => {
+    if (jobStatus?.job_id && (isTraining || jobStatus.status === 'failed' || jobStatus.status === 'stopped')) {
+      let lastLogCount = 0
+      
+      const fetchTerminalLogs = async () => {
+        try {
+          const res = await fetch(`/api/jobs/${jobStatus.job_id}/terminal-logs?lines=500`)
+          if (res.ok) {
+            const data = await res.json()
+            if (data.logs && data.logs.length > 0) {
+              // Always use file-based logs as single source of truth (no duplicates)
+              if (data.logs.length !== lastLogCount) {
+                lastLogCount = data.logs.length
+                setTrainingLogs(data.logs)
+              }
+            }
+          }
+        } catch (e) {
+          console.error('Failed to fetch terminal logs:', e)
+        }
+      }
+      
+      // Fetch immediately when training starts
+      fetchTerminalLogs()
+      
+      // Poll every 1 second for real-time updates
+      const interval = setInterval(fetchTerminalLogs, 1000)
+      
+      // Keep polling for 30 seconds after training stops to capture final logs
+      if (!isTraining) {
+        setTimeout(() => clearInterval(interval), 30000)
+      }
+      
+      return () => clearInterval(interval)
+    }
+  }, [jobStatus?.job_id, isTraining, jobStatus?.status])
+
+  // State for training type and available metrics
+  const [trainTypeInfo, setTrainTypeInfo] = useState<{
+    train_type: string
+    display_name: string
+    primary_metrics: string[]
+  } | null>(null)
+
+  // Poll for training metrics from database (for graphs)
+  // Only fetches metrics relevant to the training type (SFT, RLHF, DPO, etc.)
+  useEffect(() => {
+    if (jobStatus?.job_id && (isTraining || jobStatus.status === 'completed')) {
+      const fetchMetrics = async () => {
+        try {
+          const res = await fetch(`/api/jobs/${jobStatus.job_id}/metrics?limit=500`)
+          if (res.ok) {
+            const data = await res.json()
+            
+            // Store training type info for dynamic graph rendering
+            if (data.train_type) {
+              setTrainTypeInfo({
+                train_type: data.train_type,
+                display_name: data.train_type_display || data.train_type.toUpperCase(),
+                primary_metrics: data.primary_metrics || ['loss', 'learning_rate']
+              })
+            }
+            
+            if (data.metrics && data.metrics.length > 0) {
+              // Convert database metrics to graph format
+              // Only includes metrics relevant to this training type (no irrelevant fields)
+              const graphMetrics = data.metrics.map((m: any) => ({
+                step: m.step,
+                epoch: m.epoch,
+                // Common metrics
+                loss: m.loss,
+                learning_rate: m.learning_rate,
+                grad_norm: m.grad_norm,
+                eval_loss: m.eval_loss,
+                // RLHF/PPO metrics (only present if relevant)
+                reward: m.reward,
+                kl_divergence: m.kl_divergence,
+                policy_loss: m.policy_loss,
+                value_loss: m.value_loss,
+                entropy: m.entropy,
+                // DPO metrics (only present if relevant)
+                chosen_rewards: m.chosen_rewards,
+                rejected_rewards: m.rejected_rewards,
+                reward_margin: m.reward_margin,
+                // Extra
+                extra_metrics: m.extra_metrics,
+                timestamp: m.timestamp ? new Date(m.timestamp).getTime() : Date.now()
+              }))
+              setTrainingMetrics(graphMetrics)
+            }
+          }
+        } catch (e) {
+          console.error('Failed to fetch metrics:', e)
+        }
+      }
+      
+      // Fetch immediately
+      fetchMetrics()
+      
+      // Poll every 3 seconds while training
+      const interval = setInterval(fetchMetrics, 3000)
+      
+      // Stop polling after training completes
+      if (!isTraining) {
+        setTimeout(() => clearInterval(interval), 10000)
+      }
+      
+      return () => clearInterval(interval)
+    }
+  }, [jobStatus?.job_id, isTraining, jobStatus?.status])
+
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [trainingLogs])
@@ -519,6 +624,32 @@ export default function Home() {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [chatMessages])
+
+  // ============================================================
+  // NAVIGATION LOCK: Prevent user from leaving during training
+  // ============================================================
+  useEffect(() => {
+    if (isTraining) {
+      // Warn user before page refresh/close
+      const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+        e.preventDefault()
+        e.returnValue = 'Training is in progress. Are you sure you want to leave?'
+        return e.returnValue
+      }
+      
+      window.addEventListener('beforeunload', handleBeforeUnload)
+      return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+    }
+  }, [isTraining])
+
+  // Lock tab switching during training
+  const handleTabChange = (tab: 'train' | 'inference') => {
+    if (isTraining) {
+      alert('Training is in progress. Please wait for training to complete or stop it first.')
+      return
+    }
+    setMainTab(tab)
+  }
 
   // Dataset functions
   const fetchDatasets = async () => {
@@ -1028,7 +1159,7 @@ export default function Home() {
             {/* Desktop tabs - Disabled during training */}
             <div className="hidden sm:flex bg-slate-100 rounded-lg p-1">
               <button
-                onClick={() => !isTraining && setMainTab('train')}
+                onClick={() => handleTabChange('train')}
                 disabled={isTraining}
                 className={`px-4 py-2 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
                   mainTab === 'train' ? 'bg-blue-500 text-white shadow-md' : 'text-slate-600 hover:text-slate-900'
@@ -1038,7 +1169,7 @@ export default function Home() {
                 {isTraining && <Loader2 className="w-3 h-3 animate-spin" />}
               </button>
               <button
-                onClick={() => !isTraining && setMainTab('inference')}
+                onClick={() => handleTabChange('inference')}
                 disabled={isTraining}
                 className={`px-4 py-2 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
                   mainTab === 'inference' ? 'bg-blue-500 text-white shadow-md' : 'text-slate-600 hover:text-slate-900'
@@ -1070,14 +1201,14 @@ export default function Home() {
           {mobileMenuOpen && (
             <div className="sm:hidden mt-3 pt-3 border-t border-slate-200 flex gap-2">
               <button 
-                onClick={() => { if (!isTraining) { setMainTab('train'); setMobileMenuOpen(false) } }}
+                onClick={() => { handleTabChange('train'); setMobileMenuOpen(false) }}
                 disabled={isTraining}
                 className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium ${mainTab === 'train' ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-700'} ${isTraining ? 'opacity-50 cursor-not-allowed' : ''}`}>
                 <Zap className="w-4 h-4 inline mr-1" />Fine-tuning
                 {isTraining && <Loader2 className="w-3 h-3 inline ml-1 animate-spin" />}
               </button>
               <button 
-                onClick={() => { if (!isTraining) { setMainTab('inference'); setMobileMenuOpen(false) } }}
+                onClick={() => { handleTabChange('inference'); setMobileMenuOpen(false) }}
                 disabled={isTraining}
                 className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium ${mainTab === 'inference' ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-700'} ${isTraining ? 'opacity-50 cursor-not-allowed' : ''}`}>
                 <MessageSquare className="w-4 h-4 inline mr-1" />Inference
@@ -1211,25 +1342,77 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* Loss Graph */}
+              {/* Training Graphs - Loss and Learning Rate */}
               {trainingMetrics.length > 1 && (
-                <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
-                  <h4 className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
-                    <BarChart3 className="w-4 h-4 text-blue-500" /> Training Loss
-                  </h4>
-                  <div className="h-32 flex items-end gap-px bg-white rounded p-2">
-                    {trainingMetrics.slice(-50).map((m, i) => {
-                      const maxLoss = Math.max(...trainingMetrics.slice(-50).map(x => x.loss))
-                      const height = (m.loss / maxLoss) * 100
-                      return (
-                        <div key={i} className="flex-1 bg-blue-500 rounded-t opacity-80 hover:opacity-100 transition-opacity"
-                          style={{ height: `${height}%` }} title={`Step ${m.step}: ${m.loss.toFixed(4)}`} />
-                      )
-                    })}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {/* Loss Graph */}
+                  <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
+                    <h4 className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
+                      <BarChart3 className="w-4 h-4 text-blue-500" /> Training Loss
+                    </h4>
+                    <div className="h-32 relative bg-white rounded p-2">
+                      <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+                        {(() => {
+                          const data = trainingMetrics.filter(m => m.loss > 0)
+                          if (data.length < 2) return null
+                          const maxLoss = Math.max(...data.map(x => x.loss))
+                          const minLoss = Math.min(...data.map(x => x.loss))
+                          const range = maxLoss - minLoss || 1
+                          const points = data.map((m, i) => {
+                            const x = (i / (data.length - 1)) * 100
+                            const y = 100 - ((m.loss - minLoss) / range) * 90 - 5
+                            return `${x},${y}`
+                          }).join(' ')
+                          return <polyline fill="none" stroke="#3b82f6" strokeWidth="2" points={points} />
+                        })()}
+                      </svg>
+                      <div className="absolute bottom-1 left-2 text-[10px] text-slate-500">
+                        Min: {Math.min(...trainingMetrics.filter(m => m.loss > 0).map(x => x.loss)).toFixed(4)}
+                      </div>
+                      <div className="absolute top-1 right-2 text-[10px] text-slate-500">
+                        Max: {Math.max(...trainingMetrics.filter(m => m.loss > 0).map(x => x.loss)).toFixed(4)}
+                      </div>
+                    </div>
+                    <div className="flex justify-between text-xs text-slate-500 mt-1">
+                      <span>Step {trainingMetrics[0]?.step || 0}</span>
+                      <span>Current: {trainingMetrics[trainingMetrics.length - 1]?.loss?.toFixed(4) || '--'}</span>
+                      <span>Step {trainingMetrics[trainingMetrics.length - 1]?.step || 0}</span>
+                    </div>
                   </div>
-                  <div className="flex justify-between text-xs text-slate-500 mt-1">
-                    <span>Step {trainingMetrics[Math.max(0, trainingMetrics.length - 50)]?.step || 0}</span>
-                    <span>Step {trainingMetrics[trainingMetrics.length - 1]?.step || 0}</span>
+
+                  {/* Learning Rate Graph */}
+                  <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
+                    <h4 className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
+                      <BarChart3 className="w-4 h-4 text-green-500" /> Learning Rate
+                    </h4>
+                    <div className="h-32 relative bg-white rounded p-2">
+                      <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+                        {(() => {
+                          const data = trainingMetrics.filter(m => m.learning_rate > 0)
+                          if (data.length < 2) return null
+                          const maxLR = Math.max(...data.map(x => x.learning_rate))
+                          const minLR = Math.min(...data.map(x => x.learning_rate))
+                          const range = maxLR - minLR || 1
+                          const points = data.map((m, i) => {
+                            const x = (i / (data.length - 1)) * 100
+                            const y = 100 - ((m.learning_rate - minLR) / range) * 90 - 5
+                            return `${x},${y}`
+                          }).join(' ')
+                          return <polyline fill="none" stroke="#22c55e" strokeWidth="2" points={points} />
+                        })()}
+                      </svg>
+                      <div className="absolute bottom-1 left-2 text-[10px] text-slate-500">
+                        Min: {Math.min(...trainingMetrics.filter(m => m.learning_rate > 0).map(x => x.learning_rate)).toExponential(2)}
+                      </div>
+                      <div className="absolute top-1 right-2 text-[10px] text-slate-500">
+                        Max: {Math.max(...trainingMetrics.filter(m => m.learning_rate > 0).map(x => x.learning_rate)).toExponential(2)}
+                      </div>
+                    </div>
+                    <div className="flex justify-between text-xs text-slate-500 mt-1">
+                      <span>Step {trainingMetrics[0]?.step || 0}</span>
+                      <span>Current: {trainingMetrics[trainingMetrics.length - 1]?.learning_rate?.toExponential(2) || '--'}</span>
+                      <span>Step {trainingMetrics[trainingMetrics.length - 1]?.step || 0}</span>
+                    </div>
                   </div>
                 </div>
               )}
@@ -1618,25 +1801,77 @@ export default function Home() {
                     </div>
                   </div>
 
-                  {/* Loss Graph */}
+                  {/* Training Graphs - Loss and Learning Rate */}
                   {trainingMetrics.length > 1 && (
-                    <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
-                      <h4 className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
-                        <BarChart3 className="w-4 h-4 text-blue-500" /> Training Loss
-                      </h4>
-                      <div className="h-32 flex items-end gap-px bg-white rounded p-2">
-                        {trainingMetrics.slice(-50).map((m, i) => {
-                          const maxLoss = Math.max(...trainingMetrics.slice(-50).map(x => x.loss))
-                          const height = (m.loss / maxLoss) * 100
-                          return (
-                            <div key={i} className="flex-1 bg-blue-500 rounded-t opacity-80 hover:opacity-100 transition-opacity"
-                              style={{ height: `${height}%` }} title={`Step ${m.step}: ${m.loss.toFixed(4)}`} />
-                          )
-                        })}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      {/* Loss Graph */}
+                      <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
+                        <h4 className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
+                          <BarChart3 className="w-4 h-4 text-blue-500" /> Training Loss
+                        </h4>
+                        <div className="h-32 relative bg-white rounded p-2">
+                          <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+                            {(() => {
+                              const data = trainingMetrics.filter(m => m.loss > 0)
+                              if (data.length < 2) return null
+                              const maxLoss = Math.max(...data.map(x => x.loss))
+                              const minLoss = Math.min(...data.map(x => x.loss))
+                              const range = maxLoss - minLoss || 1
+                              const points = data.map((m, i) => {
+                                const x = (i / (data.length - 1)) * 100
+                                const y = 100 - ((m.loss - minLoss) / range) * 90 - 5
+                                return `${x},${y}`
+                              }).join(' ')
+                              return <polyline fill="none" stroke="#3b82f6" strokeWidth="2" points={points} />
+                            })()}
+                          </svg>
+                          <div className="absolute bottom-1 left-2 text-[10px] text-slate-500">
+                            Min: {Math.min(...trainingMetrics.filter(m => m.loss > 0).map(x => x.loss)).toFixed(4)}
+                          </div>
+                          <div className="absolute top-1 right-2 text-[10px] text-slate-500">
+                            Max: {Math.max(...trainingMetrics.filter(m => m.loss > 0).map(x => x.loss)).toFixed(4)}
+                          </div>
+                        </div>
+                        <div className="flex justify-between text-xs text-slate-500 mt-1">
+                          <span>Step {trainingMetrics[0]?.step || 0}</span>
+                          <span>Current: {trainingMetrics[trainingMetrics.length - 1]?.loss?.toFixed(4) || '--'}</span>
+                          <span>Step {trainingMetrics[trainingMetrics.length - 1]?.step || 0}</span>
+                        </div>
                       </div>
-                      <div className="flex justify-between text-xs text-slate-500 mt-1">
-                        <span>Step {trainingMetrics[Math.max(0, trainingMetrics.length - 50)]?.step || 0}</span>
-                        <span>Step {trainingMetrics[trainingMetrics.length - 1]?.step || 0}</span>
+
+                      {/* Learning Rate Graph */}
+                      <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
+                        <h4 className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
+                          <BarChart3 className="w-4 h-4 text-green-500" /> Learning Rate
+                        </h4>
+                        <div className="h-32 relative bg-white rounded p-2">
+                          <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+                            {(() => {
+                              const data = trainingMetrics.filter(m => m.learning_rate > 0)
+                              if (data.length < 2) return null
+                              const maxLR = Math.max(...data.map(x => x.learning_rate))
+                              const minLR = Math.min(...data.map(x => x.learning_rate))
+                              const range = maxLR - minLR || 1
+                              const points = data.map((m, i) => {
+                                const x = (i / (data.length - 1)) * 100
+                                const y = 100 - ((m.learning_rate - minLR) / range) * 90 - 5
+                                return `${x},${y}`
+                              }).join(' ')
+                              return <polyline fill="none" stroke="#22c55e" strokeWidth="2" points={points} />
+                            })()}
+                          </svg>
+                          <div className="absolute bottom-1 left-2 text-[10px] text-slate-500">
+                            Min: {Math.min(...trainingMetrics.filter(m => m.learning_rate > 0).map(x => x.learning_rate)).toExponential(2)}
+                          </div>
+                          <div className="absolute top-1 right-2 text-[10px] text-slate-500">
+                            Max: {Math.max(...trainingMetrics.filter(m => m.learning_rate > 0).map(x => x.learning_rate)).toExponential(2)}
+                          </div>
+                        </div>
+                        <div className="flex justify-between text-xs text-slate-500 mt-1">
+                          <span>Step {trainingMetrics[0]?.step || 0}</span>
+                          <span>Current: {trainingMetrics[trainingMetrics.length - 1]?.learning_rate?.toExponential(2) || '--'}</span>
+                          <span>Step {trainingMetrics[trainingMetrics.length - 1]?.step || 0}</span>
+                        </div>
                       </div>
                     </div>
                   )}

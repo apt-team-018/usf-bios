@@ -164,25 +164,61 @@ class TrainingJob(Base):
 
 
 class TrainingMetric(Base):
+    """
+    Training metrics table - supports ALL training algorithms:
+    - SFT (Supervised Fine-Tuning): loss, learning_rate, grad_norm
+    - RLHF: reward, kl_divergence, policy_loss, value_loss
+    - PPO: policy_loss, value_loss, entropy, approx_kl, clip_fraction
+    - DPO: chosen_rewards, rejected_rewards, reward_margin
+    - GRPO: reward, kl_penalty, policy_gradient_loss
+    - GKD: distillation_loss, student_loss, teacher_loss
+    - Pre-training: loss, perplexity, tokens_per_second
+    - ASR: wer, cer, loss
+    - TTS: mel_loss, duration_loss, pitch_loss
+    - Multimodal: image_loss, text_loss, contrastive_loss
+    
+    Common columns handle standard metrics.
+    extra_metrics JSON column handles algorithm-specific metrics dynamically.
+    """
     __tablename__ = "training_metrics"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     job_id = Column(String(36), ForeignKey("training_jobs.id", ondelete="CASCADE"), nullable=False, index=True)
     job = relationship("TrainingJob", back_populates="metrics")
     
+    # Training type for filtering (sft, rlhf, ppo, dpo, grpo, gkd, pretrain, asr, tts, multimodal)
+    train_type = Column(String(50), nullable=True, index=True)
+    
     step = Column(Integer, nullable=False, index=True)
     epoch = Column(Float, nullable=True)
     
+    # Common metrics (all training types)
     loss = Column(Float, nullable=True)
     learning_rate = Column(Float, nullable=True)
     grad_norm = Column(Float, nullable=True)
     
+    # Evaluation metrics
     eval_loss = Column(Float, nullable=True)
     eval_accuracy = Column(Float, nullable=True)
     eval_perplexity = Column(Float, nullable=True)
     
+    # RLHF/PPO specific
+    reward = Column(Float, nullable=True)
+    kl_divergence = Column(Float, nullable=True)
+    policy_loss = Column(Float, nullable=True)
+    value_loss = Column(Float, nullable=True)
+    entropy = Column(Float, nullable=True)
+    
+    # DPO specific
+    chosen_rewards = Column(Float, nullable=True)
+    rejected_rewards = Column(Float, nullable=True)
+    reward_margin = Column(Float, nullable=True)
+    
+    # Dynamic extra metrics (for any algorithm-specific metrics)
+    # This JSON column can store ANY additional metrics not covered above
     extra_metrics = Column(JSON, nullable=True)
     
+    # System metrics
     gpu_memory_mb = Column(Float, nullable=True)
     gpu_utilization_pct = Column(Float, nullable=True)
     throughput_samples_sec = Column(Float, nullable=True)
@@ -191,6 +227,7 @@ class TrainingMetric(Base):
     
     __table_args__ = (
         Index("idx_metric_job_step", "job_id", "step"),
+        Index("idx_metric_train_type", "train_type"),
         UniqueConstraint("job_id", "step", name="uq_job_step"),
     )
 

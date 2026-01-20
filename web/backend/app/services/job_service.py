@@ -954,37 +954,68 @@ class JobService:
             return "completed_can_clone_or_delete"
         return "unknown"
     
-    def add_metric(
+    def save_training_metric(
         self,
         job_id: str,
         step: int,
+        train_type: Optional[str] = None,
         epoch: Optional[float] = None,
         loss: Optional[float] = None,
         learning_rate: Optional[float] = None,
         grad_norm: Optional[float] = None,
         eval_loss: Optional[float] = None,
         eval_accuracy: Optional[float] = None,
+        # RLHF/PPO metrics
+        reward: Optional[float] = None,
+        kl_divergence: Optional[float] = None,
+        policy_loss: Optional[float] = None,
+        value_loss: Optional[float] = None,
+        entropy: Optional[float] = None,
+        # DPO metrics
+        chosen_rewards: Optional[float] = None,
+        rejected_rewards: Optional[float] = None,
+        reward_margin: Optional[float] = None,
+        # Extra metrics (JSON for any algorithm-specific)
         extra_metrics: Optional[Dict] = None,
     ) -> TrainingMetric:
+        """Save training metric - supports ALL training algorithms.
+        
+        NO DUPLICATES: Updates existing metric if step already exists for this job.
+        ISOLATED: Each job_id has its own metrics, no mixing between trainings.
+        """
+        # Check for existing metric at this step (prevent duplicates)
         existing = self.db.query(TrainingMetric).filter(
             TrainingMetric.job_id == job_id,
             TrainingMetric.step == step
         ).first()
         
         if existing:
-            existing.loss = loss if loss is not None else existing.loss
-            existing.learning_rate = learning_rate if learning_rate is not None else existing.learning_rate
-            existing.eval_loss = eval_loss if eval_loss is not None else existing.eval_loss
-            existing.eval_accuracy = eval_accuracy if eval_accuracy is not None else existing.eval_accuracy
+            # Update existing metric (no duplicates)
+            if loss is not None: existing.loss = loss
+            if learning_rate is not None: existing.learning_rate = learning_rate
+            if grad_norm is not None: existing.grad_norm = grad_norm
+            if eval_loss is not None: existing.eval_loss = eval_loss
+            if eval_accuracy is not None: existing.eval_accuracy = eval_accuracy
+            if reward is not None: existing.reward = reward
+            if kl_divergence is not None: existing.kl_divergence = kl_divergence
+            if policy_loss is not None: existing.policy_loss = policy_loss
+            if value_loss is not None: existing.value_loss = value_loss
+            if entropy is not None: existing.entropy = entropy
+            if chosen_rewards is not None: existing.chosen_rewards = chosen_rewards
+            if rejected_rewards is not None: existing.rejected_rewards = rejected_rewards
+            if reward_margin is not None: existing.reward_margin = reward_margin
             if extra_metrics:
                 existing.extra_metrics = {**(existing.extra_metrics or {}), **extra_metrics}
             self.db.commit()
             return existing
         
+        # Get GPU info for new metric
         gpu_info = gpu_service.get_current_memory_usage()
         
+        # Create new metric
         metric = TrainingMetric(
             job_id=job_id,
+            train_type=train_type,
             step=step,
             epoch=epoch,
             loss=loss,
@@ -992,6 +1023,14 @@ class JobService:
             grad_norm=grad_norm,
             eval_loss=eval_loss,
             eval_accuracy=eval_accuracy,
+            reward=reward,
+            kl_divergence=kl_divergence,
+            policy_loss=policy_loss,
+            value_loss=value_loss,
+            entropy=entropy,
+            chosen_rewards=chosen_rewards,
+            rejected_rewards=rejected_rewards,
+            reward_margin=reward_margin,
             extra_metrics=extra_metrics,
             gpu_memory_mb=gpu_info.get("allocated_mb"),
         )

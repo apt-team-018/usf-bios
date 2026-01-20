@@ -4,17 +4,6 @@
 from usf_bios.system_guard import guard_cli_entry
 guard_cli_entry()
 
-from usf_bios.arguments import ExportArguments
-from usf_bios.pipelines import USFPipeline, merge_lora
-
-
-class USFMergeLoRA(USFPipeline):
-    args_class = ExportArguments
-    args: args_class
-
-    def run(self):
-        merge_lora(self.args)
-
-
 if __name__ == '__main__':
-    USFMergeLoRA().main()
+    from usf_bios.cli._core import merge_lora_entry
+    merge_lora_entry()

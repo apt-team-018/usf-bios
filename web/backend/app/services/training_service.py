@@ -11,11 +11,13 @@ from typing import Optional
 
 from ..core.config import settings
 from ..core.capabilities import get_system_settings
+from ..core.database import SessionLocal
 from ..models.schemas import JobInfo, JobStatus, TrainingConfig
 from .job_manager import job_manager
 from .websocket_manager import ws_manager
 from .sanitized_log_service import sanitized_log_service
 from .encrypted_log_service import encrypted_log_service
+from .job_service import JobService
 
 
 def _debug_log(job_id: str, message: str, level: str = "DEBUG"):
@@ -88,30 +90,163 @@ class TrainingService:
         return cmd
     
     def _parse_log_line(self, line: str, job_id: str) -> dict:
-        """Parse a log line to extract training metrics"""
+        """Parse a log line to extract training metrics.
+        
+        Supports ALL training algorithms:
+        - SFT: loss, learning_rate, grad_norm, epoch
+        - RLHF/PPO: reward, kl_divergence, policy_loss, value_loss, entropy
+        - DPO: chosen_rewards, rejected_rewards, reward_margin
+        - GRPO: reward, kl_penalty, policy_gradient_loss
+        - GKD: distillation_loss, student_loss, teacher_loss
+        - Pre-training: loss, perplexity, tokens_per_second
+        - ASR: wer, cer, loss
+        - TTS: mel_loss, duration_loss, pitch_loss
+        - Multimodal: image_loss, text_loss, contrastive_loss
+        """
         metrics = {}
         
-        # Parse loss
+        # ============================================================
+        # COMMON METRICS (all training types)
+        # ============================================================
+        
+        # Parse loss (multiple formats)
         loss_match = re.search(r"'loss':\s*([\d.]+)", line)
         if loss_match:
             metrics["loss"] = float(loss_match.group(1))
+        else:
+            loss_alt = re.search(r"(?:loss|Loss)[=:\s]+([\d.]+)", line)
+            if loss_alt:
+                metrics["loss"] = float(loss_alt.group(1))
         
         # Parse learning rate
-        lr_match = re.search(r"'learning_rate':\s*([\d.e-]+)", line)
+        lr_match = re.search(r"'learning_rate':\s*([\d.e\-+]+)", line)
         if lr_match:
             metrics["learning_rate"] = float(lr_match.group(1))
+        else:
+            lr_alt = re.search(r"(?:lr|LR|learning_rate)[=:\s]+([\d.e\-+]+)", line)
+            if lr_alt:
+                metrics["learning_rate"] = float(lr_alt.group(1))
         
         # Parse step
         step_match = re.search(r"'(global_)?step':\s*(\d+)", line)
         if step_match:
             metrics["step"] = int(step_match.group(2))
+        else:
+            step_alt = re.search(r"(?:Step|step)[=:\s]+(\d+)", line)
+            if step_alt:
+                metrics["step"] = int(step_alt.group(1))
         
         # Parse epoch
         epoch_match = re.search(r"'epoch':\s*([\d.]+)", line)
         if epoch_match:
             metrics["epoch"] = float(epoch_match.group(1))
+        else:
+            epoch_alt = re.search(r"(?:Epoch|epoch)[=:\s]+([\d.]+)", line)
+            if epoch_alt:
+                metrics["epoch"] = float(epoch_alt.group(1))
         
-        # Parse progress bar format: X/Y [time<eta]
+        # Parse grad_norm
+        grad_match = re.search(r"'grad_norm':\s*([\d.]+)", line)
+        if grad_match:
+            metrics["grad_norm"] = float(grad_match.group(1))
+        
+        # Parse eval_loss
+        eval_loss_match = re.search(r"'eval_loss':\s*([\d.]+)", line)
+        if eval_loss_match:
+            metrics["eval_loss"] = float(eval_loss_match.group(1))
+        
+        # ============================================================
+        # RLHF / PPO / GRPO METRICS
+        # ============================================================
+        
+        # Reward
+        reward_match = re.search(r"'reward':\s*([\d.\-e+]+)", line)
+        if reward_match:
+            metrics["reward"] = float(reward_match.group(1))
+        
+        # KL divergence
+        kl_match = re.search(r"'kl(?:_divergence)?':\s*([\d.\-e+]+)", line)
+        if kl_match:
+            metrics["kl_divergence"] = float(kl_match.group(1))
+        
+        # Policy loss
+        policy_loss_match = re.search(r"'policy_loss':\s*([\d.\-e+]+)", line)
+        if policy_loss_match:
+            metrics["policy_loss"] = float(policy_loss_match.group(1))
+        
+        # Value loss
+        value_loss_match = re.search(r"'value_loss':\s*([\d.\-e+]+)", line)
+        if value_loss_match:
+            metrics["value_loss"] = float(value_loss_match.group(1))
+        
+        # Entropy
+        entropy_match = re.search(r"'entropy':\s*([\d.\-e+]+)", line)
+        if entropy_match:
+            metrics["entropy"] = float(entropy_match.group(1))
+        
+        # ============================================================
+        # DPO METRICS
+        # ============================================================
+        
+        # Chosen rewards
+        chosen_match = re.search(r"'(?:chosen_rewards|rewards/chosen)':\s*([\d.\-e+]+)", line)
+        if chosen_match:
+            metrics["chosen_rewards"] = float(chosen_match.group(1))
+        
+        # Rejected rewards
+        rejected_match = re.search(r"'(?:rejected_rewards|rewards/rejected)':\s*([\d.\-e+]+)", line)
+        if rejected_match:
+            metrics["rejected_rewards"] = float(rejected_match.group(1))
+        
+        # Reward margin
+        margin_match = re.search(r"'(?:reward_margin|rewards/margin)':\s*([\d.\-e+]+)", line)
+        if margin_match:
+            metrics["reward_margin"] = float(margin_match.group(1))
+        
+        # ============================================================
+        # EXTRA METRICS (stored in JSON column)
+        # ============================================================
+        extra = {}
+        
+        # Perplexity (pre-training)
+        ppl_match = re.search(r"'perplexity':\s*([\d.]+)", line)
+        if ppl_match:
+            extra["perplexity"] = float(ppl_match.group(1))
+        
+        # WER/CER (ASR)
+        wer_match = re.search(r"'wer':\s*([\d.]+)", line)
+        if wer_match:
+            extra["wer"] = float(wer_match.group(1))
+        cer_match = re.search(r"'cer':\s*([\d.]+)", line)
+        if cer_match:
+            extra["cer"] = float(cer_match.group(1))
+        
+        # Mel loss (TTS)
+        mel_match = re.search(r"'mel_loss':\s*([\d.]+)", line)
+        if mel_match:
+            extra["mel_loss"] = float(mel_match.group(1))
+        
+        # Contrastive loss (multimodal)
+        contrastive_match = re.search(r"'contrastive_loss':\s*([\d.]+)", line)
+        if contrastive_match:
+            extra["contrastive_loss"] = float(contrastive_match.group(1))
+        
+        # Approx KL (PPO)
+        approx_kl_match = re.search(r"'approx_kl':\s*([\d.\-e+]+)", line)
+        if approx_kl_match:
+            extra["approx_kl"] = float(approx_kl_match.group(1))
+        
+        # Clip fraction (PPO)
+        clip_match = re.search(r"'clip(?:_fraction)?':\s*([\d.]+)", line)
+        if clip_match:
+            extra["clip_fraction"] = float(clip_match.group(1))
+        
+        if extra:
+            metrics["extra_metrics"] = extra
+        
+        # ============================================================
+        # PROGRESS BAR FORMAT
+        # ============================================================
         progress_match = re.search(r"(\d+)/(\d+)\s*\[", line)
         if progress_match:
             metrics["step"] = int(progress_match.group(1))
@@ -278,6 +413,41 @@ class TrainingService:
                     await job_manager.update_job(job_id, **update_fields)
                 
                 # ============================================================
+                # DATABASE: Save metrics for graphs (every step with metrics)
+                # Metrics are stored PER JOB_ID - no mixing between trainings
+                # Supports ALL training algorithms: SFT, RLHF, PPO, DPO, GRPO, etc.
+                # ============================================================
+                if "step" in metrics and len(metrics) > 1:
+                    try:
+                        db = SessionLocal()
+                        job_service = JobService(db)
+                        job_service.save_training_metric(
+                            job_id=job_id,  # Ensures data isolation per training job
+                            step=metrics["step"],
+                            epoch=metrics.get("epoch"),
+                            # Common metrics
+                            loss=metrics.get("loss"),
+                            learning_rate=metrics.get("learning_rate"),
+                            grad_norm=metrics.get("grad_norm"),
+                            eval_loss=metrics.get("eval_loss"),
+                            # RLHF/PPO metrics
+                            reward=metrics.get("reward"),
+                            kl_divergence=metrics.get("kl_divergence"),
+                            policy_loss=metrics.get("policy_loss"),
+                            value_loss=metrics.get("value_loss"),
+                            entropy=metrics.get("entropy"),
+                            # DPO metrics
+                            chosen_rewards=metrics.get("chosen_rewards"),
+                            rejected_rewards=metrics.get("rejected_rewards"),
+                            reward_margin=metrics.get("reward_margin"),
+                            # Extra metrics (algorithm-specific in JSON)
+                            extra_metrics=metrics.get("extra_metrics"),
+                        )
+                        db.close()
+                    except Exception as e:
+                        _debug_log(job_id, f"Failed to save metric: {e}", "WARNING")
+                
+                # ============================================================
                 # TERMINAL LOG: Also save formatted progress metrics to sanitized log
                 # ============================================================
                 if metrics:
@@ -324,12 +494,29 @@ class TrainingService:
                 await ws_manager.send_log(job_id, "Training completed! Output saved.", "success")
                 sanitized_log_service.log_session_end(job_id, "COMPLETED")
             else:
+                # Log failure with exit code
+                error_msg = f"Training failed with exit code {return_code}"
+                sanitized_log_service.create_terminal_log(job_id, error_msg, "ERROR")
+                
+                # Try to get last few lines of output for error context
+                logs = await job_manager.get_logs(job_id, last_n=10)
+                if logs:
+                    last_log = logs[-1] if logs else ""
+                    if "No code object" in last_log or "ModuleNotFoundError" in last_log:
+                        error_msg = f"Module loading error. Please rebuild the container. ({last_log[:100]})"
+                    elif "CUDA" in last_log or "GPU" in last_log:
+                        error_msg = "GPU/CUDA error occurred. Check GPU availability."
+                    elif "out of memory" in last_log.lower():
+                        error_msg = "Out of memory. Try reducing batch size."
+                
                 await job_manager.update_job(job_id,
                     status=JobStatus.FAILED,
-                    error=f"Process exited with code {return_code}"
+                    error=error_msg,
+                    completed_at=datetime.now()
                 )
-                await ws_manager.send_status(job_id, "failed", f"Exit code: {return_code}")
-                await ws_manager.send_log(job_id, f"Training failed with exit code {return_code}", "error")
+                await ws_manager.send_status(job_id, "failed", error_msg)
+                await ws_manager.send_log(job_id, error_msg, "error")
+                sanitized_log_service.log_session_end(job_id, "FAILED", error_message=error_msg)
         
         except asyncio.CancelledError:
             await job_manager.update_job(job_id, status=JobStatus.STOPPED)

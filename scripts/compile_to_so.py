@@ -23,17 +23,62 @@ def get_py_files(directory):
     py_files = []
     # Directories to skip
     skip_dirs = {'__pycache__', 'venv', 'env', '.venv', '.env', 'node_modules', '.git', 'build', 'dist', 'egg-info'}
-    # Files to skip (Pydantic models with methods don't work well with Cython)
-    # db_models.py - SQLAlchemy ORM models with declarative base don't compile well
-    # __main__.py - MUST keep as .py for `python -m package` to work
-    skip_files = {'__init__.py', '__main__.py', 'config.py', 'db_models.py', 'version.py', 'protocol.py'}
+    
+    # Files to skip by FILENAME (applies everywhere)
+    # These are system files that should never be compiled
+    # NOTE: config.py and protocol.py removed - they contain logic and should be compiled
+    skip_filenames = {
+        '__init__.py', '__main__.py', 'db_models.py', 'version.py',
+    }
+    
+    # Files to skip by FULL PATH (CLI entry points only)
+    # These are executed via `python -m` and must remain as .py
+    # Use path patterns that match within the directory structure
+    skip_paths = {
+        # Standard CLI entry points
+        'usf_bios/cli/main.py',
+        'usf_bios/cli/sft.py',
+        'usf_bios/cli/pt.py',
+        'usf_bios/cli/infer.py',
+        'usf_bios/cli/deploy.py',
+        'usf_bios/cli/eval.py',
+        'usf_bios/cli/export.py',
+        'usf_bios/cli/rlhf.py',
+        'usf_bios/cli/rollout.py',
+        'usf_bios/cli/sample.py',
+        'usf_bios/cli/app.py',
+        'usf_bios/cli/web_ui.py',
+        'usf_bios/cli/train_ui.py',
+        'usf_bios/cli/merge_lora.py',
+        # Megatron CLI entry points
+        'usf_bios/cli/_megatron/main.py',
+        'usf_bios/cli/_megatron/sft.py',
+        'usf_bios/cli/_megatron/pt.py',
+        'usf_bios/cli/_megatron/rlhf.py',
+        'usf_bios/cli/_megatron/export.py',
+    }
+    
+    def should_skip(filepath):
+        """Check if file should be skipped from compilation"""
+        filename = os.path.basename(filepath)
+        # Skip by filename (system files)
+        if filename in skip_filenames:
+            return True
+        # Skip by path (CLI entry points) - normalize path for matching
+        normalized = filepath.replace(os.sep, '/')
+        for skip_path in skip_paths:
+            if normalized.endswith(skip_path):
+                return True
+        return False
     
     for root, dirs, files in os.walk(directory):
         # Skip excluded directories
         dirs[:] = [d for d in dirs if not d.startswith('.') and d not in skip_dirs and not d.endswith('.egg-info')]
         for file in files:
-            if file.endswith('.py') and file not in skip_files:
-                py_files.append(os.path.join(root, file))
+            if file.endswith('.py'):
+                filepath = os.path.join(root, file)
+                if not should_skip(filepath):
+                    py_files.append(filepath)
     return py_files
 
 
@@ -218,28 +263,75 @@ def clean_build_artifacts(base_dir):
 
 
 def verify_compilation(base_dir):
-    """Verify all .py files (except __init__.py) have been removed"""
+    """Verify all .py files (except allowed ones) have been removed"""
     skip_dirs = {'venv', 'env', '.venv', '.env', 'node_modules', '.git'}
+    
+    # Files allowed by FILENAME (system files)
+    # NOTE: config.py and protocol.py removed - they contain logic and should be compiled
+    allowed_filenames = {
+        '__init__.py', '__main__.py', 'db_models.py', 'version.py',
+    }
+    
+    # Files allowed by FULL PATH (CLI entry points)
+    allowed_paths = {
+        'usf_bios/cli/main.py',
+        'usf_bios/cli/sft.py',
+        'usf_bios/cli/pt.py',
+        'usf_bios/cli/infer.py',
+        'usf_bios/cli/deploy.py',
+        'usf_bios/cli/eval.py',
+        'usf_bios/cli/export.py',
+        'usf_bios/cli/rlhf.py',
+        'usf_bios/cli/rollout.py',
+        'usf_bios/cli/sample.py',
+        'usf_bios/cli/app.py',
+        'usf_bios/cli/web_ui.py',
+        'usf_bios/cli/train_ui.py',
+        'usf_bios/cli/merge_lora.py',
+        'usf_bios/cli/_megatron/main.py',
+        'usf_bios/cli/_megatron/sft.py',
+        'usf_bios/cli/_megatron/pt.py',
+        'usf_bios/cli/_megatron/rlhf.py',
+        'usf_bios/cli/_megatron/export.py',
+    }
+    
+    def is_allowed(filepath):
+        """Check if file is allowed to remain as .py"""
+        filename = os.path.basename(filepath)
+        if filename in allowed_filenames:
+            return True
+        normalized = filepath.replace(os.sep, '/')
+        for allowed_path in allowed_paths:
+            if normalized.endswith(allowed_path):
+                return True
+        return False
+    
     remaining_py = []
+    expected_py = []
     so_count = 0
     
     for root, dirs, files in os.walk(base_dir):
         dirs[:] = [d for d in dirs if d not in skip_dirs]
         for file in files:
-            if file.endswith('.py') and file != '__init__.py':
-                remaining_py.append(os.path.join(root, file))
+            filepath = os.path.join(root, file)
+            if file.endswith('.py'):
+                if is_allowed(filepath):
+                    expected_py.append(filepath)
+                else:
+                    remaining_py.append(filepath)
             elif file.endswith('.so'):
                 so_count += 1
     
     print(f"\n  Compiled .so files: {so_count}")
+    print(f"  Expected .py files (kept intentionally): {len(expected_py)}")
     
     if remaining_py:
-        print(f"  WARNING: {len(remaining_py)} .py files still exist:")
+        print(f"  WARNING: {len(remaining_py)} unexpected .py files still exist:")
         for f in remaining_py[:5]:
             print(f"    - {f}")
         return False
     else:
-        print("  All source files successfully removed")
+        print("  All source files successfully compiled or intentionally kept")
         return True
 
 

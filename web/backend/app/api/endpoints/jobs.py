@@ -596,6 +596,233 @@ async def restart_job(job_id: str, delete_data: bool = True):
     }
 
 
+@router.get("/{job_id}/metrics")
+async def get_job_metrics(job_id: str, limit: int = Query(500, ge=1, le=2000), db: Session = Depends(get_db)):
+    """Get training metrics for a job (for graphs).
+    
+    Returns ONLY relevant metrics for the training type:
+    - SFT/Pre-training: loss, learning_rate, grad_norm, eval_loss
+    - RLHF/PPO: reward, kl_divergence, policy_loss, value_loss, entropy
+    - DPO: chosen_rewards, rejected_rewards, reward_margin
+    - GRPO: reward, kl_penalty, policy_gradient_loss
+    
+    Metrics are stored per job_id - no mixing between different trainings.
+    """
+    try:
+        service = JobService(db)
+        metrics = service.get_job_metrics(job_id, limit=limit)
+        
+        # Get job info to determine training type
+        job = await job_manager.get_job(job_id)
+        train_type = job.config.train_type.value if job and job.config else "sft"
+        
+        # Define which metrics are relevant for each training type
+        METRIC_CONFIG = {
+            "sft": {
+                "display_name": "Supervised Fine-Tuning",
+                "primary_metrics": ["loss", "learning_rate", "grad_norm"],
+                "eval_metrics": ["eval_loss", "eval_accuracy"],
+                "show_reward": False,
+                "show_dpo": False,
+            },
+            "full": {
+                "display_name": "Full Fine-Tuning",
+                "primary_metrics": ["loss", "learning_rate", "grad_norm"],
+                "eval_metrics": ["eval_loss", "eval_accuracy"],
+                "show_reward": False,
+                "show_dpo": False,
+            },
+            "lora": {
+                "display_name": "LoRA Fine-Tuning",
+                "primary_metrics": ["loss", "learning_rate", "grad_norm"],
+                "eval_metrics": ["eval_loss", "eval_accuracy"],
+                "show_reward": False,
+                "show_dpo": False,
+            },
+            "pretrain": {
+                "display_name": "Pre-Training",
+                "primary_metrics": ["loss", "learning_rate", "grad_norm"],
+                "eval_metrics": ["eval_loss", "eval_perplexity"],
+                "show_reward": False,
+                "show_dpo": False,
+            },
+            "rlhf": {
+                "display_name": "RLHF",
+                "primary_metrics": ["reward", "kl_divergence", "policy_loss", "value_loss"],
+                "eval_metrics": ["entropy"],
+                "show_reward": True,
+                "show_dpo": False,
+            },
+            "ppo": {
+                "display_name": "PPO",
+                "primary_metrics": ["reward", "policy_loss", "value_loss", "entropy"],
+                "eval_metrics": ["kl_divergence"],
+                "show_reward": True,
+                "show_dpo": False,
+            },
+            "dpo": {
+                "display_name": "DPO",
+                "primary_metrics": ["loss", "chosen_rewards", "rejected_rewards", "reward_margin"],
+                "eval_metrics": ["eval_loss"],
+                "show_reward": False,
+                "show_dpo": True,
+            },
+            "grpo": {
+                "display_name": "GRPO",
+                "primary_metrics": ["reward", "loss", "kl_divergence"],
+                "eval_metrics": ["policy_loss"],
+                "show_reward": True,
+                "show_dpo": False,
+            },
+        }
+        
+        config = METRIC_CONFIG.get(train_type, METRIC_CONFIG["sft"])
+        
+        # Build metrics response with ONLY relevant fields for this training type
+        formatted_metrics = []
+        for m in metrics:
+            metric_data = {
+                "step": m.step,
+                "epoch": m.epoch,
+                "timestamp": m.timestamp.isoformat() if m.timestamp else None,
+            }
+            
+            # Common metrics (always included if present)
+            if m.loss is not None:
+                metric_data["loss"] = m.loss
+            if m.learning_rate is not None:
+                metric_data["learning_rate"] = m.learning_rate
+            if m.grad_norm is not None:
+                metric_data["grad_norm"] = m.grad_norm
+            if m.eval_loss is not None:
+                metric_data["eval_loss"] = m.eval_loss
+            
+            # RLHF/PPO metrics (only if relevant)
+            if config["show_reward"]:
+                if m.reward is not None:
+                    metric_data["reward"] = m.reward
+                if m.kl_divergence is not None:
+                    metric_data["kl_divergence"] = m.kl_divergence
+                if m.policy_loss is not None:
+                    metric_data["policy_loss"] = m.policy_loss
+                if m.value_loss is not None:
+                    metric_data["value_loss"] = m.value_loss
+                if m.entropy is not None:
+                    metric_data["entropy"] = m.entropy
+            
+            # DPO metrics (only if relevant)
+            if config["show_dpo"]:
+                if m.chosen_rewards is not None:
+                    metric_data["chosen_rewards"] = m.chosen_rewards
+                if m.rejected_rewards is not None:
+                    metric_data["rejected_rewards"] = m.rejected_rewards
+                if m.reward_margin is not None:
+                    metric_data["reward_margin"] = m.reward_margin
+            
+            # Extra metrics (always included if present)
+            if m.extra_metrics:
+                metric_data["extra_metrics"] = m.extra_metrics
+            
+            # System metrics (always included)
+            if m.gpu_memory_mb is not None:
+                metric_data["gpu_memory_mb"] = m.gpu_memory_mb
+            if m.gpu_utilization_pct is not None:
+                metric_data["gpu_utilization_pct"] = m.gpu_utilization_pct
+            if m.throughput_samples_sec is not None:
+                metric_data["throughput_samples_sec"] = m.throughput_samples_sec
+            
+            formatted_metrics.append(metric_data)
+        
+        return {
+            "job_id": job_id,
+            "train_type": train_type,
+            "train_type_display": config["display_name"],
+            "primary_metrics": config["primary_metrics"],
+            "eval_metrics": config["eval_metrics"],
+            "count": len(formatted_metrics),
+            "metrics": formatted_metrics
+        }
+    except Exception as e:
+        return {
+            "job_id": job_id,
+            "count": 0,
+            "metrics": [],
+            "error": str(e)
+        }
+
+
+@router.get("/{job_id}/tensorboard")
+async def get_tensorboard_data(job_id: str):
+    """Get TensorBoard data for a job.
+    
+    Reads TensorBoard event files from the job's output directory
+    and returns all available metrics for graphs.
+    """
+    import os
+    from pathlib import Path
+    from ...core.capabilities import get_system_settings
+    
+    try:
+        output_dir = get_system_settings().OUTPUT_DIR / job_id
+        
+        # Find TensorBoard event files
+        tb_files = []
+        if output_dir.exists():
+            for root, dirs, files in os.walk(str(output_dir)):
+                for f in files:
+                    if f.startswith('events.out.tfevents.'):
+                        tb_files.append(os.path.join(root, f))
+        
+        if not tb_files:
+            return {
+                "job_id": job_id,
+                "has_tensorboard": False,
+                "metrics": {},
+                "message": "No TensorBoard data found"
+            }
+        
+        # Read TensorBoard data
+        try:
+            from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+            
+            all_metrics = {}
+            for tb_file in tb_files:
+                ea = EventAccumulator(tb_file)
+                ea.Reload()
+                tags = ea.Tags().get('scalars', [])
+                
+                for tag in tags:
+                    values = ea.Scalars(tag)
+                    if tag not in all_metrics:
+                        all_metrics[tag] = []
+                    for v in values:
+                        all_metrics[tag].append({
+                            "step": v.step,
+                            "value": v.value,
+                            "wall_time": v.wall_time
+                        })
+            
+            return {
+                "job_id": job_id,
+                "has_tensorboard": True,
+                "available_metrics": list(all_metrics.keys()),
+                "metrics": all_metrics
+            }
+        except ImportError:
+            return {
+                "job_id": job_id,
+                "has_tensorboard": False,
+                "error": "TensorBoard not installed"
+            }
+            
+    except Exception as e:
+        return {
+            "job_id": job_id,
+            "has_tensorboard": False,
+            "error": str(e)
+        }
+
+
 @router.websocket("/ws/{job_id}")
 async def websocket_endpoint(websocket: WebSocket, job_id: str):
     """WebSocket endpoint for real-time job updates"""
