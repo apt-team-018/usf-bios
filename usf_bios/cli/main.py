@@ -103,14 +103,31 @@ def cli_main(route_mapping: Optional[Dict[str, str]] = None, is_megatron: bool =
     _compat_web_ui(argv)
     method_name = argv[0].replace('_', '-')
     argv = argv[1:]
-    file_path = importlib.util.find_spec(route_mapping[method_name]).origin
+    
+    module_name = route_mapping[method_name]
+    spec = importlib.util.find_spec(module_name)
+    file_path = spec.origin
+    
+    # Check if the module is compiled (.so/.pyd) - must use -m to run compiled modules
+    is_compiled = file_path and (file_path.endswith('.so') or file_path.endswith('.pyd'))
+    
     torchrun_args = get_torchrun_args()
     prepare_config_args(argv)
     python_cmd = sys.executable
-    if torchrun_args is None or (not is_megatron and method_name not in {'pt', 'sft', 'rlhf', 'infer'}):
-        args = [python_cmd, file_path, *argv]
+    
+    if is_compiled:
+        # For compiled modules, use python -m module_name approach
+        if torchrun_args is None or (not is_megatron and method_name not in {'pt', 'sft', 'rlhf', 'infer'}):
+            args = [python_cmd, '-m', module_name, *argv]
+        else:
+            args = [python_cmd, '-m', 'torch.distributed.run', *torchrun_args, '-m', module_name, *argv]
     else:
-        args = [python_cmd, '-m', 'torch.distributed.run', *torchrun_args, file_path, *argv]
+        # For source files, can run directly
+        if torchrun_args is None or (not is_megatron and method_name not in {'pt', 'sft', 'rlhf', 'infer'}):
+            args = [python_cmd, file_path, *argv]
+        else:
+            args = [python_cmd, '-m', 'torch.distributed.run', *torchrun_args, file_path, *argv]
+    
     print(f"[USF BIOS] Running: `{' '.join(args)}`", flush=True)
     result = subprocess.run(args)
     if result.returncode != 0:
