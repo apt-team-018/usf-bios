@@ -232,6 +232,5 @@ models/
 !web/backend/app/models/
 
 # Security keys - NEVER commit private keys
-keys/*_private.pem
 tools/decrypt_logs.py
 tools/generate_keys.py
