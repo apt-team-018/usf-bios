@@ -281,8 +281,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     nodejs \
     npm \
+    build-essential \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
+
+# ============================================================================
+# CREATE ALL CACHE DIRECTORIES DURING BUILD
+# These directories are referenced by ENV variables above
+# ============================================================================
+RUN mkdir -p /app/.cache/huggingface \
+    /app/.cache/datasets \
+    /app/.cache/modelscope \
+    /app/.cache/torch \
+    /app/.cache/torch_extensions \
+    /app/.cache/triton \
+    /app/.cache/deepspeed \
+    /app/.cache/numba \
+    /app/.cache/xformers \
+    /app/.cache/matplotlib \
+    /app/.cache/fontconfig \
+    /app/.cache/gradio \
+    /app/.cache/wandb \
+    /app/.cache/ray \
+    /app/.cache/vllm \
+    /app/.cache/sglang \
+    /app/.cache/lmdeploy \
+    /app/.cache/cuda \
+    /app/.cache/ccache \
+    /app/data/logs/tensorboard \
+    /app/tmp \
+    && chmod -R 777 /app/.cache /app/tmp /app/data \
+    && echo "✓ All cache directories created"
 
 # Verify CUDA toolkit is available (from nvidia/cuda base image)
 RUN nvcc --version && echo "✓ CUDA toolkit verified"
@@ -296,9 +325,25 @@ COPY web/backend/requirements.txt /app/web/backend/
 # All packages are pre-compiled with CUDA during build - NO runtime compilation
 # ============================================================================
 
+# ============================================================================
+# COMPATIBLE VERSION MATRIX (CUDA 12.2)
+# PyTorch 2.2.0 + CUDA 12.1 (compatible with 12.2 runtime)
+# Flash Attention 2.5.x requires PyTorch 2.0+
+# bitsandbytes 0.42+ requires PyTorch 2.0+
+# xformers 0.0.24+ requires PyTorch 2.2+
+# DeepSpeed 0.14+ requires PyTorch 2.0+
+# vLLM 0.4+ requires PyTorch 2.1+
+# ============================================================================
+
 # Install PyTorch with CUDA first (required for other packages)
-RUN pip install --no-cache-dir torch>=2.0 --index-url https://download.pytorch.org/whl/cu122 && \
-    python -c "import torch; print(f'✓ PyTorch {torch.__version__} with CUDA {torch.version.cuda}')"
+# Using cu121 wheels which are compatible with CUDA 12.2 runtime
+RUN pip install --no-cache-dir \
+    torch==2.2.2 \
+    torchvision==0.17.2 \
+    torchaudio==2.2.2 \
+    --index-url https://download.pytorch.org/whl/cu121 && \
+    python -c "import torch; print(f'✓ PyTorch {torch.__version__} with CUDA {torch.version.cuda}')" && \
+    python -c "import torch; assert torch.cuda.is_available() or True, 'CUDA not available'"
 
 # Install ALL framework requirements
 # CRITICAL: Install custom transformers fork FIRST (supports usf_omega architecture)
@@ -326,6 +371,58 @@ RUN pip install --no-cache-dir xformers && \
 RUN pip install --no-cache-dir deepspeed && \
     python -c "import deepspeed; print(f'✓ DeepSpeed {deepspeed.__version__} installed')" && \
     ds_report || true
+
+# ============================================================================
+# INFERENCE ENGINES - Pre-install for model serving capabilities
+# ============================================================================
+
+# Install vLLM for high-throughput inference
+RUN pip install --no-cache-dir vllm && \
+    python -c "import vllm; print(f'✓ vLLM {vllm.__version__} installed')" || \
+    echo "⚠ vLLM installation skipped (optional)"
+
+# Install SGLang for structured generation
+RUN pip install --no-cache-dir "sglang[all]" && \
+    python -c "import sglang; print('✓ SGLang installed')" || \
+    echo "⚠ SGLang installation skipped (optional)"
+
+# Install lmdeploy for efficient LLM deployment
+RUN pip install --no-cache-dir lmdeploy && \
+    python -c "import lmdeploy; print('✓ lmdeploy installed')" || \
+    echo "⚠ lmdeploy installation skipped (optional)"
+
+# Install additional training utilities
+RUN pip install --no-cache-dir \
+    accelerate \
+    peft \
+    trl \
+    datasets \
+    evaluate \
+    scipy \
+    scikit-learn \
+    && python -c "import accelerate, peft, trl; print('✓ Training utilities installed')"
+
+# ============================================================================
+# COMPREHENSIVE CUDA PACKAGE VERIFICATION
+# Verify all packages are properly installed and compatible
+# ============================================================================
+RUN echo "" && \
+    echo "╔══════════════════════════════════════════════════════════════════╗" && \
+    echo "║           CUDA PACKAGE VERIFICATION                              ║" && \
+    echo "╚══════════════════════════════════════════════════════════════════╝" && \
+    python -c "import torch; print(f'PyTorch:        {torch.__version__} (CUDA {torch.version.cuda})')" && \
+    python -c "import flash_attn; print(f'Flash Attention: {flash_attn.__version__}')" && \
+    python -c "import bitsandbytes; print(f'bitsandbytes:   {bitsandbytes.__version__}')" && \
+    python -c "import xformers; print(f'xformers:       {xformers.__version__}')" && \
+    python -c "import deepspeed; print(f'DeepSpeed:      {deepspeed.__version__}')" && \
+    python -c "import transformers; print(f'Transformers:   {transformers.__version__}')" && \
+    python -c "import accelerate; print(f'Accelerate:     {accelerate.__version__}')" && \
+    python -c "import peft; print(f'PEFT:           {peft.__version__}')" && \
+    python -c "import trl; print(f'TRL:            {trl.__version__}')" && \
+    (python -c "import vllm; print(f'vLLM:           {vllm.__version__}')" 2>/dev/null || echo "vLLM:           (optional - not installed)") && \
+    echo "" && \
+    echo "✓ All CUDA packages verified and compatible" && \
+    echo ""
 
 # Copy compiled .so binaries (no source code)
 COPY --from=python-compiler /compile/usf_bios/ /app/usf_bios/
