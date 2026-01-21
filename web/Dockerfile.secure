@@ -156,7 +156,7 @@ ENV TRITON_HOME=/app/.cache/triton
 ENV DEEPSPEED_CACHE_DIR=/app/.cache/deepspeed
 
 # bitsandbytes (quantization: QLoRA, 4-bit, 8-bit)
-ENV BNB_CUDA_VERSION=118
+# Do NOT set BNB_CUDA_VERSION - let bitsandbytes auto-detect from PyTorch
 ENV BITSANDBYTES_NOWELCOME=1
 
 # Numba (JIT compilation for data processing)
