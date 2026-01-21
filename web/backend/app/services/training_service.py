@@ -402,22 +402,33 @@ class TrainingService:
                 
                 # ============================================================
                 # ENCRYPTED LOG: Full output (only US Inc can read)
+                # Contains ALL details including file paths, library names, etc.
                 # ============================================================
                 encrypted_log_service.encrypt_and_format(line_str, job_id)
                 
                 # ============================================================
-                # TERMINAL LOG: Write raw output to terminal log file
-                # This ensures logs persist even after page refresh/backend restart
+                # SANITIZE OUTPUT FOR USER: Hide internal details
+                # - File paths (/app/..., /usr/...)
+                # - Library names (transformers, torch, huggingface, etc.)
+                # - Code references (line numbers, function names)
+                # User gets clear, understandable messages
                 # ============================================================
-                sanitized_log_service.create_terminal_log(job_id, line_str, "OUTPUT")
+                sanitized_line = sanitized_log_service.sanitize_for_display(line_str)
                 
-                # ============================================================
-                # SHOW ALL OUTPUT IN TERMINAL (for debugging training issues)
-                # This helps users see what's happening, especially errors
-                # ============================================================
-                # Always add raw output to job logs and send to websocket
-                await job_manager.add_log(job_id, line_str)
-                await ws_manager.send_log(job_id, line_str)
+                # Only log if there's something to show (sanitize_for_display returns None for filtered messages)
+                if sanitized_line:
+                    # ============================================================
+                    # TERMINAL LOG: Write sanitized output to terminal log file
+                    # This ensures logs persist even after page refresh/backend restart
+                    # ============================================================
+                    sanitized_log_service.create_terminal_log(job_id, sanitized_line, "OUTPUT")
+                    
+                    # ============================================================
+                    # WEBSOCKET & IN-MEMORY: Send SANITIZED output only
+                    # User sees clean, understandable logs without internal details
+                    # ============================================================
+                    await job_manager.add_log(job_id, sanitized_line)
+                    await ws_manager.send_log(job_id, sanitized_line)
                 
                 # Parse metrics from output
                 metrics = self._parse_log_line(line_str, job_id)

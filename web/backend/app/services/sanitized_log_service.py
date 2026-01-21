@@ -256,6 +256,39 @@ class SanitizedLogService:
         
         return sanitized
     
+    def sanitize_for_display(self, message: str) -> str:
+        """Sanitize a log message for user display.
+        
+        This method:
+        1. Keeps useful training info (loss, step, epoch, progress bars)
+        2. Hides internal details (file paths, library names, code references)
+        3. Converts errors to user-friendly messages
+        
+        Returns the sanitized message suitable for terminal display.
+        """
+        if not message:
+            return message
+        
+        # Check if this is an error/traceback - convert to user-friendly message
+        for pattern, info in SAFE_ERROR_PATTERNS.items():
+            if re.search(pattern, message, re.IGNORECASE):
+                return f"⚠ {info['user_message']}"
+        
+        # Check if message contains sensitive info that needs sanitization
+        if self._contains_sensitive_info(message):
+            # For traceback lines, just skip them entirely
+            if 'Traceback' in message or 'File "' in message or 'line ' in message:
+                return None  # Will be filtered out
+            
+            # For other sensitive messages, sanitize
+            sanitized = self._sanitize_message(message)
+            if sanitized and sanitized != 'An internal error occurred.':
+                return sanitized
+            return None  # Filter out completely redacted messages
+        
+        # Message is safe - return as-is
+        return message
+    
     def _extract_safe_parts(self, message: str) -> str:
         safe_parts = []
         
