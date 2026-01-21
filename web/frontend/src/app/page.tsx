@@ -137,6 +137,7 @@ export default function Home() {
   const [mainTab, setMainTab] = useState<MainTab>('train')
   const [currentStep, setCurrentStep] = useState(1)
   const [isTraining, setIsTraining] = useState(false)
+  const [isStartingTraining, setIsStartingTraining] = useState(false)
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null)
   const [trainingLogs, setTrainingLogs] = useState<string[]>([])
   
@@ -794,7 +795,14 @@ export default function Home() {
       return
     }
     
+    // Prevent double submission
+    if (isStartingTraining || isTraining) {
+      console.log('[START] Already starting or training, ignoring duplicate click')
+      return
+    }
+    
     try {
+      setIsStartingTraining(true)
       setTrainingLogs([])
       
       // Create job with combined dataset path and optional custom name
@@ -836,6 +844,8 @@ export default function Home() {
       setTrainingName('') // Clear the input after successful creation
     } catch (e) {
       alert(`Failed to start training: ${e}`)
+    } finally {
+      setIsStartingTraining(false)
     }
   }
 
@@ -1707,9 +1717,9 @@ export default function Home() {
                   )}
                   
                   <button onClick={startTraining}
-                    disabled={config.dataset_paths.length === 0 || systemStatus.status !== 'live'}
+                    disabled={config.dataset_paths.length === 0 || systemStatus.status !== 'live' || isStartingTraining}
                     className="w-full py-4 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-semibold text-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg">
-                    <Zap className="w-5 h-5" /> {systemStatus.status === 'live' ? 'Start Training' : 'System Not Ready'}
+                    <Zap className="w-5 h-5" /> {isStartingTraining ? 'Starting...' : (systemStatus.status === 'live' ? 'Start Training' : 'System Not Ready')}
                   </button>
                 </div>
               )}

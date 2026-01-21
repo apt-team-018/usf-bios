@@ -379,15 +379,32 @@ async def get_terminal_logs(job_id: str, lines: int = 100):
     which is useful when in-memory logs are lost (e.g., after page refresh).
     """
     from ..services.sanitized_log_service import sanitized_log_service
+    import os
     
     try:
+        log_path = sanitized_log_service.get_terminal_log_path(job_id)
+        file_exists = os.path.exists(log_path)
+        file_size = os.path.getsize(log_path) if file_exists else 0
+        
         logs = sanitized_log_service.get_terminal_logs(job_id, lines=lines)
+        
+        # Debug info for troubleshooting
+        print(f"[TERMINAL-LOGS] job_id={job_id}, path={log_path}, exists={file_exists}, size={file_size}, lines={len(logs)}")
+        
         return {
             "job_id": job_id,
             "logs": logs,
             "count": len(logs),
+            "debug": {
+                "path": log_path,
+                "exists": file_exists,
+                "size": file_size
+            }
         }
     except Exception as e:
+        import traceback
+        print(f"[TERMINAL-LOGS] ERROR for job_id={job_id}: {e}")
+        traceback.print_exc()
         return {
             "job_id": job_id,
             "logs": [],

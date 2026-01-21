@@ -201,6 +201,11 @@ ENV LMDEPLOY_CACHE_DIR=/app/.cache/lmdeploy
 ENV CUDA_CACHE_PATH=/app/.cache/cuda
 ENV CUDA_CACHE_MAXSIZE=1073741824
 
+# CUDA_HOME for DeepSpeed and other libraries that need to compile CUDA ops
+# Points to the CUDA toolkit installation in the container
+ENV CUDA_HOME=/usr/local/cuda
+ENV CUDA_ROOT=/usr/local/cuda
+
 # NCCL (distributed communication)
 ENV NCCL_DEBUG=WARN
 ENV NCCL_ASYNC_ERROR_HANDLING=1
