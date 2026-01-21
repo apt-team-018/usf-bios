@@ -373,6 +373,18 @@ RUN pip install --no-cache-dir deepspeed && \
     ds_report || true
 
 # ============================================================================
+# MEGATRON-LM - Pre-install to prevent runtime installation
+# The usf_bios/megatron/init.py would otherwise clone and pip install at runtime
+# ============================================================================
+RUN git clone --depth 1 --branch core_r0.15.0 https://github.com/NVIDIA/Megatron-LM.git /app/megatron-lm && \
+    pip install --no-cache-dir -e /app/megatron-lm && \
+    python -c "import megatron; print('✓ Megatron-LM installed')" || \
+    echo "⚠ Megatron-LM installation skipped (optional for non-megatron training)"
+
+# Set MEGATRON_LM_PATH so runtime code doesn't try to clone/install
+ENV MEGATRON_LM_PATH=/app/megatron-lm
+
+# ============================================================================
 # INFERENCE ENGINES - Pre-install for model serving capabilities
 # ============================================================================
 
@@ -445,6 +457,35 @@ RUN pip install --no-cache-dir \
     PyYAML \
     omegaconf \
     && python -c "print('✓ All remaining dependencies installed')"
+
+# ============================================================================
+# OPTIONAL PACKAGES - Pre-install to prevent runtime installation
+# These are checked via is_*_available() in the codebase
+# ============================================================================
+RUN pip install --no-cache-dir \
+    swanlab \
+    liger-kernel \
+    unsloth \
+    nltk \
+    jieba \
+    rouge \
+    openai \
+    modelscope \
+    oss2 \
+    cpm_kernels \
+    json_repair \
+    addict \
+    attrdict \
+    dacite \
+    binpacking \
+    zstandard \
+    transformers_stream_generator \
+    && python -c "print('✓ Optional packages installed')" || \
+    echo "⚠ Some optional packages may have failed (non-critical)"
+
+# Download NLTK data to prevent runtime downloads
+RUN python -c "import nltk; nltk.download('punkt'); nltk.download('averaged_perceptron_tagger')" || \
+    echo "⚠ NLTK data download skipped"
 
 # ============================================================================
 # COMPREHENSIVE CUDA PACKAGE VERIFICATION
