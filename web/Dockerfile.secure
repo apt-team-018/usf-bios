@@ -276,17 +276,31 @@ ENV DS_BUILD_RAGGED_DEVICE_OPS=0
 
 # Install ALL framework requirements (includes json_repair and other dependencies)
 # CRITICAL: Install custom transformers fork FIRST (supports usf_omega architecture)
-# NOTE: DeepSpeed env vars must be passed inline to ensure they are available during pip's subprocess
 RUN pip install --no-cache-dir git+https://github.com/apt-team-018/transformers.git && \
     pip install --no-cache-dir -r /app/requirements/framework.txt \
     && pip install --no-cache-dir torch>=2.0 nvidia-ml-py \
-    && DS_BUILD_OPS=0 DS_BUILD_AIO=0 DS_BUILD_SPARSE_ATTN=0 DS_BUILD_TRANSFORMER=0 \
-       DS_BUILD_TRANSFORMER_INFERENCE=0 DS_BUILD_STOCHASTIC_TRANSFORMER=0 DS_BUILD_UTILS=0 \
-       DS_BUILD_FUSED_ADAM=0 DS_BUILD_FUSED_LAMB=0 DS_BUILD_CPU_ADAM=0 DS_BUILD_CPU_LION=0 \
-       DS_BUILD_EVOFORMER_ATTN=0 DS_BUILD_INFERENCE_CORE_OPS=0 DS_BUILD_CUTLASS_OPS=0 \
-       DS_BUILD_RAGGED_DEVICE_OPS=0 \
-       pip install --no-cache-dir deepspeed \
     && pip install --no-cache-dir -r /app/web/backend/requirements.txt
+
+# Install DeepSpeed separately with proper environment variables
+# Using shell to ensure env vars are exported and visible to pip subprocess
+RUN /bin/bash -c '\
+    export DS_BUILD_OPS=0 && \
+    export DS_BUILD_AIO=0 && \
+    export DS_BUILD_SPARSE_ATTN=0 && \
+    export DS_BUILD_TRANSFORMER=0 && \
+    export DS_BUILD_TRANSFORMER_INFERENCE=0 && \
+    export DS_BUILD_STOCHASTIC_TRANSFORMER=0 && \
+    export DS_BUILD_UTILS=0 && \
+    export DS_BUILD_FUSED_ADAM=0 && \
+    export DS_BUILD_FUSED_LAMB=0 && \
+    export DS_BUILD_CPU_ADAM=0 && \
+    export DS_BUILD_CPU_LION=0 && \
+    export DS_BUILD_EVOFORMER_ATTN=0 && \
+    export DS_BUILD_INFERENCE_CORE_OPS=0 && \
+    export DS_BUILD_CUTLASS_OPS=0 && \
+    export DS_BUILD_RAGGED_DEVICE_OPS=0 && \
+    pip install --no-cache-dir deepspeed \
+    '
 
 # Copy compiled .so binaries (no source code)
 COPY --from=python-compiler /compile/usf_bios/ /app/usf_bios/
