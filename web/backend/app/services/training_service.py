@@ -48,6 +48,7 @@ class TrainingService:
             "--max_length", str(config.max_length),
             "--torch_dtype", config.torch_dtype,
             "--logging_steps", "1",
+            "--report_to", "tensorboard",  # Enable TensorBoard logging
         ]
         
         # Resume from checkpoint
@@ -365,6 +366,7 @@ class TrainingService:
             total_steps = 0
             current_step = 0
             current_loss = None
+            checkpoint_count = 0  # Track number of checkpoints saved
             
             # Stream output
             while True:
@@ -404,6 +406,15 @@ class TrainingService:
                     current_step = metrics["step"]
                 if "loss" in metrics:
                     current_loss = metrics["loss"]
+                
+                # ============================================================
+                # CHECKPOINT DETECTION: Detect when checkpoints are saved
+                # HuggingFace Trainer outputs: "Saving model checkpoint to ..."
+                # ============================================================
+                if "Saving model checkpoint" in line_str or "checkpoint-" in line_str.lower():
+                    checkpoint_count += 1
+                    sanitized_log_service.create_terminal_log(job_id, f"Checkpoint {checkpoint_count} saved", "INFO")
+                    _debug_log(job_id, f"Checkpoint {checkpoint_count} detected: {line_str}")
                 
                 # Update job state
                 update_fields = {}
