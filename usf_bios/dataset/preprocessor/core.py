@@ -279,9 +279,8 @@ class RowPreprocessor:
             dataset = dataset.select_columns(k_list)
         return dataset
 
-    @staticmethod
     @contextmanager
-    def _patch_arrow_writer():
+    def _patch_arrow_writer(self):
         # fix ms::usf-bios/ms_agent_for_agentfabric:all (legacy dataset)
         from datasets.arrow_writer import ArrowWriter
 
