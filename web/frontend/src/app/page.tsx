@@ -1312,9 +1312,9 @@ export default function Home() {
 
       <main className="max-w-6xl mx-auto px-4 py-6">
         
-        {/* ===================== TRAINING IN PROGRESS - LOCKED VIEW ===================== */}
-        {/* When training is active, ONLY show the training progress - no other content */}
-        {isTraining && jobStatus && (
+        {/* ===================== TRAINING VIEW - PROGRESS OR RESULT ===================== */}
+        {/* Show when training is active OR when we have a job result (completed/failed) */}
+        {(isTraining || (jobStatus && (jobStatus.status === 'completed' || jobStatus.status === 'failed' || jobStatus.status === 'stopped'))) && jobStatus && (
           <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-4 sm:p-6">
             <div className="space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
@@ -1329,9 +1329,13 @@ export default function Home() {
                 <div className={`px-3 py-1 rounded-full text-sm font-medium self-start ${
                   jobStatus.status === 'running' ? 'bg-blue-100 text-blue-700' :
                   jobStatus.status === 'completed' ? 'bg-green-100 text-green-700' :
-                  jobStatus.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600'
+                  jobStatus.status === 'failed' ? 'bg-red-100 text-red-700' : 
+                  jobStatus.status === 'stopped' ? 'bg-yellow-100 text-yellow-700' : 'bg-slate-100 text-slate-600'
                 }`}>
-                  <Loader2 className="w-4 h-4 inline mr-1 animate-spin" />
+                  {jobStatus.status === 'running' && <Loader2 className="w-4 h-4 inline mr-1 animate-spin" />}
+                  {jobStatus.status === 'completed' && <CheckCircle className="w-4 h-4 inline mr-1" />}
+                  {jobStatus.status === 'failed' && <XCircle className="w-4 h-4 inline mr-1" />}
+                  {jobStatus.status === 'stopped' && <StopCircle className="w-4 h-4 inline mr-1" />}
                   {jobStatus.status.toUpperCase()}
                 </div>
               </div>
@@ -1487,18 +1491,35 @@ export default function Home() {
                 <div ref={logsEndRef} />
               </div>
               
-              {/* Stop Training Button */}
-              <button onClick={stopTraining}
-                className="w-full py-3 bg-red-500 text-white rounded-lg font-medium hover:bg-red-600 flex items-center justify-center gap-2">
-                <StopCircle className="w-5 h-5" /> Stop Training
-              </button>
+              {/* Error message when failed */}
+              {jobStatus.status === 'failed' && jobStatus.error && (
+                <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+                  <strong>Error:</strong> {jobStatus.error}
+                </div>
+              )}
+              
+              {/* Stop Training Button - only show when running */}
+              {isTraining && (
+                <button onClick={stopTraining}
+                  className="w-full py-3 bg-red-500 text-white rounded-lg font-medium hover:bg-red-600 flex items-center justify-center gap-2">
+                  <StopCircle className="w-5 h-5" /> Stop Training
+                </button>
+              )}
+              
+              {/* Start New Training Button - show when completed/failed/stopped */}
+              {!isTraining && (jobStatus.status === 'completed' || jobStatus.status === 'failed' || jobStatus.status === 'stopped') && (
+                <button onClick={resetTrainingState}
+                  className="w-full py-3 bg-blue-500 text-white rounded-lg font-medium hover:bg-blue-600 flex items-center justify-center gap-2">
+                  <Play className="w-5 h-5" /> Start New Training
+                </button>
+              )}
             </div>
           </div>
         )}
 
         {/* ===================== TRAINING TAB ===================== */}
-        {/* Only show when NOT training */}
-        {mainTab === 'train' && !isTraining && (
+        {/* Only show when NOT training and no job result to display */}
+        {mainTab === 'train' && !isTraining && !jobStatus && (
           <>
             {currentStep <= 4 && (
               <div className="mb-6">
@@ -1764,236 +1785,6 @@ export default function Home() {
                     className="w-full py-4 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-semibold text-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg">
                     <Zap className="w-5 h-5" /> {isStartingTraining ? 'Starting...' : (systemStatus.status === 'live' ? 'Start Training' : 'System Not Ready')}
                   </button>
-                </div>
-              )}
-
-              {/* Step 5: Training Progress */}
-              {currentStep === 5 && jobStatus && (
-                <div className="space-y-4">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                    <div>
-                      <h2 className="text-xl font-bold text-slate-900">Training Progress</h2>
-                      <p className="text-slate-500 text-sm">
-                        <span className="font-medium text-slate-700">{jobStatus.job_name}</span>
-                        <span className="mx-2">•</span>
-                        <span className="font-mono text-xs">{jobStatus.job_id}</span>
-                      </p>
-                    </div>
-                    <div className={`px-3 py-1 rounded-full text-sm font-medium self-start ${
-                      jobStatus.status === 'running' ? 'bg-blue-100 text-blue-700' :
-                      jobStatus.status === 'completed' ? 'bg-green-100 text-green-700' :
-                      jobStatus.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600'
-                    }`}>
-                      {isTraining && <Loader2 className="w-4 h-4 inline mr-1 animate-spin" />}
-                      {jobStatus.status.toUpperCase()}
-                    </div>
-                  </div>
-                  
-                  {/* Progress bar */}
-                  {jobStatus.total_steps > 0 && (
-                    <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
-                      <div className="flex justify-between text-sm text-slate-600 mb-2">
-                        <span>Step {jobStatus.current_step} / {jobStatus.total_steps}</span>
-                        <span>{Math.round((jobStatus.current_step / jobStatus.total_steps) * 100)}%</span>
-                      </div>
-                      <div className="w-full h-3 bg-slate-200 rounded-full overflow-hidden">
-                        <div className="h-full bg-blue-500 transition-all"
-                          style={{ width: `${(jobStatus.current_step / jobStatus.total_steps) * 100}%` }} />
-                      </div>
-                      {jobStatus.eta_seconds && jobStatus.eta_seconds > 0 && (
-                        <p className="text-xs text-slate-500 mt-2 flex items-center gap-1">
-                          <Clock className="w-3 h-3" /> ETA: {formatTime(jobStatus.eta_seconds)}
-                        </p>
-                      )}
-                    </div>
-                  )}
-                  
-                  {/* Real-time Metrics - Prominent Display */}
-                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-                    {/* Loss - Most Important */}
-                    <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-lg p-3 text-center border border-blue-200">
-                      <BarChart3 className="w-5 h-5 mx-auto text-blue-600 mb-1" />
-                      <span className="text-[10px] text-blue-600 font-medium uppercase">Loss</span>
-                      <p className="text-xl font-bold text-blue-900">{jobStatus.current_loss !== null && jobStatus.current_loss !== undefined ? jobStatus.current_loss.toFixed(4) : '--'}</p>
-                    </div>
-                    {/* Epoch */}
-                    <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-lg p-3 text-center border border-purple-200">
-                      <Layers className="w-5 h-5 mx-auto text-purple-600 mb-1" />
-                      <span className="text-[10px] text-purple-600 font-medium uppercase">Epoch</span>
-                      <p className="text-xl font-bold text-purple-900">{jobStatus.epoch !== null && jobStatus.epoch !== undefined ? jobStatus.epoch : '--'}</p>
-                    </div>
-                    {/* Speed */}
-                    <div className="bg-gradient-to-br from-green-50 to-green-100 rounded-lg p-3 text-center border border-green-200">
-                      <Activity className="w-5 h-5 mx-auto text-green-600 mb-1" />
-                      <span className="text-[10px] text-green-600 font-medium uppercase">Speed</span>
-                      <p className="text-xl font-bold text-green-900">{jobStatus.samples_per_second ? `${jobStatus.samples_per_second.toFixed(1)}` : '--'}<span className="text-xs font-normal"> s/s</span></p>
-                    </div>
-                    {/* GPU Utilization */}
-                    <div className={`bg-gradient-to-br ${systemMetrics.available && systemMetrics.gpu_utilization !== null ? 'from-cyan-50 to-cyan-100 border-cyan-200' : 'from-slate-50 to-slate-100 border-slate-200'} rounded-lg p-3 text-center border`}>
-                      <Cpu className="w-5 h-5 mx-auto text-cyan-600 mb-1" />
-                      <span className="text-[10px] text-cyan-600 font-medium uppercase">GPU %</span>
-                      <p className={`text-xl font-bold ${systemMetrics.available && systemMetrics.gpu_utilization !== null ? 'text-cyan-900' : 'text-slate-400'}`}>
-                        {systemMetrics.available && systemMetrics.gpu_utilization !== null ? `${systemMetrics.gpu_utilization}%` : '--'}
-                      </p>
-                    </div>
-                    {/* GPU Memory */}
-                    <div className={`bg-gradient-to-br ${systemMetrics.available && systemMetrics.gpu_memory_used !== null ? 'from-amber-50 to-amber-100 border-amber-200' : 'from-slate-50 to-slate-100 border-slate-200'} rounded-lg p-3 text-center border`}>
-                      <HardDrive className="w-5 h-5 mx-auto text-amber-600 mb-1" />
-                      <span className="text-[10px] text-amber-600 font-medium uppercase">VRAM</span>
-                      <p className={`text-xl font-bold ${systemMetrics.available && systemMetrics.gpu_memory_used !== null ? 'text-amber-900' : 'text-slate-400'}`}>
-                        {systemMetrics.available && systemMetrics.gpu_memory_used !== null && systemMetrics.gpu_memory_total !== null 
-                          ? <>{systemMetrics.gpu_memory_used.toFixed(1)}<span className="text-xs font-normal">/{systemMetrics.gpu_memory_total.toFixed(0)}G</span></>
-                          : '--'}
-                      </p>
-                    </div>
-                    {/* GPU Temperature */}
-                    <div className={`bg-gradient-to-br ${systemMetrics.available && systemMetrics.gpu_temperature !== null ? 'from-orange-50 to-orange-100 border-orange-200' : 'from-slate-50 to-slate-100 border-slate-200'} rounded-lg p-3 text-center border`}>
-                      <Thermometer className="w-5 h-5 mx-auto text-orange-600 mb-1" />
-                      <span className="text-[10px] text-orange-600 font-medium uppercase">Temp</span>
-                      <p className={`text-xl font-bold ${systemMetrics.available && systemMetrics.gpu_temperature !== null ? 'text-orange-900' : 'text-slate-400'}`}>
-                        {systemMetrics.available && systemMetrics.gpu_temperature !== null ? `${systemMetrics.gpu_temperature}°` : '--'}
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Training Graphs - Loss and Learning Rate */}
-                  {trainingMetrics.length > 1 && (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      {/* Loss Graph */}
-                      <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
-                        <h4 className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
-                          <BarChart3 className="w-4 h-4 text-blue-500" /> Training Loss
-                        </h4>
-                        <div className="h-32 relative bg-white rounded p-2">
-                          <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
-                            {(() => {
-                              const data = trainingMetrics.filter(m => m.loss > 0)
-                              if (data.length < 2) return null
-                              const maxLoss = Math.max(...data.map(x => x.loss))
-                              const minLoss = Math.min(...data.map(x => x.loss))
-                              const range = maxLoss - minLoss || 1
-                              const points = data.map((m, i) => {
-                                const x = (i / (data.length - 1)) * 100
-                                const y = 100 - ((m.loss - minLoss) / range) * 90 - 5
-                                return `${x},${y}`
-                              }).join(' ')
-                              return <polyline fill="none" stroke="#3b82f6" strokeWidth="2" points={points} />
-                            })()}
-                          </svg>
-                          <div className="absolute bottom-1 left-2 text-[10px] text-slate-500">
-                            Min: {Math.min(...trainingMetrics.filter(m => m.loss > 0).map(x => x.loss)).toFixed(4)}
-                          </div>
-                          <div className="absolute top-1 right-2 text-[10px] text-slate-500">
-                            Max: {Math.max(...trainingMetrics.filter(m => m.loss > 0).map(x => x.loss)).toFixed(4)}
-                          </div>
-                        </div>
-                        <div className="flex justify-between text-xs text-slate-500 mt-1">
-                          <span>Step {trainingMetrics[0]?.step || 0}</span>
-                          <span>Current: {trainingMetrics[trainingMetrics.length - 1]?.loss?.toFixed(4) || '--'}</span>
-                          <span>Step {trainingMetrics[trainingMetrics.length - 1]?.step || 0}</span>
-                        </div>
-                      </div>
-
-                      {/* Learning Rate Graph */}
-                      <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
-                        <h4 className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
-                          <BarChart3 className="w-4 h-4 text-green-500" /> Learning Rate
-                        </h4>
-                        <div className="h-32 relative bg-white rounded p-2">
-                          <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
-                            {(() => {
-                              const data = trainingMetrics.filter(m => m.learning_rate > 0)
-                              if (data.length < 2) return null
-                              const maxLR = Math.max(...data.map(x => x.learning_rate))
-                              const minLR = Math.min(...data.map(x => x.learning_rate))
-                              const range = maxLR - minLR || 1
-                              const points = data.map((m, i) => {
-                                const x = (i / (data.length - 1)) * 100
-                                const y = 100 - ((m.learning_rate - minLR) / range) * 90 - 5
-                                return `${x},${y}`
-                              }).join(' ')
-                              return <polyline fill="none" stroke="#22c55e" strokeWidth="2" points={points} />
-                            })()}
-                          </svg>
-                          <div className="absolute bottom-1 left-2 text-[10px] text-slate-500">
-                            Min: {Math.min(...trainingMetrics.filter(m => m.learning_rate > 0).map(x => x.learning_rate)).toExponential(2)}
-                          </div>
-                          <div className="absolute top-1 right-2 text-[10px] text-slate-500">
-                            Max: {Math.max(...trainingMetrics.filter(m => m.learning_rate > 0).map(x => x.learning_rate)).toExponential(2)}
-                          </div>
-                        </div>
-                        <div className="flex justify-between text-xs text-slate-500 mt-1">
-                          <span>Step {trainingMetrics[0]?.step || 0}</span>
-                          <span>Current: {trainingMetrics[trainingMetrics.length - 1]?.learning_rate?.toExponential(2) || '--'}</span>
-                          <span>Step {trainingMetrics[trainingMetrics.length - 1]?.step || 0}</span>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  
-                  {/* Terminal Logs - Real-time output */}
-                  <div className="bg-slate-900 rounded-lg p-3 h-64 overflow-y-auto font-mono text-xs text-green-400 border border-slate-700">
-                    <div className="sticky top-0 bg-slate-900 pb-2 mb-2 border-b border-slate-700 text-slate-500 text-[10px]">
-                      TERMINAL OUTPUT ({trainingLogs.length} lines)
-                    </div>
-                    {trainingLogs.length === 0 ? (
-                      <div className="text-slate-500 text-center py-4">Waiting for training output...</div>
-                    ) : (
-                      trainingLogs.map((log, i) => (
-                        <div key={i} className="hover:bg-slate-800/50 py-0.5 whitespace-pre-wrap break-all">{log}</div>
-                      ))
-                    )}
-                    <div ref={logsEndRef} />
-                  </div>
-                  
-                  {isTraining && (
-                    <button onClick={stopTraining}
-                      className="w-full py-3 bg-red-500 text-white rounded-lg font-medium hover:bg-red-600 flex items-center justify-center gap-2">
-                      <StopCircle className="w-5 h-5" /> Stop Training
-                    </button>
-                  )}
-                  
-                  {jobStatus.status === 'completed' && (
-                    <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center">
-                      <CheckCircle className="w-8 h-8 mx-auto text-green-600 mb-2" />
-                      <h3 className="font-semibold text-green-800">Training Complete!</h3>
-                      <p className="text-green-600 text-sm">Output: {config.output_dir}</p>
-                      <div className="flex gap-2 justify-center mt-3">
-                        <button onClick={() => { setMainTab('inference'); setAdapterPath(config.output_dir); resetTrainingState(); }}
-                          className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700">
-                          Test Model in Inference
-                        </button>
-                        <button onClick={resetTrainingState}
-                          className="px-4 py-2 bg-blue-500 text-white rounded-lg text-sm font-medium hover:bg-blue-600">
-                          Start New Training
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  
-                  {jobStatus.status === 'failed' && (
-                    <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-center">
-                      <XCircle className="w-8 h-8 mx-auto text-red-600 mb-2" />
-                      <h3 className="font-semibold text-red-800">Training Failed</h3>
-                      <p className="text-red-600 text-sm">{jobStatus.error || 'Check terminal output for details'}</p>
-                      <button onClick={resetTrainingState}
-                        className="mt-3 px-4 py-2 bg-blue-500 text-white rounded-lg text-sm font-medium hover:bg-blue-600">
-                        Start New Training
-                      </button>
-                    </div>
-                  )}
-                  
-                  {jobStatus.status === 'stopped' && (
-                    <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 text-center">
-                      <StopCircle className="w-8 h-8 mx-auto text-slate-600 mb-2" />
-                      <h3 className="font-semibold text-slate-800">Training Stopped</h3>
-                      <p className="text-slate-600 text-sm">Training was stopped by user</p>
-                      <button onClick={resetTrainingState}
-                        className="mt-3 px-4 py-2 bg-blue-500 text-white rounded-lg text-sm font-medium hover:bg-blue-600">
-                        Start New Training
-                      </button>
-                    </div>
-                  )}
                 </div>
               )}
 
