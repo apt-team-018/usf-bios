@@ -600,6 +600,7 @@ export default function Home() {
 
   // Poll for terminal logs from file - SIMPLE AND ROBUST
   // Polls every second when there's an active job_id
+  // Also detects training completion/failure from log patterns as fallback
   useEffect(() => {
     const jobId = jobStatus?.job_id
     if (!jobId) return
@@ -612,6 +613,31 @@ export default function Home() {
         if (res.ok) {
           const data = await res.json()
           if (data.logs && Array.isArray(data.logs)) {
+            // Check for failure/completion patterns in logs (fallback detection)
+            const recentLogs = data.logs.slice(-20).join('\n')
+            
+            // Detect failure from log patterns
+            if (isTraining && (
+              recentLogs.includes('SESSION ENDED: FAILED') ||
+              recentLogs.includes('Training failed with exit code') ||
+              recentLogs.includes('[ERROR] Training failed') ||
+              recentLogs.includes('Training was interrupted or failed')
+            )) {
+              console.log('[LOG POLL] Detected training failure from logs')
+              setIsTraining(false)
+              setJobStatus(prev => prev ? { ...prev, status: 'failed' } : null)
+            }
+            
+            // Detect completion from log patterns
+            if (isTraining && (
+              recentLogs.includes('SESSION ENDED: COMPLETED') ||
+              recentLogs.includes('Training completed successfully')
+            )) {
+              console.log('[LOG POLL] Detected training completion from logs')
+              setIsTraining(false)
+              setJobStatus(prev => prev ? { ...prev, status: 'completed' } : null)
+            }
+            
             setTrainingLogs(prevLogs => {
               // Only update if logs changed
               if (data.logs.length !== prevLogs.length || 
@@ -637,7 +663,7 @@ export default function Home() {
       console.log('[LOG POLL] Stopping log polling for job:', jobId)
       clearInterval(interval)
     }
-  }, [jobStatus?.job_id])
+  }, [jobStatus?.job_id, isTraining])
 
   // State for training type and available metrics
   const [trainTypeInfo, setTrainTypeInfo] = useState<{
@@ -1527,18 +1553,20 @@ export default function Home() {
               )}
               
               {/* Terminal Logs */}
-              <div className="bg-slate-900 rounded-lg p-3 h-64 overflow-y-auto font-mono text-xs text-green-400 border border-slate-700">
-                <div className="sticky top-0 bg-slate-900 pb-2 mb-2 border-b border-slate-700 text-slate-500 text-[10px]">
+              <div className="bg-slate-900 rounded-lg border border-slate-700 flex flex-col h-64">
+                <div className="flex-shrink-0 px-3 py-2 border-b border-slate-700 text-slate-500 text-[10px] bg-slate-900 rounded-t-lg">
                   TERMINAL OUTPUT ({trainingLogs.length} lines)
                 </div>
-                {trainingLogs.length === 0 ? (
-                  <div className="text-slate-500 text-center py-4">Waiting for training output...</div>
-                ) : (
-                  trainingLogs.map((log, i) => (
-                    <div key={i} className="hover:bg-slate-800/50 py-0.5 whitespace-pre-wrap break-all">{log}</div>
-                  ))
-                )}
-                <div ref={logsEndRef} />
+                <div className="flex-1 overflow-y-auto p-3 font-mono text-xs text-green-400">
+                  {trainingLogs.length === 0 ? (
+                    <div className="text-slate-500 text-center py-4">Waiting for training output...</div>
+                  ) : (
+                    trainingLogs.map((log, i) => (
+                      <div key={i} className="hover:bg-slate-800/50 py-0.5 whitespace-pre-wrap break-all">{log}</div>
+                    ))
+                  )}
+                  <div ref={logsEndRef} />
+                </div>
               </div>
               
               {/* Error message when failed */}

@@ -221,9 +221,10 @@ ENV DS_BUILD_INFERENCE_CORE_OPS=0
 ENV DS_BUILD_CUTLASS_OPS=0
 ENV DS_BUILD_RAGGED_DEVICE_OPS=0
 
-# CUDA paths (for when running on GPU nodes with CUDA installed)
-ENV CUDA_HOME=/usr/local/cuda
-ENV CUDA_ROOT=/usr/local/cuda
+# CUDA paths - DO NOT hardcode, let runtime environment provide these
+# The GPU node (RunPod, etc.) will have CUDA installed and set these correctly
+# Hardcoding causes errors when nvcc isn't present at the expected path
+# ENV CUDA_HOME and CUDA_ROOT will be inherited from the runtime environment
 
 # NCCL (distributed communication)
 ENV NCCL_DEBUG=WARN
