@@ -202,6 +202,8 @@ interface TrainingConfig {
   deepspeed: string | null
   fsdp: string | null
   gradient_checkpointing: boolean
+  gpu_ids: number[] | null
+  num_gpus: number | null
 }
 
 // Optimization configuration
@@ -524,6 +526,47 @@ export default function TrainingSettingsStep({ config, setConfig }: Props) {
             </div>
           </label>
           <p className="text-xs text-slate-500 ml-8 mt-1">Saves ~30-50% GPU memory at ~20% speed cost. Recommended for most trainings.</p>
+        </div>
+
+        {/* GPU Selection */}
+        <div className="mt-4 pt-4 border-t border-emerald-200">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="font-medium text-sm text-slate-700">GPU Selection</span>
+            <Tooltip text="By default, all available GPUs are used. You can specify which GPUs to use or limit the number of GPUs." />
+          </div>
+          <div className="space-y-3">
+            <label className="flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all border-slate-200 hover:border-emerald-300 bg-white">
+              <input type="radio" name="gpu_mode" 
+                checked={config.gpu_ids === null && config.num_gpus === null}
+                onChange={() => setConfig(p => ({ ...p, gpu_ids: null, num_gpus: null }))}
+                className="mt-1 text-emerald-600 focus:ring-emerald-500" />
+              <div>
+                <span className="font-medium text-sm text-slate-900">Auto (Use All GPUs)</span>
+                <p className="text-xs text-slate-500">Automatically detect and use all available GPUs for maximum training speed.</p>
+              </div>
+            </label>
+            <label className="flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all border-slate-200 hover:border-emerald-300 bg-white">
+              <input type="radio" name="gpu_mode" 
+                checked={config.num_gpus !== null}
+                onChange={() => setConfig(p => ({ ...p, gpu_ids: null, num_gpus: 1 }))}
+                className="mt-1 text-emerald-600 focus:ring-emerald-500" />
+              <div className="flex-1">
+                <span className="font-medium text-sm text-slate-900">Specify Number of GPUs</span>
+                <p className="text-xs text-slate-500 mb-2">Use a specific number of GPUs (starting from GPU 0).</p>
+                {config.num_gpus !== null && (
+                  <select 
+                    value={config.num_gpus || 1}
+                    onChange={(e) => setConfig(p => ({ ...p, num_gpus: parseInt(e.target.value) }))}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:ring-2 focus:ring-emerald-500">
+                    {[1, 2, 4, 8, 16, 32, 64, 80].map(n => (
+                      <option key={n} value={n}>{n} GPU{n > 1 ? 's' : ''}</option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            </label>
+          </div>
+          <p className="text-xs text-slate-500 mt-2">💡 Multi-GPU training is enabled automatically when more than 1 GPU is used.</p>
         </div>
       </div>
     </div>

@@ -38,6 +38,8 @@ interface TrainingConfig {
   deepspeed: string | null
   fsdp: string | null
   gradient_checkpointing: boolean
+  gpu_ids: number[] | null
+  num_gpus: number | null
   early_stop_interval: number | null
 }
 
@@ -166,6 +168,8 @@ export default function Home() {
     deepspeed: null,
     fsdp: null,
     gradient_checkpointing: true,
+    gpu_ids: null,
+    num_gpus: null,
     early_stop_interval: null,
   })
 

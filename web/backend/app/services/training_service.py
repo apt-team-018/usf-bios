@@ -383,6 +383,54 @@ class TrainingService:
                 "DS_BUILD_CUTLASS_OPS": "0",
                 "DS_BUILD_RAGGED_DEVICE_OPS": "0",
             }
+            
+            # ============================================================
+            # GPU SELECTION: Configure which GPUs to use
+            # ============================================================
+            num_gpus_to_use = 1  # Default to 1 GPU
+            
+            # Get available GPU count from system
+            try:
+                import torch
+                available_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+            except:
+                available_gpus = 0
+            
+            if available_gpus > 0:
+                # Determine which GPUs to use
+                if hasattr(job.config, 'gpu_ids') and job.config.gpu_ids:
+                    # User specified specific GPUs
+                    gpu_ids = job.config.gpu_ids
+                    # Validate GPU IDs don't exceed available GPUs
+                    valid_gpu_ids = [g for g in gpu_ids if g < available_gpus]
+                    if len(valid_gpu_ids) != len(gpu_ids):
+                        sanitized_log_service.create_terminal_log(job_id, f"Warning: Some GPU IDs exceed available GPUs ({available_gpus}). Using valid GPUs only.", "WARN")
+                        await ws_manager.send_log(job_id, f"Warning: Some GPU IDs exceed available GPUs ({available_gpus}). Using valid GPUs only.")
+                    if valid_gpu_ids:
+                        training_env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in valid_gpu_ids)
+                        num_gpus_to_use = len(valid_gpu_ids)
+                        sanitized_log_service.create_terminal_log(job_id, f"Using specified GPUs: {valid_gpu_ids}", "INFO")
+                        await ws_manager.send_log(job_id, f"Using specified GPUs: {valid_gpu_ids}")
+                elif hasattr(job.config, 'num_gpus') and job.config.num_gpus:
+                    # User specified number of GPUs
+                    num_gpus_to_use = min(job.config.num_gpus, available_gpus)
+                    training_env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_gpus_to_use))
+                    sanitized_log_service.create_terminal_log(job_id, f"Using {num_gpus_to_use} GPUs (0-{num_gpus_to_use-1})", "INFO")
+                    await ws_manager.send_log(job_id, f"Using {num_gpus_to_use} GPUs (0-{num_gpus_to_use-1})")
+                else:
+                    # Auto: Use all available GPUs
+                    num_gpus_to_use = available_gpus
+                    sanitized_log_service.create_terminal_log(job_id, f"Auto-detected {available_gpus} GPU(s). Using all.", "INFO")
+                    await ws_manager.send_log(job_id, f"Auto-detected {available_gpus} GPU(s). Using all.")
+                
+                # Enable multi-GPU training with torchrun if more than 1 GPU
+                if num_gpus_to_use > 1:
+                    training_env["NPROC_PER_NODE"] = str(num_gpus_to_use)
+                    sanitized_log_service.create_terminal_log(job_id, f"Multi-GPU training enabled: NPROC_PER_NODE={num_gpus_to_use}", "INFO")
+                    await ws_manager.send_log(job_id, f"Multi-GPU training enabled: NPROC_PER_NODE={num_gpus_to_use}")
+            else:
+                sanitized_log_service.create_terminal_log(job_id, "No GPUs detected. Training will use CPU.", "WARN")
+                await ws_manager.send_log(job_id, "No GPUs detected. Training will use CPU.")
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,

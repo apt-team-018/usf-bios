@@ -101,7 +101,29 @@ class TrainingConfig(BaseModel):
     # Optimization - Gradient Checkpointing
     gradient_checkpointing: bool = Field(default=True, description="Enable gradient checkpointing to save memory")
     
+    # GPU Selection
+    # None or empty = use all available GPUs (auto-detect)
+    # List of GPU indices like [0, 1, 2] = use only specified GPUs
+    gpu_ids: Optional[List[int]] = Field(default=None, description="Specific GPU indices to use (None = all available)")
+    
+    # Number of GPUs to use (alternative to gpu_ids)
+    # None = auto (use all or specified by gpu_ids)
+    num_gpus: Optional[int] = Field(default=None, ge=1, description="Number of GPUs to use")
+    
     early_stop_interval: Optional[int] = Field(default=None, ge=1)
+    
+    @field_validator('gpu_ids')
+    @classmethod
+    def validate_gpu_ids(cls, v):
+        """Validate GPU IDs are non-negative and unique"""
+        if v is not None:
+            if len(v) == 0:
+                return None  # Empty list means use all GPUs
+            if any(gpu_id < 0 for gpu_id in v):
+                raise ValueError("GPU IDs must be non-negative integers")
+            if len(v) != len(set(v)):
+                raise ValueError("GPU IDs must be unique")
+        return v
     
     @model_validator(mode='after')
     def validate_optimization_combination(self):
