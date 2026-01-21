@@ -156,8 +156,11 @@ ENV TRITON_HOME=/app/.cache/triton
 ENV DEEPSPEED_CACHE_DIR=/app/.cache/deepspeed
 
 # bitsandbytes (quantization: QLoRA, 4-bit, 8-bit)
-# Do NOT set BNB_CUDA_VERSION - let bitsandbytes auto-detect from PyTorch
+# CRITICAL: Do NOT set BNB_CUDA_VERSION - let bitsandbytes auto-detect from PyTorch
+# Setting it manually causes version mismatch errors
 ENV BITSANDBYTES_NOWELCOME=1
+# Disable bitsandbytes CUDA compilation at import time
+ENV BNB_CUDA_COMPUTE_CAPABILITY=""
 
 # Numba (JIT compilation for data processing)
 ENV NUMBA_CACHE_DIR=/app/.cache/numba
@@ -184,8 +187,10 @@ ENV RAY_TMPDIR=/app/.cache/ray
 # TensorBoard
 ENV TENSORBOARD_LOGDIR=/app/data/logs/tensorboard
 
-# Flash Attention compilation
-ENV FLASH_ATTENTION_SKIP_CUDA_BUILD=FALSE
+# Flash Attention - skip CUDA build during import, will use pre-built wheels
+# Setting to TRUE prevents runtime compilation errors if nvcc is missing
+ENV FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE
+ENV FLASH_ATTENTION_FORCE_BUILD=0
 
 # vLLM (inference engine)
 ENV VLLM_CACHE_ROOT=/app/.cache/vllm
@@ -221,10 +226,23 @@ ENV DS_BUILD_INFERENCE_CORE_OPS=0
 ENV DS_BUILD_CUTLASS_OPS=0
 ENV DS_BUILD_RAGGED_DEVICE_OPS=0
 
-# CUDA paths - DO NOT hardcode, let runtime environment provide these
-# The GPU node (RunPod, etc.) will have CUDA installed and set these correctly
-# Hardcoding causes errors when nvcc isn't present at the expected path
-# ENV CUDA_HOME and CUDA_ROOT will be inherited from the runtime environment
+# ============================================================================
+# CUDA PATHS - CRITICAL: DO NOT HARDCODE
+# ============================================================================
+# Let the runtime GPU environment (RunPod, Lambda, etc.) provide these.
+# Hardcoding causes "nvcc not found" errors because the container doesn't
+# have CUDA toolkit installed - only the host GPU node does.
+# These will be inherited from the runtime environment:
+# - CUDA_HOME (e.g., /usr/local/cuda-12.1)
+# - CUDA_ROOT (same as CUDA_HOME)
+# - LD_LIBRARY_PATH (includes CUDA libs)
+# - PATH (includes nvcc)
+
+# Disable CUDA extension building at import time for libraries that try to JIT compile
+# This prevents "nvcc not found" errors when importing deepspeed, flash-attn, etc.
+ENV TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0"
+ENV FORCE_CUDA=0
+ENV MAX_JOBS=4
 
 # NCCL (distributed communication)
 ENV NCCL_DEBUG=WARN
