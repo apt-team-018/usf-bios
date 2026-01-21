@@ -373,16 +373,62 @@ RUN pip install --no-cache-dir deepspeed && \
     ds_report || true
 
 # ============================================================================
-# MEGATRON-LM - Pre-install to prevent runtime installation
-# The usf_bios/megatron/init.py would otherwise clone and pip install at runtime
+# PRE-CLONE ALL GITHUB REPOS - Prevent runtime git clone operations
+# These repos are used by various models via git_clone_github() in usf_bios
 # ============================================================================
-RUN git clone --depth 1 --branch core_r0.15.0 https://github.com/NVIDIA/Megatron-LM.git /app/megatron-lm && \
-    pip install --no-cache-dir -e /app/megatron-lm && \
-    python -c "import megatron; print('✓ Megatron-LM installed')" || \
-    echo "⚠ Megatron-LM installation skipped (optional for non-megatron training)"
 
-# Set MEGATRON_LM_PATH so runtime code doesn't try to clone/install
-ENV MEGATRON_LM_PATH=/app/megatron-lm
+# Create directory for all external repos
+RUN mkdir -p /app/external_repos
+
+# Megatron-LM (used by usf_bios/megatron/init.py)
+RUN git clone --depth 1 --branch core_r0.15.0 https://github.com/NVIDIA/Megatron-LM.git /app/external_repos/Megatron-LM && \
+    pip install --no-cache-dir -e /app/external_repos/Megatron-LM && \
+    python -c "import megatron; print('✓ Megatron-LM installed')" || true
+ENV MEGATRON_LM_PATH=/app/external_repos/Megatron-LM
+
+# LLaVA repos (used by model/models/llava.py)
+RUN git clone --depth 1 https://github.com/haotian-liu/LLaVA.git /app/external_repos/LLaVA || true
+RUN git clone --depth 1 https://github.com/LLaVA-VL/LLaVA-NeXT.git /app/external_repos/LLaVA-NeXT || true
+
+# DeepSeek repos (used by model/models/deepseek.py)
+RUN git clone --depth 1 https://github.com/deepseek-ai/DeepSeek-VL.git /app/external_repos/DeepSeek-VL || true
+RUN git clone --depth 1 https://github.com/deepseek-ai/DeepSeek-VL2.git /app/external_repos/DeepSeek-VL2 || true
+RUN git clone --depth 1 https://github.com/deepseek-ai/Janus.git /app/external_repos/Janus || true
+
+# Yi VL (used by model/models/yi.py)
+RUN git clone --depth 1 https://github.com/01-ai/Yi.git /app/external_repos/Yi || true
+
+# Valley (used by model/models/valley.py)
+RUN git clone --depth 1 https://github.com/bytedance/Valley.git /app/external_repos/Valley || true
+
+# mPLUG-Owl (used by model/models/mplug.py)
+RUN git clone --depth 1 https://github.com/X-PLUG/mPLUG-Owl.git /app/external_repos/mPLUG-Owl || true
+
+# Step-Audio (used by model/models/stepfun.py)
+RUN git clone --depth 1 https://github.com/stepfun-ai/Step-Audio.git /app/external_repos/Step-Audio || true
+
+# LLaMA-Omni (used by model/models/llama.py)
+RUN git clone --depth 1 https://github.com/ictnlp/LLaMA-Omni.git /app/external_repos/LLaMA-Omni || true
+
+# Emu3 (used by model/models/baai.py)
+RUN git clone --depth 1 https://github.com/baaivision/Emu3.git /app/external_repos/Emu3 || true
+
+# LoRA-GA (used by trainers/mixin.py)
+RUN pip install --no-cache-dir git+https://github.com/lxline/LoRA-GA.git || true
+
+# pyreft (used by tuners/reft.py)
+RUN pip install --no-cache-dir pyreft || true
+
+# q-galore (used by optimizers/galore/utils.py)
+RUN pip install --no-cache-dir q_galore_torch || true
+
+# evalscope (used by trainers/arguments.py)
+RUN pip install --no-cache-dir evalscope || true
+
+# Set environment variable with path to external repos
+ENV USF_EXTERNAL_REPOS_PATH=/app/external_repos
+
+RUN echo "✓ All external repos pre-cloned"
 
 # ============================================================================
 # INFERENCE ENGINES - Pre-install for model serving capabilities
