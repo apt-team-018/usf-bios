@@ -26,27 +26,51 @@ class ErrorSeverity(str, Enum):
 
 
 SENSITIVE_PATTERNS = [
+    # File paths and line numbers
     r'File\s+"[^"]*\.py[c]?"',
     r'line\s+\d+',
     r'in\s+\w+\s*\(',
+    r'/app/[^\s]+\.py[c]?',
+    r'/usr/[^\s]+\.py[c]?',
+    r'/home/[^\s]+',
+    r'/workspace/[^\s]+\.py[c]?',
+    r'/usr/local/lib/[^\s]+',
+    r'/site-packages/[^\s]+',
+    # Code patterns
     r'def\s+\w+',
     r'class\s+\w+',
     r'import\s+\w+',
     r'from\s+\w+\s+import',
-    r'/app/[^\s]+\.py[c]?',
-    r'/usr/[^\s]+\.py[c]?',
     r'Traceback\s+\(most recent call last\)',
     r'raise\s+\w+',
     r'assert\s+',
     r'\.forward\(',
     r'\.backward\(',
-    r'torch\.\w+\.\w+',
-    r'transformers\.\w+\.\w+',
-    r'app\.\w+\.\w+',
     r'self\.\w+',
     r'__\w+__',
     r'0x[0-9a-fA-F]+',
     r'at\s+0x[0-9a-fA-F]+',
+    # Library names to hide (don't expose what libraries we use)
+    r'transformers\.[\w\.]+',
+    r'torch\.[\w\.]+',
+    r'huggingface[\w\.]*',
+    r'peft\.[\w\.]+',
+    r'trl\.[\w\.]+',
+    r'deepspeed\.[\w\.]+',
+    r'accelerate\.[\w\.]+',
+    r'bitsandbytes\.[\w\.]+',
+    r'datasets\.[\w\.]+',
+    r'tokenizers\.[\w\.]+',
+    r'safetensors\.[\w\.]+',
+    r'usf_bios\.[\w\.]+',
+    r'app\.[\w\.]+',
+    # Internal module references
+    r'HuggingFace',
+    r'Hugging Face',
+    r'HfArgumentParser',
+    r'TrainingArguments',
+    r'Seq2SeqTrainer',
+    r'Trainer\.',
 ]
 
 SAFE_ERROR_PATTERNS = {
@@ -118,6 +142,31 @@ SAFE_ERROR_PATTERNS = {
     r'loss.*nan': {
         'reason': CrashReason.CONFIG_ERROR,
         'user_message': 'Training became unstable (NaN loss). Try lowering learning rate.',
+        'severity': ErrorSeverity.ERROR
+    },
+    r'CUDA_HOME does not exist': {
+        'reason': CrashReason.GPU_ERROR,
+        'user_message': 'GPU configuration error. CUDA toolkit not properly configured.',
+        'severity': ErrorSeverity.ERROR
+    },
+    r'unable to compile CUDA': {
+        'reason': CrashReason.GPU_ERROR,
+        'user_message': 'GPU compilation error. Please check GPU drivers.',
+        'severity': ErrorSeverity.ERROR
+    },
+    r'MissingCUDAException': {
+        'reason': CrashReason.GPU_ERROR,
+        'user_message': 'CUDA not available. Please verify GPU setup.',
+        'severity': ErrorSeverity.ERROR
+    },
+    r'libcudart.*not found': {
+        'reason': CrashReason.GPU_ERROR,
+        'user_message': 'CUDA runtime library not found. Check CUDA installation.',
+        'severity': ErrorSeverity.ERROR
+    },
+    r'No CUDA GPUs are available': {
+        'reason': CrashReason.GPU_ERROR,
+        'user_message': 'No GPU available. Please check GPU status.',
         'severity': ErrorSeverity.ERROR
     },
 }
