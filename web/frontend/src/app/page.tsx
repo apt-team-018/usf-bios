@@ -38,6 +38,12 @@ interface TrainingConfig {
   deepspeed: string | null
   fsdp: string | null
   gradient_checkpointing: boolean
+  use_liger_kernel: boolean
+  packing: boolean
+  sequence_parallel_size: number
+  lr_scheduler_type: string
+  weight_decay: number
+  adam_beta2: number
   gpu_ids: number[] | null
   num_gpus: number | null
   early_stop_interval: number | null
@@ -168,6 +174,12 @@ export default function Home() {
     deepspeed: null,
     fsdp: null,
     gradient_checkpointing: true,
+    use_liger_kernel: false,
+    packing: false,
+    sequence_parallel_size: 1,
+    lr_scheduler_type: 'cosine',
+    weight_decay: 0.1,
+    adam_beta2: 0.95,
     gpu_ids: null,
     num_gpus: null,
     early_stop_interval: null,

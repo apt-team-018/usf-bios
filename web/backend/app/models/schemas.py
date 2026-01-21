@@ -101,6 +101,24 @@ class TrainingConfig(BaseModel):
     # Optimization - Gradient Checkpointing
     gradient_checkpointing: bool = Field(default=True, description="Enable gradient checkpointing to save memory")
     
+    # Optimization - Liger Kernel (triton-based optimizations)
+    use_liger_kernel: bool = Field(default=False, description="Use Liger kernel for faster training")
+    
+    # Optimization - Packing (combine short sequences)
+    packing: bool = Field(default=False, description="Pack multiple sequences together to reduce padding waste")
+    
+    # Optimization - Sequence Parallelism
+    sequence_parallel_size: int = Field(default=1, ge=1, description="Sequence parallel size (1 = disabled)")
+    
+    # Learning Rate Scheduler
+    lr_scheduler_type: Literal["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup", "cosine_with_min_lr"] = Field(
+        default="cosine", description="Learning rate scheduler type"
+    )
+    
+    # Optimizer parameters
+    weight_decay: float = Field(default=0.1, ge=0, le=1, description="Weight decay for optimizer")
+    adam_beta2: float = Field(default=0.95, ge=0, le=1, description="Adam beta2 parameter")
+    
     # GPU Selection
     # None or empty = use all available GPUs (auto-detect)
     # List of GPU indices like [0, 1, 2] = use only specified GPUs

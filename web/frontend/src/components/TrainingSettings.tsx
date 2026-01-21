@@ -202,6 +202,12 @@ interface TrainingConfig {
   deepspeed: string | null
   fsdp: string | null
   gradient_checkpointing: boolean
+  use_liger_kernel: boolean
+  packing: boolean
+  sequence_parallel_size: number
+  lr_scheduler_type: string
+  weight_decay: number
+  adam_beta2: number
   gpu_ids: number[] | null
   num_gpus: number | null
 }
@@ -526,6 +532,56 @@ export default function TrainingSettingsStep({ config, setConfig }: Props) {
             </div>
           </label>
           <p className="text-xs text-slate-500 ml-8 mt-1">Saves ~30-50% GPU memory at ~20% speed cost. Recommended for most trainings.</p>
+        </div>
+
+        {/* Advanced Optimizations */}
+        <div className="mt-4 pt-4 border-t border-emerald-200">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="font-medium text-sm text-slate-700">Advanced Optimizations</span>
+            <Tooltip text="Additional optimizations for faster training and better memory efficiency." />
+          </div>
+          <div className="space-y-3">
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input type="checkbox" 
+                checked={config.use_liger_kernel}
+                onChange={(e) => setConfig(p => ({ ...p, use_liger_kernel: e.target.checked }))}
+                className="w-5 h-5 text-emerald-600 rounded focus:ring-emerald-500" />
+              <div>
+                <span className="font-medium text-sm text-slate-700">Liger Kernel</span>
+                <p className="text-xs text-slate-500">Triton-based optimizations for faster forward/backward pass (up to 20% speedup).</p>
+              </div>
+            </label>
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input type="checkbox" 
+                checked={config.packing}
+                onChange={(e) => setConfig(p => ({ ...p, packing: e.target.checked }))}
+                className="w-5 h-5 text-emerald-600 rounded focus:ring-emerald-500" />
+              <div>
+                <span className="font-medium text-sm text-slate-700">Sequence Packing</span>
+                <p className="text-xs text-slate-500">Combine multiple short sequences to reduce padding waste. Requires Flash Attention.</p>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        {/* Learning Rate Scheduler */}
+        <div className="mt-4 pt-4 border-t border-emerald-200">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="font-medium text-sm text-slate-700">Learning Rate Scheduler</span>
+            <Tooltip text="Controls how the learning rate changes during training." />
+          </div>
+          <select 
+            value={config.lr_scheduler_type}
+            onChange={(e) => setConfig(p => ({ ...p, lr_scheduler_type: e.target.value }))}
+            className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:ring-2 focus:ring-emerald-500">
+            <option value="cosine">Cosine (Recommended)</option>
+            <option value="linear">Linear</option>
+            <option value="constant">Constant</option>
+            <option value="constant_with_warmup">Constant with Warmup</option>
+            <option value="cosine_with_restarts">Cosine with Restarts</option>
+            <option value="polynomial">Polynomial</option>
+            <option value="cosine_with_min_lr">Cosine with Min LR</option>
+          </select>
         </div>
 
         {/* GPU Selection */}

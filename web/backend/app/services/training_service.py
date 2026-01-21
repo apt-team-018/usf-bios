@@ -80,6 +80,28 @@ class TrainingService:
         if hasattr(config, 'gradient_checkpointing') and config.gradient_checkpointing:
             cmd.extend(["--gradient_checkpointing", "true"])
         
+        # Liger Kernel (triton-based optimizations)
+        if hasattr(config, 'use_liger_kernel') and config.use_liger_kernel:
+            cmd.extend(["--use_liger_kernel", "true"])
+        
+        # Packing (combine short sequences)
+        if hasattr(config, 'packing') and config.packing:
+            cmd.extend(["--packing", "true"])
+        
+        # Sequence Parallelism
+        if hasattr(config, 'sequence_parallel_size') and config.sequence_parallel_size > 1:
+            cmd.extend(["--sequence_parallel_size", str(config.sequence_parallel_size)])
+        
+        # Learning Rate Scheduler
+        if hasattr(config, 'lr_scheduler_type') and config.lr_scheduler_type:
+            cmd.extend(["--lr_scheduler_type", config.lr_scheduler_type])
+        
+        # Optimizer parameters
+        if hasattr(config, 'weight_decay') and config.weight_decay is not None:
+            cmd.extend(["--weight_decay", str(config.weight_decay)])
+        if hasattr(config, 'adam_beta2') and config.adam_beta2 is not None:
+            cmd.extend(["--adam_beta2", str(config.adam_beta2)])
+        
         # DeepSpeed (cannot be used with FSDP)
         if config.deepspeed:
             cmd.extend(["--deepspeed", config.deepspeed])
