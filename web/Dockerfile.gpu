@@ -1,0 +1,226 @@
+# USF BIOS - GPU-Optimized Docker Build
+# Copyright (c) US Inc. All rights reserved.
+#
+# USE THIS DOCKERFILE ON GPU SERVERS (H200, H100, A100)
+# Build time: ~15-20 minutes on H200
+#
+# USAGE:
+#   ./scripts/build-docker-gpu.sh 2.0.0
+#
+# ============================================================================
+# Stage 1: Frontend Builder (same as regular build)
+# ============================================================================
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /build/frontend
+COPY web/frontend/package*.json ./
+RUN npm ci
+COPY web/frontend/ ./
+RUN npm run build
+
+# ============================================================================
+# Stage 2: Python Compiler - Compile to native .so files using Cython
+# ============================================================================
+FROM python:3.11-slim AS python-compiler
+
+WORKDIR /compile
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir cython setuptools
+
+COPY scripts/compile_to_so.py /compile/compile_to_so.py
+COPY usf_bios/ /compile/usf_bios/
+COPY web/backend/ /compile/web/backend/
+
+RUN python /compile/compile_to_so.py
+
+RUN find /compile -name "*.pyc" -delete && \
+    find /compile -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true && \
+    find /compile -name "build" -type d -exec rm -rf {} + 2>/dev/null || true && \
+    rm -f /compile/compile_to_so.py
+
+# ============================================================================
+# Stage 3: GPU Build - Full CUDA Compilation
+# ============================================================================
+FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
+
+LABEL maintainer="US Inc <support@us.inc>"
+LABEL description="USF BIOS - Enterprise AI Fine-tuning Platform (GPU Build)"
+
+# ============================================================================
+# DeepSpeed Build Args - ALL ENABLED for GPU compilation
+# ============================================================================
+ARG DS_BUILD_OPS=1
+ARG DS_BUILD_AIO=1
+ARG DS_BUILD_SPARSE_ATTN=1
+ARG DS_BUILD_TRANSFORMER=1
+ARG DS_BUILD_TRANSFORMER_INFERENCE=1
+ARG DS_BUILD_STOCHASTIC_TRANSFORMER=1
+ARG DS_BUILD_FUSED_ADAM=1
+ARG DS_BUILD_FUSED_LAMB=1
+ARG DS_BUILD_CPU_ADAM=1
+ARG DS_BUILD_CPU_LION=1
+ARG DS_BUILD_UTILS=1
+ARG DS_BUILD_EVOFORMER_ATTN=1
+ARG DS_BUILD_RANDOM_LTD=1
+ARG DS_BUILD_INFERENCE_CORE_OPS=1
+ARG DS_BUILD_CUTLASS_OPS=1
+ARG DS_BUILD_RAGGED_DEVICE_OPS=1
+
+# Convert ARGs to ENVs for pip install
+ENV DS_BUILD_OPS=${DS_BUILD_OPS}
+ENV DS_BUILD_AIO=${DS_BUILD_AIO}
+ENV DS_BUILD_SPARSE_ATTN=${DS_BUILD_SPARSE_ATTN}
+ENV DS_BUILD_TRANSFORMER=${DS_BUILD_TRANSFORMER}
+ENV DS_BUILD_TRANSFORMER_INFERENCE=${DS_BUILD_TRANSFORMER_INFERENCE}
+ENV DS_BUILD_STOCHASTIC_TRANSFORMER=${DS_BUILD_STOCHASTIC_TRANSFORMER}
+ENV DS_BUILD_FUSED_ADAM=${DS_BUILD_FUSED_ADAM}
+ENV DS_BUILD_FUSED_LAMB=${DS_BUILD_FUSED_LAMB}
+ENV DS_BUILD_CPU_ADAM=${DS_BUILD_CPU_ADAM}
+ENV DS_BUILD_CPU_LION=${DS_BUILD_CPU_LION}
+ENV DS_BUILD_UTILS=${DS_BUILD_UTILS}
+ENV DS_BUILD_EVOFORMER_ATTN=${DS_BUILD_EVOFORMER_ATTN}
+ENV DS_BUILD_RANDOM_LTD=${DS_BUILD_RANDOM_LTD}
+ENV DS_BUILD_INFERENCE_CORE_OPS=${DS_BUILD_INFERENCE_CORE_OPS}
+ENV DS_BUILD_CUTLASS_OPS=${DS_BUILD_CUTLASS_OPS}
+ENV DS_BUILD_RAGGED_DEVICE_OPS=${DS_BUILD_RAGGED_DEVICE_OPS}
+
+# Install Python 3.11
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3.11-venv \
+    python3-pip \
+    curl \
+    git \
+    wget \
+    build-essential \
+    ninja-build \
+    libaio-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.11 as default
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
+# Upgrade pip
+RUN python -m pip install --upgrade pip setuptools wheel
+
+# CUDA environment
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=/usr/local/cuda/bin:$PATH
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+ENV TORCH_CUDA_ARCH_LIST="8.0;8.9;9.0"
+ENV MAX_JOBS=8
+
+# Verify CUDA
+RUN nvcc --version
+
+WORKDIR /app
+
+# Create non-root user
+RUN groupadd -r usf && useradd -r -g usf -d /app -s /sbin/nologin usf
+
+# Copy requirements
+COPY requirements.txt /app/requirements.txt
+COPY requirements/ /app/requirements/
+COPY web/backend/requirements.txt /app/web/backend/requirements.txt
+
+# Install PyTorch with CUDA
+RUN pip install --no-cache-dir \
+    torch==2.2.2 \
+    torchvision==0.17.2 \
+    torchaudio==2.2.2 \
+    --index-url https://download.pytorch.org/whl/cu121 && \
+    python -c "import torch; print(f'PyTorch {torch.__version__} CUDA {torch.version.cuda}')"
+
+# Install custom transformers fork FIRST
+RUN pip install --no-cache-dir git+https://github.com/apt-team-018/transformers.git && \
+    python -c "import transformers; print(f'Transformers {transformers.__version__}')"
+
+# Copy source for usf_bios installation
+COPY setup.py setup.cfg MANIFEST.in README.md /app/
+COPY usf_bios/ /app/usf_bios/
+
+# Install usf_bios with all dependencies
+RUN cd /app && pip install --no-cache-dir -e ".[all]"
+
+# Reinstall custom transformers (may have been overwritten)
+RUN pip uninstall -y transformers && \
+    pip install --no-cache-dir git+https://github.com/apt-team-018/transformers.git
+
+# Install backend requirements
+RUN pip install --no-cache-dir nvidia-ml-py && \
+    pip install --no-cache-dir -r /app/web/backend/requirements.txt
+
+# ============================================================================
+# GPU-ACCELERATED CUDA COMPILATION
+# This is FAST on H200/H100 (~15-20 min total)
+# ============================================================================
+
+# Flash Attention 2 - compile with GPU
+RUN pip install --no-cache-dir ninja packaging && \
+    pip install --no-cache-dir flash-attn --no-build-isolation && \
+    python -c "import flash_attn; print(f'Flash Attention {flash_attn.__version__}')"
+
+# bitsandbytes
+RUN pip install --no-cache-dir bitsandbytes && \
+    python -c "import bitsandbytes; print('bitsandbytes OK')"
+
+# xformers
+RUN pip install --no-cache-dir xformers && \
+    python -c "import xformers; print(f'xformers {xformers.__version__}')"
+
+# DeepSpeed - FULL COMPILATION with all ops
+RUN echo "Building DeepSpeed with ALL ops (DS_BUILD_*=1)..." && \
+    pip install --no-cache-dir deepspeed && \
+    python -c "import deepspeed; print(f'DeepSpeed {deepspeed.__version__}')" && \
+    ds_report
+
+# vLLM
+RUN pip install --no-cache-dir vllm && \
+    python -c "import vllm; print(f'vLLM {vllm.__version__}')" || echo "vLLM optional"
+
+# Copy compiled .so binaries
+COPY --from=python-compiler /compile/usf_bios/ /app/usf_bios/
+COPY --from=python-compiler /compile/web/backend/ /app/web/backend/
+
+# Reinstall usf_bios with compiled binaries
+RUN cd /app && pip install --no-cache-dir -e .
+
+# Copy frontend
+COPY --from=frontend-builder /build/frontend/.next/standalone /app/web/frontend/
+COPY --from=frontend-builder /build/frontend/.next/static /app/web/frontend/.next/static
+COPY --from=frontend-builder /build/frontend/public /app/web/frontend/public
+
+# Copy keys and entrypoint
+COPY keys/usf_bios_public.pem /app/keys/usf_bios_public.pem
+COPY web/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+# Create cache directories
+RUN mkdir -p \
+    /app/data/uploads /app/data/datasets /app/data/output /app/data/checkpoints \
+    /app/data/logs /app/data/models /app/data/db \
+    /app/.cache/huggingface /app/.cache/torch /app/.cache/deepspeed \
+    /app/.cache/triton /app/.triton && \
+    chown -R usf:usf /app/data /app/.cache /app/.triton
+
+# Security
+RUN chmod -R 555 /app/usf_bios /app/web
+
+USER usf
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:3000 || exit 1
+
+ENTRYPOINT ["/app/entrypoint.sh"]
