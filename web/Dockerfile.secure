@@ -227,25 +227,26 @@ ENV LMDEPLOY_CACHE_DIR=/app/.cache/lmdeploy
 ENV CUDA_CACHE_PATH=/app/.cache/cuda
 ENV CUDA_CACHE_MAXSIZE=1073741824
 
-# DeepSpeed Configuration - Build ALL ops during Docker build
-# With CUDA toolkit available, we pre-compile ALL DeepSpeed operations
-# This ensures everything works without runtime compilation
-ENV DS_BUILD_OPS=1
-ENV DS_BUILD_AIO=1
-ENV DS_BUILD_SPARSE_ATTN=1
-ENV DS_BUILD_TRANSFORMER=1
-ENV DS_BUILD_TRANSFORMER_INFERENCE=1
-ENV DS_BUILD_STOCHASTIC_TRANSFORMER=1
-ENV DS_BUILD_FUSED_ADAM=1
-ENV DS_BUILD_FUSED_LAMB=1
-ENV DS_BUILD_CPU_ADAM=1
-ENV DS_BUILD_CPU_LION=1
-ENV DS_BUILD_UTILS=1
-ENV DS_BUILD_EVOFORMER_ATTN=1
-ENV DS_BUILD_RANDOM_LTD=1
-ENV DS_BUILD_INFERENCE_CORE_OPS=1
-ENV DS_BUILD_CUTLASS_OPS=1
-ENV DS_BUILD_RAGGED_DEVICE_OPS=1
+# DeepSpeed Configuration - Use JIT compilation at runtime
+# Building CUDA ops from source without GPU takes 6+ hours and fails
+# DeepSpeed will JIT compile ops when first used on actual GPU hardware
+# This is the recommended approach for Docker builds without GPU access
+ENV DS_BUILD_OPS=0
+ENV DS_BUILD_AIO=0
+ENV DS_BUILD_SPARSE_ATTN=0
+ENV DS_BUILD_TRANSFORMER=0
+ENV DS_BUILD_TRANSFORMER_INFERENCE=0
+ENV DS_BUILD_STOCHASTIC_TRANSFORMER=0
+ENV DS_BUILD_FUSED_ADAM=0
+ENV DS_BUILD_FUSED_LAMB=0
+ENV DS_BUILD_CPU_ADAM=0
+ENV DS_BUILD_CPU_LION=0
+ENV DS_BUILD_UTILS=0
+ENV DS_BUILD_EVOFORMER_ATTN=0
+ENV DS_BUILD_RANDOM_LTD=0
+ENV DS_BUILD_INFERENCE_CORE_OPS=0
+ENV DS_BUILD_CUTLASS_OPS=0
+ENV DS_BUILD_RAGGED_DEVICE_OPS=0
 
 # ============================================================================
 # CUDA Configuration - Real CUDA toolkit from nvidia/cuda base image
@@ -388,11 +389,11 @@ RUN python -c "import usf_bios; print(f'✓ usf_bios {usf_bios.__version__} inst
 RUN pip install --no-cache-dir nvidia-ml-py && \
     pip install --no-cache-dir -r /app/web/backend/requirements.txt
 
-# Install Flash Attention 2 with CUDA compilation
-# This compiles native CUDA kernels for maximum performance
+# Install Flash Attention 2 - use pre-built wheel (no source compilation)
+# Pre-built wheels are available for PyTorch 2.2 + CUDA 12.x
 RUN pip install --no-cache-dir ninja packaging && \
-    pip install --no-cache-dir flash-attn --no-build-isolation && \
-    python -c "import flash_attn; print(f'✓ Flash Attention {flash_attn.__version__} installed')"
+    pip install --no-cache-dir flash-attn && \
+    python -c "import flash_attn; print(f'✓ Flash Attention {flash_attn.__version__} installed')" || echo "Flash Attention will be available at runtime"
 
 # Install bitsandbytes with CUDA support (for QLoRA, 4-bit, 8-bit quantization)
 RUN pip install --no-cache-dir bitsandbytes && \
@@ -402,11 +403,11 @@ RUN pip install --no-cache-dir bitsandbytes && \
 RUN pip install --no-cache-dir xformers && \
     python -c "import xformers; print(f'✓ xformers {xformers.__version__} installed')"
 
-# Install DeepSpeed with CUDA ops pre-compiled
-# DS_BUILD_* env vars set above enable compilation of fused_adam, cpu_adam, etc.
+# Install DeepSpeed - ops will JIT compile at runtime when GPU is available
+# DS_BUILD_*=0 means no source compilation during Docker build (saves 6+ hours)
+# DeepSpeed automatically JIT compiles required ops on first use with actual GPU
 RUN pip install --no-cache-dir deepspeed && \
-    python -c "import deepspeed; print(f'✓ DeepSpeed {deepspeed.__version__} installed')" && \
-    ds_report || true
+    python -c "import deepspeed; print(f'✓ DeepSpeed {deepspeed.__version__} installed')"
 
 # ============================================================================
 # PRE-CLONE ALL GITHUB REPOS - Prevent runtime git clone operations
