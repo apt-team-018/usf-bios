@@ -471,11 +471,14 @@ ENV USF_EXTERNAL_REPOS_PATH=/app/external_repos
 # ============================================================================
 # INFERENCE ENGINES + TRAINING UTILITIES - SPEED OPTIMIZED (combined RUN)
 # ============================================================================
+# Remove distutils-installed blinker that cannot be uninstalled normally
+RUN rm -rf /usr/lib/python3/dist-packages/blinker* || true
+
 RUN echo "=== Installing inference engines and training utilities ===" && \
     (pip install --no-cache-dir vllm || echo "vLLM skipped") && \
     (pip install --no-cache-dir "sglang[all]" || echo "SGLang skipped") && \
     (pip install --no-cache-dir lmdeploy || echo "lmdeploy skipped") && \
-    pip install --no-cache-dir \
+    pip install --no-cache-dir --ignore-installed \
     accelerate peft trl datasets evaluate scipy scikit-learn \
     sentencepiece tiktoken tensorboard wandb mlflow "ray[tune]" optuna \
     numba triton einops safetensors huggingface-hub tokenizers \
