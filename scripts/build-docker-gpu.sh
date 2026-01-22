@@ -79,16 +79,26 @@ cd "$(dirname "$0")/.."
 echo -e "${YELLOW}[4/5] Building from: $(pwd)${NC}"
 
 # Build with GPU support and BuildKit caching
-echo -e "${YELLOW}[5/5] Starting GPU-accelerated Docker build with caching...${NC}"
+echo -e "${YELLOW}[5/5] Starting GPU-accelerated Docker build...${NC}"
 echo ""
 
 # Enable BuildKit for advanced caching
 export DOCKER_BUILDKIT=1
 
+# Create/use buildx builder with docker-container driver for cache support
+BUILDER_NAME="usf-bios-builder"
+if ! docker buildx inspect "${BUILDER_NAME}" &> /dev/null; then
+    echo -e "${YELLOW}  Creating buildx builder for cache support...${NC}"
+    docker buildx create --name "${BUILDER_NAME}" --driver docker-container --use
+else
+    docker buildx use "${BUILDER_NAME}"
+fi
+
 # Create cache directory if not exists
 CACHE_DIR="${HOME}/.docker-cache/usf-bios"
 mkdir -p "${CACHE_DIR}"
 
+echo -e "${GREEN}  Builder: ${BUILDER_NAME}${NC}"
 echo -e "${GREEN}  Cache directory: ${CACHE_DIR}${NC}"
 echo ""
 
@@ -116,7 +126,7 @@ docker buildx build \
     --cache-from type=local,src=${CACHE_DIR} \
     --cache-to type=local,dest=${CACHE_DIR},mode=max \
     --progress=plain \
-    --load \
+    --output type=docker \
     .
 
 echo ""
