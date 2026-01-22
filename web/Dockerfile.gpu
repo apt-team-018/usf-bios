@@ -411,13 +411,31 @@ RUN echo "" && \
     python -c "import bitsandbytes; print('✓ bitsandbytes OK')"
 
 # ============================================================================
-# STEP 8: Install xformers and DeepSpeed
+# STEP 8: Install xformers (pinned version for PyTorch 2.4.0)
 # ============================================================================
 RUN echo "" && \
-    echo "=== STEP 8/8: Installing xformers and DeepSpeed ===" && \
-    pip install --no-cache-dir xformers && \
-    pip install --no-cache-dir deepspeed && \
-    python -c "import xformers; print(f'✓ xformers {xformers.__version__}')" && \
+    echo "=== STEP 8/9: Installing xformers ===" && \
+    pip install --no-cache-dir xformers==0.0.27.post2 && \
+    python -c "import xformers; print(f'✓ xformers {xformers.__version__}')"
+
+# ============================================================================
+# STEP 9: Reinstall PyTorch 2.4.0 (xformers may have upgraded it)
+# ============================================================================
+RUN echo "" && \
+    echo "=== STEP 9/10: Ensuring PyTorch 2.4.0 ===" && \
+    pip install --no-cache-dir --force-reinstall \
+    torch==2.4.0 \
+    torchvision==0.19.0 \
+    torchaudio==2.4.0 \
+    --index-url https://download.pytorch.org/whl/cu124 && \
+    python -c "import torch; print(f'✓ PyTorch {torch.__version__}')"
+
+# ============================================================================
+# STEP 10: Install DeepSpeed
+# ============================================================================
+RUN echo "" && \
+    echo "=== STEP 10/10: Installing DeepSpeed ===" && \
+    DS_BUILD_OPS=0 pip install --no-cache-dir deepspeed && \
     python -c "import deepspeed; print(f'✓ DeepSpeed {deepspeed.__version__}')"
 
 # ============================================================================
