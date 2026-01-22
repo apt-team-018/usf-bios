@@ -474,10 +474,29 @@ ENV USF_EXTERNAL_REPOS_PATH=/app/external_repos
 # Remove distutils-installed blinker that cannot be uninstalled normally
 RUN rm -rf /usr/lib/python3/dist-packages/blinker* || true
 
-RUN echo "=== Installing inference engines and training utilities ===" && \
+# Install inference engines (these will mess up torch/transformers versions)
+RUN echo "=== Installing inference engines ===" && \
     (pip install --no-cache-dir vllm || echo "vLLM skipped") && \
     (pip install --no-cache-dir "sglang[all]" || echo "SGLang skipped") && \
     (pip install --no-cache-dir lmdeploy || echo "lmdeploy skipped") && \
+    echo "✓ Inference engines installed"
+
+# CRITICAL: Restore PyTorch 2.4.0 + torchvision after vllm/sglang overwrote them
+RUN echo "=== Restoring PyTorch 2.4.0 stack ===" && \
+    pip install --no-cache-dir --force-reinstall \
+    torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
+    --index-url https://download.pytorch.org/whl/cu124 && \
+    python -c "import torch; print(f'✓ PyTorch {torch.__version__}')" && \
+    python -c "import torchvision; print(f'✓ torchvision {torchvision.__version__}')"
+
+# CRITICAL: Reinstall custom transformers fork after vllm/sglang overwrote it
+RUN echo "=== Reinstalling custom transformers fork ===" && \
+    pip uninstall -y transformers && \
+    pip install --no-cache-dir git+https://github.com/apt-team-018/transformers.git && \
+    python -c "import transformers; print(f'✓ Transformers {transformers.__version__}')"
+
+# Install training utilities (separate from inference engines to avoid conflicts)
+RUN echo "=== Installing training utilities ===" && \
     pip install --no-cache-dir --ignore-installed \
     accelerate peft trl datasets evaluate scipy scikit-learn \
     sentencepiece tiktoken tensorboard wandb mlflow "ray[tune]" optuna \
