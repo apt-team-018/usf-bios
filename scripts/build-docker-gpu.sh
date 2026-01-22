@@ -78,32 +78,16 @@ echo -e "${GREEN}  ✓ nvidia-container-toolkit working${NC}"
 cd "$(dirname "$0")/.."
 echo -e "${YELLOW}[4/5] Building from: $(pwd)${NC}"
 
-# Build with GPU support and BuildKit caching
-echo -e "${YELLOW}[5/5] Starting GPU-accelerated Docker build...${NC}"
+# Build with GPU support and BuildKit
+echo -e "${YELLOW}[5/5] Starting Docker build (BuildKit enabled)...${NC}"
 echo ""
 
-# Enable BuildKit for advanced caching
+# Enable BuildKit for better caching and parallel builds
 export DOCKER_BUILDKIT=1
 
-# Create/use buildx builder with docker-container driver for cache support
-BUILDER_NAME="usf-bios-builder"
-if ! docker buildx inspect "${BUILDER_NAME}" &> /dev/null; then
-    echo -e "${YELLOW}  Creating buildx builder for cache support...${NC}"
-    docker buildx create --name "${BUILDER_NAME}" --driver docker-container --use
-else
-    docker buildx use "${BUILDER_NAME}"
-fi
-
-# Create cache directory if not exists
-CACHE_DIR="${HOME}/.docker-cache/usf-bios"
-mkdir -p "${CACHE_DIR}"
-
-echo -e "${GREEN}  Builder: ${BUILDER_NAME}${NC}"
-echo -e "${GREEN}  Cache directory: ${CACHE_DIR}${NC}"
-echo ""
-
-# Build the image with GPU compilation and layer caching
-docker buildx build \
+# Use regular docker build (has access to host GPU for compilation)
+# Note: buildx with docker-container driver does NOT have GPU access
+docker build \
     --file "${DOCKERFILE}" \
     --tag "${IMAGE_NAME}:${VERSION}" \
     --tag "${IMAGE_NAME}:latest" \
@@ -123,10 +107,7 @@ docker buildx build \
     --build-arg DS_BUILD_INFERENCE_CORE_OPS=1 \
     --build-arg DS_BUILD_CUTLASS_OPS=1 \
     --build-arg DS_BUILD_RAGGED_DEVICE_OPS=1 \
-    --cache-from type=local,src=${CACHE_DIR} \
-    --cache-to type=local,dest=${CACHE_DIR},mode=max \
     --progress=plain \
-    --output type=docker \
     .
 
 echo ""

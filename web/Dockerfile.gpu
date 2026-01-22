@@ -118,7 +118,7 @@ RUN find /compile -name "*.pyc" -delete && \
 # ============================================================================
 # Using NVIDIA CUDA base image with full toolkit (includes nvcc, cuBLAS, cuDNN)
 # This provides proper CUDA support for DeepSpeed, Flash Attention, bitsandbytes
-FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
+FROM nvidia/cuda:12.4.0-devel-ubuntu22.04
 
 LABEL maintainer="US Inc <support@us.inc>"
 LABEL description="USF BIOS - Enterprise AI Fine-tuning Platform (GPU Build)"
@@ -342,68 +342,86 @@ COPY web/backend/requirements.txt /app/web/backend/
 # ============================================================================
 
 # ============================================================================
-# COMPATIBLE VERSION MATRIX (CUDA 12.2)
-# PyTorch 2.2.0 + CUDA 12.1 (compatible with 12.2 runtime)
-# Flash Attention 2.5.x requires PyTorch 2.0+
-# bitsandbytes 0.42+ requires PyTorch 2.0+
-# xformers 0.0.24+ requires PyTorch 2.2+
-# DeepSpeed 0.14+ requires PyTorch 2.0+
-# vLLM 0.4+ requires PyTorch 2.1+
+# STEP 1: Install PyTorch with CUDA 12.4
 # ============================================================================
-
-# Install PyTorch with CUDA first (required for other packages)
-# Using cu121 wheels which are compatible with CUDA 12.2 runtime
-RUN pip install --no-cache-dir \
-    torch==2.2.2 \
-    torchvision==0.17.2 \
-    torchaudio==2.2.2 \
-    --index-url https://download.pytorch.org/whl/cu121 && \
-    python -c "import torch; print(f'✓ PyTorch {torch.__version__} with CUDA {torch.version.cuda}')" && \
-    python -c "import torch; assert torch.cuda.is_available() or True, 'CUDA not available'"
+RUN echo "" && \
+    echo "=== STEP 1/8: Installing PyTorch with CUDA 12.4 ===" && \
+    pip install --no-cache-dir \
+    torch==2.4.0 \
+    torchvision==0.19.0 \
+    torchaudio==2.4.0 \
+    --index-url https://download.pytorch.org/whl/cu124 && \
+    python -c "import torch; print(f'✓ PyTorch {torch.__version__} with CUDA {torch.version.cuda}')"
 
 # ============================================================================
-# CRITICAL: Install custom transformers fork FIRST (supports usf_omega architecture)
-# This MUST be installed before any other packages that depend on transformers
+# STEP 2: Install Custom Transformers Fork (CRITICAL - supports usf_omega)
 # ============================================================================
-RUN pip install --no-cache-dir git+https://github.com/apt-team-018/transformers.git && \
-    python -c "import transformers; print(f'✓ Custom Transformers fork installed: {transformers.__version__}')" && \
+RUN echo "" && \
+    echo "=== STEP 2/8: Installing Custom Transformers Fork ===" && \
+    pip install --no-cache-dir git+https://github.com/apt-team-018/transformers.git && \
+    python -c "import transformers; print(f'✓ Custom Transformers: {transformers.__version__}')" && \
     python -c "from transformers import AutoConfig; print('✓ AutoConfig available')"
 
 # ============================================================================
-# NOTE: usf_bios package installation happens LATER after .so files are copied
-# See line ~546 where setup.py is copied and pip install -e . is run
+# STEP 3: Copy and Install usf_bios Package EARLY
 # ============================================================================
+COPY setup.py setup.cfg MANIFEST.in requirements.txt README.md /app/
+COPY usf_bios/ /app/usf_bios/
 
-# Install additional backend requirements
-RUN pip install --no-cache-dir nvidia-ml-py && \
-    pip install --no-cache-dir -r /app/web/backend/requirements.txt
-
-# ============================================================================
-# GPU-ACCELERATED CUDA COMPILATION - ALL PACKAGES COMPILED WITH GPU
-# This is FAST on H200/H100 (~15-20 min total vs 6+ hours on CPU)
-# ============================================================================
+RUN echo "" && \
+    echo "=== STEP 3/8: Installing usf_bios Package ===" && \
+    cd /app && pip install --no-cache-dir -e . && \
+    python -c "import usf_bios; print(f'✓ usf_bios {usf_bios.__version__} installed')" && \
+    which usf_bios && echo "✓ usf_bios CLI registered"
 
 # ============================================================================
-# GPU-ACCELERATED CUDA COMPILATION - SPEED OPTIMIZED
-# Combined into fewer RUN commands for faster layer caching
-# Using MAX_JOBS=16 for parallel compilation on H200
+# STEP 4: Reinstall Custom Transformers (ensure not overwritten)
 # ============================================================================
+RUN echo "" && \
+    echo "=== STEP 4/8: Ensuring Custom Transformers Fork ===" && \
+    pip uninstall -y transformers && \
+    pip install --no-cache-dir git+https://github.com/apt-team-018/transformers.git && \
+    python -c "import transformers; print(f'✓ Custom Transformers reinstalled: {transformers.__version__}')"
 
-# Install all CUDA-compiled packages in optimized order
-RUN pip install --no-cache-dir ninja packaging && \
-    echo "=== Building Flash Attention 2 ===" && \
-    pip install --no-cache-dir flash-attn --no-build-isolation && \
-    echo "=== Installing bitsandbytes ===" && \
+# ============================================================================
+# STEP 5: Install Backend Requirements
+# ============================================================================
+RUN echo "" && \
+    echo "=== STEP 5/8: Installing Backend Requirements ===" && \
+    pip install --no-cache-dir nvidia-ml-py && \
+    pip install --no-cache-dir -r /app/web/backend/requirements.txt && \
+    echo "✓ Backend requirements installed"
+
+# ============================================================================
+# STEP 6: Install Build Tools + Flash Attention from Source
+# ============================================================================
+RUN echo "" && \
+    echo "=== STEP 6/8: Installing Flash Attention 2 from Source ===" && \
+    pip install --no-cache-dir ninja packaging wheel setuptools && \
+    cd /tmp && \
+    git clone https://github.com/Dao-AILab/flash-attention.git && \
+    cd flash-attention && \
+    pip install --no-build-isolation -e . && \
+    cd / && rm -rf /tmp/flash-attention && \
+    python -c "import flash_attn; print(f'✓ Flash Attention {flash_attn.__version__}')"
+
+# ============================================================================
+# STEP 7: Install bitsandbytes
+# ============================================================================
+RUN echo "" && \
+    echo "=== STEP 7/8: Installing bitsandbytes ===" && \
     pip install --no-cache-dir bitsandbytes && \
-    echo "=== Installing xformers ===" && \
+    python -c "import bitsandbytes; print('✓ bitsandbytes OK')"
+
+# ============================================================================
+# STEP 8: Install xformers and DeepSpeed
+# ============================================================================
+RUN echo "" && \
+    echo "=== STEP 8/8: Installing xformers and DeepSpeed ===" && \
     pip install --no-cache-dir xformers && \
-    echo "=== Building DeepSpeed with ALL 16 CUDA ops ===" && \
     pip install --no-cache-dir deepspeed && \
-    python -c "import flash_attn; print(f'✓ Flash Attention {flash_attn.__version__}')" && \
-    python -c "import bitsandbytes; print('✓ bitsandbytes OK')" && \
     python -c "import xformers; print(f'✓ xformers {xformers.__version__}')" && \
-    python -c "import deepspeed; print(f'✓ DeepSpeed {deepspeed.__version__}')" && \
-    ds_report
+    python -c "import deepspeed; print(f'✓ DeepSpeed {deepspeed.__version__}')"
 
 # ============================================================================
 # PRE-CLONE ALL GITHUB REPOS - Prevent runtime git clone operations
@@ -506,21 +524,22 @@ RUN echo "" && \
     echo "✓ All CUDA packages verified and compiled with GPU" && \
     echo ""
 
-# Copy compiled .so binaries (no source code)
+# ============================================================================
+# REPLACE usf_bios with compiled .so binaries (code protection)
+# ============================================================================
 COPY --from=python-compiler /compile/usf_bios/ /app/usf_bios/
 COPY --from=python-compiler /compile/web/backend/ /app/web/backend/
 
-# Copy setup files to install usf_bios as a proper package
-# IMPORTANT: setup.py requires requirements.txt and README.md
-COPY setup.py setup.cfg MANIFEST.in requirements.txt README.md /app/
-
-# ============================================================================
-# INSTALL usf_bios as a pip package (registers CLI entry points)
-# ============================================================================
+# Reinstall usf_bios with compiled .so files
 RUN echo "" && \
-    echo "=== INSTALLING USF BIOS PACKAGE ===" && \
+    echo "=== REINSTALLING USF BIOS WITH COMPILED .so FILES ===" && \
     cd /app && pip install --no-cache-dir -e . && \
-    echo "  ✓ usf_bios installed as pip package"
+    echo "  ✓ usf_bios reinstalled with compiled binaries"
+
+# Ensure custom transformers fork is still active (final check)
+RUN pip uninstall -y transformers && \
+    pip install --no-cache-dir git+https://github.com/apt-team-018/transformers.git && \
+    python -c "import transformers; print(f'✓ Custom Transformers (final): {transformers.__version__}')"
 
 # ============================================================================
 # FINAL VERIFICATION: Ensure usf_bios works in production image
