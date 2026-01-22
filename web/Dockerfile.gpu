@@ -370,35 +370,9 @@ RUN pip install --no-cache-dir git+https://github.com/apt-team-018/transformers.
     python -c "from transformers import AutoConfig; print('✓ AutoConfig available')"
 
 # ============================================================================
-# INSTALL usf_bios PACKAGE WITH ALL DEPENDENCIES via pip install -e .
-# This automatically installs:
-# - All requirements from requirements.txt
-# - All framework dependencies
-# - CLI entry points (usf_bios command)
+# NOTE: usf_bios package installation happens LATER after .so files are copied
+# See line ~546 where setup.py is copied and pip install -e . is run
 # ============================================================================
-RUN echo "" && \
-    echo "=== INSTALLING USF BIOS WITH ALL DEPENDENCIES ===" && \
-    cd /app && pip install --no-cache-dir -e ".[all]" && \
-    echo "✓ usf_bios package installed with all dependencies"
-
-# ============================================================================
-# CRITICAL: Reinstall custom transformers fork AFTER pip install -e .
-# pip install -e . may have installed standard transformers, so we must:
-# 1. Uninstall any existing transformers
-# 2. Reinstall our custom fork
-# ============================================================================
-RUN echo "" && \
-    echo "=== ENSURING CUSTOM TRANSFORMERS FORK ===" && \
-    pip uninstall -y transformers && \
-    pip install --no-cache-dir git+https://github.com/apt-team-018/transformers.git && \
-    python -c "import transformers; print(f'✓ Custom Transformers fork reinstalled: {transformers.__version__}')" && \
-    python -c "from transformers import AutoConfig; print('✓ AutoConfig available')"
-
-# Verify usf_bios and custom transformers are properly installed
-RUN python -c "import usf_bios; print(f'✓ usf_bios {usf_bios.__version__} installed')" && \
-    python -c "import transformers; print(f'✓ Custom Transformers fork: {transformers.__version__}')" && \
-    python -c "from transformers import AutoConfig; print('✓ AutoConfig available')" && \
-    which usf_bios && echo "✓ usf_bios CLI registered"
 
 # Install additional backend requirements
 RUN pip install --no-cache-dir nvidia-ml-py && \
