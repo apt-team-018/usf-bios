@@ -510,7 +510,8 @@ RUN echo "=== Installing training utilities (with torch constraints) ===" && \
     einops safetensors "huggingface-hub>=0.24" tokenizers \
     aiohttp aiofiles websockets python-multipart pynvml psutil \
     sqlalchemy aiosqlite pydantic pydantic-settings "gradio>=3.40.0,<6.0" \
-    matplotlib pillow pandas numpy requests tqdm "rich>=13.0" PyYAML omegaconf && \
+    matplotlib "pillow>=8.0,<12.0" "fsspec>=2023.1.0,<=2025.3.0" \
+    pandas numpy requests tqdm "rich>=13.0" PyYAML omegaconf && \
     echo "✓ Training utilities installed (torch-independent)"
 
 # Install triton separately with constraint (it has complex torch dependencies)
