@@ -397,9 +397,12 @@ RUN echo "" && \
 # NOTE: Source compilation requires GPU access which Docker build doesn't have
 # ============================================================================
 RUN echo "" && \
-    echo "=== STEP 6/8: Installing Flash Attention 2 ===" && \
+    echo "=== STEP 6/8: Installing Flash Attention 2 (from source) ===" && \
     pip install --no-cache-dir ninja packaging wheel setuptools && \
-    pip install --no-cache-dir flash-attn --no-build-isolation && \
+    git clone https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attention && \
+    cd /tmp/flash-attention && \
+    python setup.py install && \
+    cd / && rm -rf /tmp/flash-attention && \
     python -c "import flash_attn; print(f'✓ Flash Attention {flash_attn.__version__}')"
 
 # ============================================================================
@@ -482,12 +485,17 @@ RUN echo "=== Installing inference engines ===" && \
     echo "✓ Inference engines installed"
 
 # CRITICAL: Restore PyTorch 2.4.0 + torchvision after vllm/sglang overwrote them
+# Also create constraints file to prevent future pip installs from upgrading torch
 RUN echo "=== Restoring PyTorch 2.4.0 stack ===" && \
     pip install --no-cache-dir --force-reinstall \
     torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
     --index-url https://download.pytorch.org/whl/cu124 && \
+    echo "torch==2.4.0" > /tmp/torch-constraints.txt && \
+    echo "torchvision==0.19.0" >> /tmp/torch-constraints.txt && \
+    echo "torchaudio==2.4.0" >> /tmp/torch-constraints.txt && \
     python -c "import torch; print(f'✓ PyTorch {torch.__version__}')" && \
-    python -c "import torchvision; print(f'✓ torchvision {torchvision.__version__}')"
+    python -c "import torchvision; print(f'✓ torchvision {torchvision.__version__}')" && \
+    echo "✓ Torch constraints file created at /tmp/torch-constraints.txt"
 
 # CRITICAL: Reinstall custom transformers fork after vllm/sglang overwrote it
 RUN echo "=== Reinstalling custom transformers fork ===" && \
@@ -495,33 +503,37 @@ RUN echo "=== Reinstalling custom transformers fork ===" && \
     pip install --no-cache-dir git+https://github.com/apt-team-018/transformers.git && \
     python -c "import transformers; print(f'✓ Transformers {transformers.__version__}')"
 
-# Install training utilities (separate from inference engines to avoid conflicts)
-# IMPORTANT: Pin versions to match requirements/framework.txt and avoid breaking torch
-RUN echo "=== Installing training utilities ===" && \
-    pip install --no-cache-dir \
+# Install training utilities using constraints to prevent torch upgrades
+# IMPORTANT: Use --constraint to lock torch version across all installs
+RUN echo "=== Installing training utilities (with torch constraints) ===" && \
+    pip install --no-cache-dir --constraint /tmp/torch-constraints.txt \
     accelerate "peft>=0.11,<0.19" "trl>=0.15,<0.25" "datasets>=3.0,<4.0" \
     evaluate scipy scikit-learn \
     sentencepiece tiktoken tensorboard wandb mlflow "ray[tune]" optuna \
-    numba "triton>=3.0.0,<=3.4.0" einops safetensors "huggingface-hub>=0.24" tokenizers \
+    einops safetensors "huggingface-hub>=0.24" tokenizers \
     aiohttp aiofiles websockets python-multipart pynvml psutil \
     sqlalchemy aiosqlite pydantic pydantic-settings "gradio>=3.40.0,<6.0" \
     matplotlib pillow pandas numpy requests tqdm "rich>=13.0" PyYAML omegaconf && \
-    echo "✓ Training utilities installed"
+    echo "✓ Training utilities installed (torch-independent)"
 
-# CRITICAL: Re-restore PyTorch 2.4.0 stack in case training utilities overwrote it
-RUN echo "=== Ensuring PyTorch 2.4.0 stack is intact ===" && \
-    pip install --no-cache-dir --force-reinstall \
-    torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
-    --index-url https://download.pytorch.org/whl/cu124 && \
-    python -c "import torch; print(f'✓ PyTorch {torch.__version__}')" && \
+# Install triton separately with constraint (it has complex torch dependencies)
+RUN echo "=== Installing triton with torch constraint ===" && \
+    pip install --no-cache-dir --constraint /tmp/torch-constraints.txt \
+    "triton>=3.0.0,<=3.4.0" numba && \
+    echo "✓ Triton installed"
+
+# Verify torch wasn't accidentally upgraded
+RUN echo "=== Verifying PyTorch stack ===" && \
+    python -c "import torch; assert torch.__version__.startswith('2.4.0'), f'ERROR: torch is {torch.__version__}, expected 2.4.0'; print(f'✓ PyTorch {torch.__version__}')" && \
     python -c "import torchvision; print(f'✓ torchvision {torchvision.__version__}')" && \
     python -c "import accelerate, peft, trl; print('✓ Training utilities OK')"
 
 # ============================================================================
 # OPTIONAL PACKAGES - Pre-install to prevent runtime installation
 # These are checked via is_*_available() in the codebase
+# IMPORTANT: Use constraints to prevent torch upgrades
 # ============================================================================
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --constraint /tmp/torch-constraints.txt \
     swanlab \
     liger-kernel \
     unsloth \
@@ -540,11 +552,12 @@ RUN pip install --no-cache-dir \
     binpacking \
     zstandard \
     transformers_stream_generator \
-    flash-attn-interface \
-    vllm-ascend \
-    mindspeed \
     && python -c "print('✓ Optional packages installed')" || \
     echo "⚠ Some optional packages may have failed (non-critical)"
+
+# NOTE: flash-attn-interface, vllm-ascend, mindspeed are internal/Ascend-specific packages
+# They are not available on PyPI and should be installed separately if needed
+# flash-attn is already installed earlier in the build
 
 # Download NLTK data to prevent runtime downloads
 RUN python -c "import nltk; nltk.download('punkt'); nltk.download('averaged_perceptron_tagger')" || \
