@@ -357,10 +357,10 @@ RUN echo "" && \
 # STEP 2: Install Custom Transformers Fork (CRITICAL - supports usf_omega)
 # ============================================================================
 RUN echo "" && \
-    echo "=== STEP 2/8: Installing Custom Transformers Fork ===" && \
-    pip install --no-cache-dir git+https://github.com/apt-team-018/transformers.git && \
-    python -c "import transformers; print(f'✓ Custom Transformers: {transformers.__version__}')" && \
-    python -c "from transformers import AutoConfig; print('✓ AutoConfig available')"
+    echo "=== STEP 2/8: Installing Transformers ===" && \
+    pip install --no-cache-dir "transformers==4.57.6" && \
+    python -c "import transformers; print(f'✓ Transformers: {transformers.__version__}')" && \
+    python -c "from transformers import AutoConfig, PreTrainedModel; print('✓ AutoConfig & PreTrainedModel available')"
 
 # ============================================================================
 # STEP 3: Copy and Install usf_bios Package EARLY
@@ -378,10 +378,10 @@ RUN echo "" && \
 # STEP 4: Reinstall Custom Transformers (ensure not overwritten)
 # ============================================================================
 RUN echo "" && \
-    echo "=== STEP 4/8: Ensuring Custom Transformers Fork ===" && \
+    echo "=== STEP 4/8: Ensuring Transformers 4.57.6 ===" && \
     pip uninstall -y transformers && \
-    pip install --no-cache-dir git+https://github.com/apt-team-018/transformers.git && \
-    python -c "import transformers; print(f'✓ Custom Transformers reinstalled: {transformers.__version__}')"
+    pip install --no-cache-dir "transformers==4.57.6" && \
+    python -c "import transformers; print(f'✓ Transformers reinstalled: {transformers.__version__}')"
 
 # ============================================================================
 # STEP 5: Install Backend Requirements
@@ -502,10 +502,10 @@ RUN echo "=== Restoring PyTorch 2.4.0 stack ===" && \
 RUN pip install --no-cache-dir "numpy>=1.24,<2.0.0" && \
     python -c "import numpy; print(f'✓ numpy {numpy.__version__}')"
 
-# CRITICAL: Reinstall custom transformers fork after vllm/sglang overwrote it
-RUN echo "=== Reinstalling custom transformers fork ===" && \
+# CRITICAL: Reinstall transformers 4.57.6 after vllm/sglang overwrote it
+RUN echo "=== Reinstalling transformers 4.57.6 ===" && \
     pip uninstall -y transformers && \
-    pip install --no-cache-dir git+https://github.com/apt-team-018/transformers.git && \
+    pip install --no-cache-dir "transformers==4.57.6" && \
     python -c "import transformers; print(f'✓ Transformers {transformers.__version__}')"
 
 # Install training utilities using constraints to prevent torch upgrades
@@ -573,13 +573,12 @@ RUN python -c "import nltk; nltk.download('punkt'); nltk.download('averaged_perc
 # ============================================================================
 # CRITICAL: Fix package versions after unsloth installation
 # unsloth installs incompatible versions of peft/transformers that break imports
-# Install custom transformers FIRST, then peft with --no-deps to prevent override
+# Install transformers 4.57.6 FIRST, then peft with --no-deps to prevent override
 # ============================================================================
 RUN echo "=== Fixing peft/transformers compatibility ===" && \
     pip uninstall -y transformers peft 2>/dev/null || true && \
     pip cache purge || true && \
-    pip install --no-cache-dir --force-reinstall --ignore-installed \
-        git+https://github.com/apt-team-018/transformers.git && \
+    pip install --no-cache-dir --force-reinstall "transformers==4.57.6" && \
     python -c "import transformers; print(f'✓ Transformers: {transformers.__version__}')" && \
     pip install --no-cache-dir --no-deps "peft>=0.18,<0.19" && \
     python -c "import peft; print(f'✓ PEFT: {peft.__version__}')" && \
@@ -620,10 +619,10 @@ RUN echo "" && \
     cd /app && pip install --no-cache-dir -e . && \
     echo "  ✓ usf_bios reinstalled with compiled binaries"
 
-# Ensure custom transformers fork is still active (final check)
+# Ensure transformers 4.57.6 is still active (final check)
 RUN pip uninstall -y transformers && \
-    pip install --no-cache-dir git+https://github.com/apt-team-018/transformers.git && \
-    python -c "import transformers; print(f'✓ Custom Transformers (final): {transformers.__version__}')"
+    pip install --no-cache-dir "transformers==4.57.6" && \
+    python -c "import transformers; print(f'✓ Transformers (final): {transformers.__version__}')"
 
 # ============================================================================
 # FINAL VERIFICATION: Ensure usf_bios works in production image
