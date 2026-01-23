@@ -19,10 +19,10 @@ cryptography>=41.0.0
 
 # ML/Training dependencies
 torch>=2.1.0
-git+https://github.com/apt-team-018/transformers.git
+transformers==4.46.3
 datasets>=2.15.0
-peft>=0.7.0
-trl>=0.7.0
+peft>=0.13,<0.14
+trl>=0.12,<0.16
 accelerate>=0.25.0
 bitsandbytes>=0.41.0
 sentencepiece>=0.1.99
