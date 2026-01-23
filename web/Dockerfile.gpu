@@ -342,7 +342,7 @@ COPY web/backend/requirements.txt /app/web/backend/
 # ============================================================================
 
 # ============================================================================
-# STEP 1: Install PyTorch with CUDA 12.4
+# STEP 1: Install PyTorch with CUDA 12.4 + Create constraints file
 # ============================================================================
 RUN echo "" && \
     echo "=== STEP 1/8: Installing PyTorch with CUDA 12.4 ===" && \
@@ -351,7 +351,14 @@ RUN echo "" && \
     torchvision==0.19.0 \
     torchaudio==2.4.0 \
     --index-url https://download.pytorch.org/whl/cu124 && \
-    python -c "import torch; print(f'✓ PyTorch {torch.__version__} with CUDA {torch.version.cuda}')"
+    echo "torch==2.4.0" > /tmp/torch-constraints.txt && \
+    echo "torchvision==0.19.0" >> /tmp/torch-constraints.txt && \
+    echo "torchaudio==2.4.0" >> /tmp/torch-constraints.txt && \
+    echo "numpy<2.0.0" >> /tmp/torch-constraints.txt && \
+    echo "pillow<12.0" >> /tmp/torch-constraints.txt && \
+    echo "fsspec<=2025.3.0" >> /tmp/torch-constraints.txt && \
+    python -c "import torch; print(f'✓ PyTorch {torch.__version__} with CUDA {torch.version.cuda}')" && \
+    echo "✓ Constraints file created at /tmp/torch-constraints.txt"
 
 # ============================================================================
 # STEP 2: Install Custom Transformers Fork (CRITICAL - supports usf_omega)
@@ -420,11 +427,12 @@ RUN echo "" && \
 
 # ============================================================================
 # STEP 9: Reinstall PyTorch 2.4.0 (xformers may have upgraded it)
-# Also fix pillow, fsspec, numpy that PyTorch dependencies may overwrite
+# Use --no-deps to prevent PyTorch from overwriting pillow, fsspec, numpy
 # ============================================================================
 RUN echo "" && \
     echo "=== STEP 9/10: Ensuring PyTorch 2.4.0 ===" && \
-    pip install --no-cache-dir --force-reinstall \
+    pip uninstall -y torch torchvision torchaudio 2>/dev/null || true && \
+    pip install --no-cache-dir --no-deps \
     torch==2.4.0 \
     torchvision==0.19.0 \
     torchaudio==2.4.0 \
@@ -479,32 +487,24 @@ ENV USF_EXTERNAL_REPOS_PATH=/app/external_repos
 # Remove distutils-installed blinker that cannot be uninstalled normally
 RUN rm -rf /usr/lib/python3/dist-packages/blinker* || true
 
-# Install inference engines - ms-swift compatible versions
-# Reference: https://github.com/modelscope/ms-swift/tree/release/3.12/requirements
-RUN echo "=== Installing inference engines (ms-swift compatible) ===" && \
-    (pip install --no-cache-dir "vllm>=0.5.1,<0.11.1" || echo "vLLM skipped") && \
-    (pip install --no-cache-dir "sglang[all]<0.5.6" || echo "SGLang skipped") && \
-    (pip install --no-cache-dir "lmdeploy>=0.5,<0.10.2" || echo "LMDeploy skipped") && \
-    echo "✓ Inference engines installed"
+# Install inference engines - SKIP vllm/sglang (require torch 2.8+, cause conflicts)
+# Only install lmdeploy which works with torch 2.4.0
+# vLLM and SGLang can be installed manually post-deployment if needed with matching torch version
+RUN echo "=== Installing inference engines (torch 2.4.0 compatible) ===" && \
+    echo "SKIPPING vLLM - requires torch 2.8+" && \
+    echo "SKIPPING SGLang - requires torch 2.8+" && \
+    (pip install --no-cache-dir --constraint /tmp/torch-constraints.txt "lmdeploy>=0.5,<0.7" || echo "LMDeploy skipped") && \
+    pip uninstall -y vllm sglang 2>/dev/null || true && \
+    echo "✓ Inference engines installed (lmdeploy only)"
 
-# CRITICAL: Restore PyTorch 2.4.0 + torchvision after vllm/sglang overwrote them
-# Also create constraints file to prevent future pip installs from upgrading torch
-RUN echo "=== Restoring PyTorch 2.4.0 stack ===" && \
-    pip install --no-cache-dir --force-reinstall \
-    torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
-    --index-url https://download.pytorch.org/whl/cu124 && \
-    echo "torch==2.4.0" > /tmp/torch-constraints.txt && \
-    echo "torchvision==0.19.0" >> /tmp/torch-constraints.txt && \
-    echo "torchaudio==2.4.0" >> /tmp/torch-constraints.txt && \
-    echo "numpy<2.0.0" >> /tmp/torch-constraints.txt && \
-    python -c "import torch; print(f'✓ PyTorch {torch.__version__}')" && \
-    python -c "import torchvision; print(f'✓ torchvision {torchvision.__version__}')" && \
-    echo "✓ Torch constraints file created at /tmp/torch-constraints.txt"
-
-# CRITICAL: Downgrade numpy to <2.0.0 for vllm 0.6.3.post1 compatibility
-# PyTorch 2.4.0 pulls in numpy 2.x but vllm requires numpy<2.0.0
-RUN pip install --no-cache-dir "numpy>=1.24,<2.0.0" && \
-    python -c "import numpy; print(f'✓ numpy {numpy.__version__}')"
+# Verify PyTorch 2.4.0 stack is intact after inference engines
+# Using --no-deps above should prevent overwrites, but verify anyway
+RUN echo "=== Verifying PyTorch 2.4.0 stack ===" && \
+    python -c "import torch; assert torch.__version__.startswith('2.4'), f'Wrong torch: {torch.__version__}'; print(f'✓ PyTorch {torch.__version__}')" && \
+    pip install --no-cache-dir "numpy>=1.24,<2.0.0" "pillow>=8.0,<12.0" "fsspec>=2023.1.0,<=2025.3.0" && \
+    python -c "import numpy; print(f'✓ numpy {numpy.__version__}')" && \
+    python -c "import PIL; print(f'✓ Pillow {PIL.__version__}')" && \
+    python -c "import fsspec; print(f'✓ fsspec {fsspec.__version__}')"
 
 # CRITICAL: Uninstall torchao (sglang installs it, incompatible with torch 2.4.0)
 # Then reinstall transformers/peft/trl with ms-swift compatible versions
@@ -531,12 +531,22 @@ RUN echo "=== Installing training utilities (ms-swift compatible) ===" && \
     importlib_metadata jieba json_repair "modelscope>=1.23" nltk openai oss2 \
     rouge "simplejson>=3.3.0" "sortedcontainers>=1.5.9" \
     transformers_stream_generator zstandard && \
+    pip uninstall -y vllm sglang torchao 2>/dev/null || true && \
     echo "✓ Training utilities installed"
 
+# CRITICAL: Remove vllm/sglang/torchao that may have been pulled in as dependencies
+# These packages require torch 2.8+ and break our torch 2.4.0 stack
+RUN pip uninstall -y vllm sglang torchao 2>/dev/null || true && \
+    rm -rf /usr/local/lib/python3.11/dist-packages/vllm* || true && \
+    rm -rf /usr/local/lib/python3.11/dist-packages/sglang* || true && \
+    rm -rf /usr/local/lib/python3.11/dist-packages/torchao* || true && \
+    echo "✓ Removed incompatible packages (vllm/sglang/torchao)"
+
 # Install ms-swift additional packages for inference/training
+# NOTE: deepspeed already installed in STEP 10 with DS_BUILD_OPS=0
 RUN echo "=== Installing ms-swift additional packages ===" && \
     pip install --no-cache-dir --constraint /tmp/torch-constraints.txt \
-    auto_gptq optimum bitsandbytes timm "deepspeed<0.18" \
+    auto_gptq optimum bitsandbytes timm \
     qwen_vl_utils qwen_omni_utils decord librosa icecream soundfile \
     liger_kernel pre-commit math_verify py-spy evalscope && \
     echo "✓ ms-swift additional packages installed"
