@@ -34,9 +34,17 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Version from argument or default
-VERSION="${1:-2.0.03}"
-IMAGE_NAME="ghcr.io/apt-team-018/usf-bios"
+# Navigate to project root first (needed for version extraction)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_ROOT"
+
+# Extract version dynamically from usf_bios/version.py
+DYNAMIC_VERSION=$(python3 -c "exec(open('usf_bios/version.py').read()); print(__version__)" 2>/dev/null || echo "2.0.03")
+VERSION="${1:-$DYNAMIC_VERSION}"
+
+# Docker Hub image name
+IMAGE_NAME="arpitsh018/usf-bios"
 DOCKERFILE="web/Dockerfile.gpu"
 
 echo -e "${GREEN}"
@@ -74,8 +82,7 @@ if ! docker run --rm --gpus all nvidia/cuda:12.2.2-base-ubuntu22.04 nvidia-smi &
 fi
 echo -e "${GREEN}  ✓ nvidia-container-toolkit working${NC}"
 
-# Navigate to project root
-cd "$(dirname "$0")/.."
+# Already at project root
 echo -e "${YELLOW}[4/5] Building from: $(pwd)${NC}"
 
 # Build with GPU support and BuildKit
@@ -121,9 +128,19 @@ echo ""
 docker images "${IMAGE_NAME}:${VERSION}"
 
 echo ""
-echo -e "${YELLOW}To push to registry:${NC}"
-echo "  docker push ${IMAGE_NAME}:${VERSION}"
-echo "  docker push ${IMAGE_NAME}:latest"
+echo -e "${YELLOW}[6/6] Pushing to Docker Hub...${NC}"
+echo ""
+
+# Push to Docker Hub
+docker push ${IMAGE_NAME}:${VERSION}
+docker push ${IMAGE_NAME}:latest
+
+echo ""
+echo -e "${GREEN}============================================================================${NC}"
+echo -e "${GREEN}  ✓ PUSH COMPLETE${NC}"
+echo -e "${GREEN}  Image: ${IMAGE_NAME}:${VERSION}${NC}"
+echo -e "${GREEN}  Image: ${IMAGE_NAME}:latest${NC}"
+echo -e "${GREEN}============================================================================${NC}"
 echo ""
 echo -e "${YELLOW}To run:${NC}"
 echo "  docker run --gpus all -p 3000:3000 ${IMAGE_NAME}:${VERSION}"
