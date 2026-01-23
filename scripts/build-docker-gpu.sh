@@ -127,8 +127,87 @@ echo ""
 # Show image info
 docker images "${IMAGE_NAME}:${VERSION}"
 
+# ============================================================================
+# EXTRACT ALL VERSIONS FROM BUILT IMAGE
+# ============================================================================
 echo ""
-echo -e "${YELLOW}[6/6] Pushing to Docker Hub...${NC}"
+echo -e "${YELLOW}[6/8] Extracting complete version report from image...${NC}"
+echo ""
+
+VERSION_DIR="${PROJECT_ROOT}/docs/versions"
+mkdir -p "${VERSION_DIR}"
+
+# Extract version reports from the built image
+CONTAINER_ID=$(docker create ${IMAGE_NAME}:${VERSION})
+docker cp ${CONTAINER_ID}:/app/data/version_report.json "${VERSION_DIR}/version_report_v${VERSION}.json" 2>/dev/null || echo "JSON report not found"
+docker cp ${CONTAINER_ID}:/app/data/version_report.txt "${VERSION_DIR}/version_report_v${VERSION}.txt" 2>/dev/null || echo "TXT report not found"
+docker rm ${CONTAINER_ID} > /dev/null
+
+# Also run pip freeze directly to get exact versions
+echo -e "${YELLOW}[7/8] Running pip freeze to capture exact versions...${NC}"
+docker run --rm ${IMAGE_NAME}:${VERSION} pip freeze > "${VERSION_DIR}/pip_freeze_v${VERSION}.txt" 2>/dev/null
+
+# Get dpkg list for Linux packages
+docker run --rm ${IMAGE_NAME}:${VERSION} dpkg-query -W -f='${Package}=${Version}\n' > "${VERSION_DIR}/dpkg_list_v${VERSION}.txt" 2>/dev/null
+
+# Get detailed system info
+docker run --rm ${IMAGE_NAME}:${VERSION} bash -c "
+echo '# USF BIOS v${VERSION} - Complete System Information'
+echo '# Generated: $(date)'
+echo ''
+echo '================== SYSTEM =================='
+uname -a
+echo ''
+cat /etc/os-release
+echo ''
+echo '================== PYTHON =================='
+python --version
+pip --version
+echo ''
+echo '================== CUDA =================='
+nvcc --version 2>/dev/null || echo 'nvcc not in PATH'
+echo ''
+echo '================== NODE.JS =================='
+node --version
+npm --version
+echo ''
+echo '================== GCC =================='
+gcc --version | head -1
+echo ''
+echo '================== KEY ML PACKAGES =================='
+python -c \"
+import torch
+print(f'torch=={torch.__version__}')
+print(f'cuda_available={torch.cuda.is_available()}')
+print(f'cuda_version={torch.version.cuda}')
+\"
+python -c \"import transformers; print(f'transformers=={transformers.__version__}')\"
+python -c \"import peft; print(f'peft=={peft.__version__}')\"
+python -c \"import trl; print(f'trl=={trl.__version__}')\"
+python -c \"import accelerate; print(f'accelerate=={accelerate.__version__}')\"
+python -c \"import deepspeed; print(f'deepspeed=={deepspeed.__version__}')\"
+python -c \"import flash_attn; print(f'flash_attn=={flash_attn.__version__}')\"
+python -c \"import xformers; print(f'xformers=={xformers.__version__}')\"
+python -c \"import bitsandbytes; print(f'bitsandbytes=={bitsandbytes.__version__}')\"
+python -c \"import datasets; print(f'datasets=={datasets.__version__}')\"
+python -c \"import numpy; print(f'numpy=={numpy.__version__}')\"
+python -c \"import usf_bios; print(f'usf_bios=={usf_bios.__version__}')\"
+echo ''
+echo '================== PIP PACKAGE COUNT =================='
+pip list | wc -l
+" > "${VERSION_DIR}/system_info_v${VERSION}.txt" 2>/dev/null
+
+echo ""
+echo -e "${GREEN}============================================================================${NC}"
+echo -e "${GREEN}  ✓ VERSION REPORTS EXTRACTED${NC}"
+echo -e "${GREEN}  Location: ${VERSION_DIR}/${NC}"
+echo -e "${GREEN}  Files:${NC}"
+ls -la "${VERSION_DIR}"/*v${VERSION}* 2>/dev/null | awk '{print "    " $NF}'
+echo -e "${GREEN}============================================================================${NC}"
+echo ""
+
+echo ""
+echo -e "${YELLOW}[8/8] Pushing to Docker Hub...${NC}"
 echo ""
 
 # Push to Docker Hub
@@ -141,6 +220,13 @@ echo -e "${GREEN}  ✓ PUSH COMPLETE${NC}"
 echo -e "${GREEN}  Image: ${IMAGE_NAME}:${VERSION}${NC}"
 echo -e "${GREEN}  Image: ${IMAGE_NAME}:latest${NC}"
 echo -e "${GREEN}============================================================================${NC}"
+echo ""
+echo -e "${GREEN}  Version reports saved to:${NC}"
+echo "    ${VERSION_DIR}/version_report_v${VERSION}.json"
+echo "    ${VERSION_DIR}/version_report_v${VERSION}.txt"
+echo "    ${VERSION_DIR}/pip_freeze_v${VERSION}.txt"
+echo "    ${VERSION_DIR}/dpkg_list_v${VERSION}.txt"
+echo "    ${VERSION_DIR}/system_info_v${VERSION}.txt"
 echo ""
 echo -e "${YELLOW}To run:${NC}"
 echo "  docker run --gpus all -p 3000:3000 ${IMAGE_NAME}:${VERSION}"

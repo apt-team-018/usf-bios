@@ -728,6 +728,14 @@ COPY keys/usf_bios_public.pem /app/keys/usf_bios_public.pem
 RUN pip install --no-cache-dir cryptography
 
 # ============================================================================
+# CAPTURE ALL VERSIONS - Complete environment documentation
+# This creates a comprehensive record of ALL installed packages
+# ============================================================================
+COPY scripts/capture_versions.py /app/scripts/capture_versions.py
+RUN python /app/scripts/capture_versions.py -o /app/data/version_report.json && \
+    echo "✓ Version report generated at /app/data/version_report.json"
+
+# ============================================================================
 # COMPREHENSIVE PERMISSIONS SETUP
 # This section sets up ALL permissions correctly for:
 # - Frontend (Next.js): needs write access for .next cache, static files

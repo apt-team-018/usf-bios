@@ -1,0 +1,209 @@
+# ============================================================================
+# USF BIOS v2.0.06 - Docker Image Requirements Documentation
+# Generated: 2026-01-24
+# Base Image: nvidia/cuda:12.4.0-devel-ubuntu22.04
+# Python: 3.11
+# Node.js: 20.20.0
+# ============================================================================
+
+# ============================================================================
+# CORE ML STACK (PyTorch + CUDA)
+# ============================================================================
+torch==2.4.0+cu124
+torchvision==0.19.0+cu124
+torchaudio==2.4.0+cu124
+triton>=3.0.0,<=3.4.0
+
+# NVIDIA CUDA Libraries (bundled with PyTorch)
+nvidia-cuda-nvrtc-cu12==12.4.99
+nvidia-cuda-runtime-cu12==12.4.99
+nvidia-cuda-cupti-cu12==12.4.99
+nvidia-cudnn-cu12==9.1.0.70
+nvidia-cublas-cu12==12.4.2.65
+nvidia-cufft-cu12==11.2.0.44
+nvidia-curand-cu12==10.3.5.119
+nvidia-cusolver-cu12==11.6.0.99
+nvidia-cusparse-cu12==12.3.0.142
+nvidia-nccl-cu12==2.20.5
+nvidia-nvtx-cu12==12.4.99
+nvidia-nvjitlink-cu12==12.4.99
+
+# ============================================================================
+# TRANSFORMERS ECOSYSTEM (ms-swift 3.12 compatible)
+# ============================================================================
+transformers>=4.33,<4.58
+peft>=0.11,<0.19
+trl>=0.15,<0.25
+accelerate>=0.25.0
+datasets>=3.0,<4.0
+huggingface-hub>=0.24
+tokenizers
+safetensors
+sentencepiece
+tiktoken
+
+# ============================================================================
+# ATTENTION & OPTIMIZATION
+# ============================================================================
+flash-attn==2.6.3
+xformers==0.0.27.post2
+bitsandbytes
+deepspeed
+auto_gptq
+optimum
+liger-kernel
+
+# ============================================================================
+# DATA PROCESSING
+# ============================================================================
+numpy>=1.24,<2.0.0
+pillow>=8.0,<12.0
+pandas
+scipy
+scikit-learn
+fsspec>=2023.1.0,<=2025.3.0
+numba
+
+# ============================================================================
+# TRAINING & MONITORING
+# ============================================================================
+tensorboard
+wandb
+swanlab
+mlflow
+ray[tune]
+optuna
+evaluate
+rich>=13.0
+tqdm
+
+# ============================================================================
+# WEB FRAMEWORK (Backend)
+# ============================================================================
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+websockets>=12.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+aiofiles>=23.0.0
+aiohttp
+
+# ============================================================================
+# DATABASE
+# ============================================================================
+sqlalchemy>=2.0.0
+aiosqlite>=0.19.0
+
+# ============================================================================
+# SECURITY & ENCRYPTION
+# ============================================================================
+cryptography>=41.0.0
+
+# ============================================================================
+# SYSTEM METRICS
+# ============================================================================
+nvidia-ml-py>=12.0.0
+nvitop
+psutil>=5.9.0
+
+# ============================================================================
+# UI & VISUALIZATION
+# ============================================================================
+gradio>=3.40.0,<6.0
+matplotlib
+
+# ============================================================================
+# MODEL ECOSYSTEM
+# ============================================================================
+modelscope>=1.23
+timm
+einops
+
+# ============================================================================
+# MULTIMODAL SUPPORT
+# ============================================================================
+qwen_vl_utils
+qwen_omni_utils
+decord
+librosa
+soundfile
+openai-whisper
+
+# ============================================================================
+# NLP UTILITIES
+# ============================================================================
+nltk
+jieba
+rouge
+
+# ============================================================================
+# CONFIGURATION & UTILITIES
+# ============================================================================
+PyYAML
+omegaconf
+addict
+attrdict
+dacite
+binpacking
+zstandard
+json_repair
+simplejson>=3.3.0
+sortedcontainers>=1.5.9
+charset_normalizer
+importlib_metadata
+transformers_stream_generator
+
+# ============================================================================
+# API CLIENTS
+# ============================================================================
+openai
+oss2
+requests
+
+# ============================================================================
+# DEVELOPMENT & TESTING
+# ============================================================================
+pre-commit
+icecream
+py-spy
+evalscope
+
+# ============================================================================
+# OTHER DEPENDENCIES
+# ============================================================================
+cpm_kernels
+filelock
+typing-extensions>=4.8.0
+sympy
+networkx
+jinja2
+packaging
+wheel
+setuptools
+ninja
+
+# ============================================================================
+# FRONTEND (Node.js)
+# ============================================================================
+# Node.js: 20.20.0
+# npm: 10.8.2
+# Next.js: (see web/frontend/package.json)
+
+# ============================================================================
+# EXCLUDED PACKAGES (Incompatible with torch 2.4.0)
+# ============================================================================
+# torchao - requires torch>=2.8
+# vllm - requires torch>=2.8
+# sglang - requires torch>=2.8
+# unsloth - requires torchao>=0.13.0
+# lmdeploy - conflicts with peft requirements
+
+# ============================================================================
+# NOTES
+# ============================================================================
+# 1. This image is based on ms-swift 3.12 compatible versions
+# 2. PyTorch 2.4.0 is pinned for CUDA 12.4 compatibility
+# 3. numpy<2.0.0 required for megatron-core/numba compatibility
+# 4. Custom model architectures (e.g., usf_omega) require trust_remote_code=True
+# 5. Flash Attention 2.6.3 pre-built for CUDA 12.4 + PyTorch 2.4.0
