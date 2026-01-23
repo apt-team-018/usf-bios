@@ -718,30 +718,19 @@ COPY keys/usf_bios_public.pem /app/keys/usf_bios_public.pem
 # Install cryptography for RSA encryption
 RUN pip install --no-cache-dir cryptography
 
-# Security: Make source directories read-only (but NOT data dirs)
-RUN chmod -R 555 /app/usf_bios /app/web
+# ============================================================================
+# COMPREHENSIVE PERMISSIONS SETUP
+# This section sets up ALL permissions correctly for:
+# - Frontend (Next.js): needs write access for .next cache, static files
+# - Backend (FastAPI): needs write access for data, db, logs
+# - Training (usf_bios): needs write access for checkpoints, models, cache
+# ============================================================================
 
-# Copy and setup entrypoint script AFTER chmod (to preserve execute permission)
+# Copy entrypoint script first (before any permission changes)
 COPY web/entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh && \
-    ls -la /app/entrypoint.sh && \
-    echo "✓ entrypoint.sh is executable"
 
 # ============================================================================
 # CREATE ALL DIRECTORIES with proper permissions
-# Comprehensive list for all ML training scenarios:
-# - Data: uploads, datasets, outputs, checkpoints, logs, models, db
-# - HuggingFace: transformers, datasets, hub
-# - ModelScope: Chinese models support
-# - PyTorch: hub, kernels, extensions
-# - Triton: GPU kernels for FlashAttention, fused ops
-# - DeepSpeed: distributed training, ZeRO optimization
-# - Numba: JIT compilation for data processing
-# - XFormers: memory-efficient attention
-# - Matplotlib/Fontconfig: training plots
-# - Gradio: UI components
-# - W&B: experiment tracking
-# - Ray: distributed training
 # ============================================================================
 RUN mkdir -p \
     /app/data/uploads \
@@ -786,9 +775,49 @@ RUN mkdir -p \
     /app/.cache/cuda \
     /app/.local \
     /app/.local/share \
-    /app/tmp && \
-    chown -R usf:usf /app/data /app/web/backend/data /app/web/frontend /app/.cache /app/.triton /app/.deepspeed /app/.local /app/tmp && \
-    chmod -R 755 /app/data /app/web/backend/data /app/web/frontend /app/.cache /app/.triton /app/.deepspeed /app/.local /app/tmp
+    /app/tmp
+
+# ============================================================================
+# SET OWNERSHIP: usf user owns all writable directories
+# ============================================================================
+RUN chown -R usf:usf \
+    /app/data \
+    /app/web/backend/data \
+    /app/web/frontend \
+    /app/.cache \
+    /app/.triton \
+    /app/.deepspeed \
+    /app/.local \
+    /app/tmp \
+    /app/entrypoint.sh \
+    /app/external_repos \
+    /app/keys
+
+# ============================================================================
+# SET PERMISSIONS:
+# - Source code: read+execute (555) - protected from modification
+# - Data/cache dirs: read+write+execute (755) - usf user can write
+# - Entrypoint: executable (755)
+# ============================================================================
+RUN chmod -R 555 /app/usf_bios && \
+    chmod -R 755 /app/web && \
+    chmod -R 755 /app/data && \
+    chmod -R 755 /app/.cache && \
+    chmod -R 755 /app/.triton && \
+    chmod -R 755 /app/.deepspeed && \
+    chmod -R 755 /app/.local && \
+    chmod -R 755 /app/tmp && \
+    chmod -R 755 /app/external_repos && \
+    chmod 755 /app/entrypoint.sh && \
+    chmod 755 /app/keys && \
+    chmod 644 /app/keys/*.pem
+
+# Verify permissions
+RUN echo "=== Verifying Permissions ===" && \
+    ls -la /app/entrypoint.sh && \
+    ls -la /app/web/ && \
+    ls -la /app/data/ && \
+    echo "✓ All permissions configured"
 
 # Switch to non-root user
 USER usf
