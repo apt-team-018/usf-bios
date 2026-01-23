@@ -261,44 +261,7 @@ echo -e "${GREEN}  ✓ System information captured${NC}"
 # 6. CUDA DETAILED INFO
 # ============================================================================
 echo -e "${YELLOW}[6/10] Extracting CUDA detailed info...${NC}"
-docker run --rm --gpus all --entrypoint bash ${IMAGE_NAME} -c '
-echo "================================================================================"
-echo "USF BIOS - CUDA Detailed Information"
-echo "================================================================================"
-echo ""
-
-echo "==================== nvidia-smi ===================="
-nvidia-smi 2>/dev/null || echo "nvidia-smi not available (no GPU access in this container)"
-echo ""
-
-echo "==================== nvidia-smi -L ===================="
-nvidia-smi -L 2>/dev/null || echo "N/A"
-echo ""
-
-echo "==================== CUDA Device Query ===================="
-python -c "
-import torch
-if torch.cuda.is_available():
-    print(f'CUDA Available: True')
-    print(f'CUDA Version: {torch.version.cuda}')
-    print(f'cuDNN Version: {torch.backends.cudnn.version()}')
-    print(f'Device Count: {torch.cuda.device_count()}')
-    for i in range(torch.cuda.device_count()):
-        print(f'')
-        print(f'Device {i}: {torch.cuda.get_device_name(i)}')
-        props = torch.cuda.get_device_properties(i)
-        print(f'  Total Memory: {props.total_memory / 1024**3:.2f} GB')
-        print(f'  Multi Processor Count: {props.multi_processor_count}')
-        print(f'  Compute Capability: {props.major}.{props.minor}')
-else:
-    print('CUDA Available: False')
-" 2>/dev/null || echo "Could not query CUDA devices"
-echo ""
-
-echo "================================================================================"
-echo "END OF CUDA INFORMATION"
-echo "================================================================================"
-' > "${OUTPUT_PREFIX}_cuda_info.txt" 2>&1 || true
+docker run --rm --gpus all --entrypoint bash ${IMAGE_NAME} -c 'echo "================================================================================"; echo "USF BIOS - CUDA Detailed Information"; echo "================================================================================"; nvidia-smi 2>/dev/null || echo "nvidia-smi not available"; nvcc --version 2>/dev/null || echo "nvcc not in PATH"; python -c "import torch; print(\"torch.cuda.is_available:\", torch.cuda.is_available()); print(\"CUDA version:\", torch.version.cuda)" 2>/dev/null || echo "Could not query CUDA"; echo "================================================================================"' > "${OUTPUT_PREFIX}_cuda_info.txt" 2>&1 || true
 echo -e "${GREEN}  ✓ CUDA info captured${NC}"
 
 # ============================================================================
