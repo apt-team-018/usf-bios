@@ -533,7 +533,7 @@ RUN echo "=== Installing triton with torch constraint ===" && \
 RUN echo "=== Verifying PyTorch stack ===" && \
     python -c "import torch; assert torch.__version__.startswith('2.4.0'), f'ERROR: torch is {torch.__version__}, expected 2.4.0'; print(f'✓ PyTorch {torch.__version__}')" && \
     python -c "import torchvision; print(f'✓ torchvision {torchvision.__version__}')" && \
-    python -c "import accelerate, trl; print('✓ Training utilities OK (peft verified after fix step)'")
+    python -c "import accelerate, trl; print('Training utilities OK - peft verified after fix step')"
 
 # ============================================================================
 # OPTIONAL PACKAGES - Pre-install to prevent runtime installation
