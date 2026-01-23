@@ -64,22 +64,25 @@ echo -e "${GREEN}  ✓ ${APT_COUNT} apt packages captured${NC}"
 # 4. KEY ML FRAMEWORK VERSIONS (Detailed)
 # ============================================================================
 echo -e "${YELLOW}[4/10] Extracting ML framework versions...${NC}"
-docker run --rm --entrypoint python ${IMAGE_NAME} -c '
+docker run --rm --entrypoint python ${IMAGE_NAME} << 'PYTHON_SCRIPT' > "${OUTPUT_PREFIX}_ml_frameworks.txt"
 import sys
 print("=" * 80)
 print("USF BIOS - ML Framework Versions (Detailed)")
 print("=" * 80)
 print()
 
-def get_version(module_name):
+# Helper function
+def get_version(module_name, attr='__version__'):
     try:
         mod = __import__(module_name)
-        return getattr(mod, "__version__", "installed")
+        return getattr(mod, attr, 'installed (version unknown)')
     except ImportError:
-        return "NOT INSTALLED"
+        return 'NOT INSTALLED'
     except Exception as e:
-        return f"ERROR: {e}"
+        return f'ERROR: {e}'
 
+# PyTorch ecosystem
+print("=" * 40)
 print("PYTORCH ECOSYSTEM")
 print("=" * 40)
 try:
@@ -87,58 +90,135 @@ try:
     print(f"torch=={torch.__version__}")
     print(f"  CUDA available: {torch.cuda.is_available()}")
     print(f"  CUDA version: {torch.version.cuda}")
+    print(f"  cuDNN version: {torch.backends.cudnn.version()}")
+    print(f"  Device count: {torch.cuda.device_count()}")
+    if torch.cuda.is_available():
+        print(f"  GPU 0: {torch.cuda.get_device_name(0)}")
 except Exception as e:
     print(f"torch: ERROR - {e}")
-print(f"torchvision=={get_version(\"torchvision\")}")
-print(f"torchaudio=={get_version(\"torchaudio\")}")
-print(f"triton=={get_version(\"triton\")}")
+
+print(f"torchvision=={get_version('torchvision')}")
+print(f"torchaudio=={get_version('torchaudio')}")
+print(f"triton=={get_version('triton')}")
 print()
 
+# Transformers ecosystem
+print("=" * 40)
 print("TRANSFORMERS ECOSYSTEM")
 print("=" * 40)
-print(f"transformers=={get_version(\"transformers\")}")
-print(f"peft=={get_version(\"peft\")}")
-print(f"trl=={get_version(\"trl\")}")
-print(f"accelerate=={get_version(\"accelerate\")}")
-print(f"datasets=={get_version(\"datasets\")}")
-print(f"huggingface_hub=={get_version(\"huggingface_hub\")}")
-print(f"tokenizers=={get_version(\"tokenizers\")}")
-print(f"safetensors=={get_version(\"safetensors\")}")
+print(f"transformers=={get_version('transformers')}")
+print(f"peft=={get_version('peft')}")
+print(f"trl=={get_version('trl')}")
+print(f"accelerate=={get_version('accelerate')}")
+print(f"datasets=={get_version('datasets')}")
+print(f"huggingface_hub=={get_version('huggingface_hub')}")
+print(f"tokenizers=={get_version('tokenizers')}")
+print(f"safetensors=={get_version('safetensors')}")
+print(f"sentencepiece=={get_version('sentencepiece')}")
+print(f"tiktoken=={get_version('tiktoken')}")
 print()
 
+# Attention & Optimization
+print("=" * 40)
 print("ATTENTION & OPTIMIZATION")
 print("=" * 40)
-print(f"flash_attn=={get_version(\"flash_attn\")}")
-print(f"xformers=={get_version(\"xformers\")}")
-print(f"bitsandbytes=={get_version(\"bitsandbytes\")}")
-print(f"deepspeed=={get_version(\"deepspeed\")}")
-print(f"auto_gptq=={get_version(\"auto_gptq\")}")
-print(f"optimum=={get_version(\"optimum\")}")
+print(f"flash_attn=={get_version('flash_attn')}")
+print(f"xformers=={get_version('xformers')}")
+print(f"bitsandbytes=={get_version('bitsandbytes')}")
+print(f"deepspeed=={get_version('deepspeed')}")
+print(f"auto_gptq=={get_version('auto_gptq')}")
+print(f"optimum=={get_version('optimum')}")
+print(f"liger_kernel=={get_version('liger_kernel')}")
 print()
 
+# Inference Engines (optional)
+print("=" * 40)
 print("INFERENCE ENGINES (Optional)")
 print("=" * 40)
-print(f"vllm=={get_version(\"vllm\")}")
-print(f"sglang=={get_version(\"sglang\")}")
-print(f"lmdeploy=={get_version(\"lmdeploy\")}")
+print(f"vllm=={get_version('vllm')}")
+print(f"sglang=={get_version('sglang')}")
+print(f"lmdeploy=={get_version('lmdeploy')}")
 print()
 
+# Data Processing
+print("=" * 40)
 print("DATA PROCESSING")
 print("=" * 40)
-print(f"numpy=={get_version(\"numpy\")}")
-print(f"pandas=={get_version(\"pandas\")}")
-print(f"scipy=={get_version(\"scipy\")}")
-print(f"pillow=={get_version(\"PIL\")}")
+print(f"numpy=={get_version('numpy')}")
+print(f"pandas=={get_version('pandas')}")
+print(f"pillow=={get_version('PIL', 'VERSION')}")
+try:
+    import PIL
+    print(f"  (PIL.__version__={PIL.__version__})")
+except:
+    pass
+print(f"scipy=={get_version('scipy')}")
+print(f"scikit-learn=={get_version('sklearn', '__version__')}")
+print(f"fsspec=={get_version('fsspec')}")
+print(f"numba=={get_version('numba')}")
 print()
 
+# Training & Monitoring
+print("=" * 40)
+print("TRAINING & MONITORING")
+print("=" * 40)
+print(f"tensorboard=={get_version('tensorboard')}")
+print(f"wandb=={get_version('wandb')}")
+print(f"swanlab=={get_version('swanlab')}")
+print(f"mlflow=={get_version('mlflow')}")
+print(f"ray=={get_version('ray')}")
+print(f"optuna=={get_version('optuna')}")
+print(f"evaluate=={get_version('evaluate')}")
+print()
+
+# Multimodal
+print("=" * 40)
+print("MULTIMODAL SUPPORT")
+print("=" * 40)
+print(f"timm=={get_version('timm')}")
+print(f"qwen_vl_utils=={get_version('qwen_vl_utils')}")
+print(f"qwen_omni_utils=={get_version('qwen_omni_utils')}")
+print(f"decord=={get_version('decord')}")
+print(f"librosa=={get_version('librosa')}")
+print(f"soundfile=={get_version('soundfile')}")
+print(f"openai_whisper=={get_version('whisper')}")
+print()
+
+# Web Framework
+print("=" * 40)
+print("WEB FRAMEWORK")
+print("=" * 40)
+print(f"fastapi=={get_version('fastapi')}")
+print(f"uvicorn=={get_version('uvicorn')}")
+print(f"gradio=={get_version('gradio')}")
+print(f"pydantic=={get_version('pydantic')}")
+print(f"websockets=={get_version('websockets')}")
+print(f"aiohttp=={get_version('aiohttp')}")
+print()
+
+# Utilities
+print("=" * 40)
+print("UTILITIES")
+print("=" * 40)
+print(f"einops=={get_version('einops')}")
+print(f"rich=={get_version('rich')}")
+print(f"tqdm=={get_version('tqdm')}")
+print(f"pyyaml=={get_version('yaml')}")
+print(f"omegaconf=={get_version('omegaconf')}")
+print(f"cryptography=={get_version('cryptography')}")
+print()
+
+# USF BIOS
+print("=" * 40)
 print("USF BIOS")
 print("=" * 40)
-print(f"usf_bios=={get_version(\"usf_bios\")}")
+print(f"usf_bios=={get_version('usf_bios')}")
+
 print()
 print("=" * 80)
 print("END OF ML FRAMEWORK VERSIONS")
 print("=" * 80)
-' > "${OUTPUT_PREFIX}_ml_frameworks.txt" 2>&1
+PYTHON_SCRIPT
 echo -e "${GREEN}  ✓ ML framework versions captured${NC}"
 
 # ============================================================================
@@ -181,7 +261,7 @@ echo -e "${GREEN}  ✓ System information captured${NC}"
 # 6. CUDA DETAILED INFO
 # ============================================================================
 echo -e "${YELLOW}[6/10] Extracting CUDA detailed info...${NC}"
-docker run --rm --gpus all --entrypoint bash ${IMAGE_NAME} -c 'echo "================================================================================"; echo "USF BIOS - CUDA Detailed Information"; echo "================================================================================"; nvidia-smi 2>/dev/null || echo "nvidia-smi not available"; nvcc --version 2>/dev/null || echo "nvcc not in PATH"; python -c "import torch; print(\"torch.cuda.is_available:\", torch.cuda.is_available()); print(\"CUDA version:\", torch.version.cuda)" 2>/dev/null || echo "Could not query CUDA"; echo "================================================================================"' > "${OUTPUT_PREFIX}_cuda_info.txt" 2>&1 || true
+docker run --rm --gpus all --entrypoint bash ${IMAGE_NAME} -c 'echo "================================================================================"; echo "USF BIOS - CUDA Detailed Information"; echo "================================================================================"; nvidia-smi 2>/dev/null || echo "nvidia-smi not available"; nvcc --version 2>/dev/null || echo "nvcc not in PATH"; echo "================================================================================"' > "${OUTPUT_PREFIX}_cuda_info.txt" 2>&1 || true
 echo -e "${GREEN}  ✓ CUDA info captured${NC}"
 
 # ============================================================================
