@@ -225,88 +225,43 @@ echo -e "${GREEN}  ✓ ML framework versions captured${NC}"
 # 5. SYSTEM INFORMATION
 # ============================================================================
 echo -e "${YELLOW}[5/10] Extracting system information...${NC}"
-docker run --rm --entrypoint bash ${IMAGE_NAME} << 'BASH_SCRIPT' > "${OUTPUT_PREFIX}_system_info.txt"
+docker run --rm --entrypoint bash ${IMAGE_NAME} -c '
 echo "================================================================================"
 echo "USF BIOS - Complete System Information"
 echo "Generated: $(date)"
 echo "================================================================================"
 echo ""
-
 echo "==================== OPERATING SYSTEM ===================="
 uname -a
 echo ""
 cat /etc/os-release
 echo ""
-
-echo "==================== CPU INFO ===================="
-cat /proc/cpuinfo | grep "model name" | head -1
-cat /proc/cpuinfo | grep "cpu cores" | head -1
-echo ""
-
-echo "==================== MEMORY ===================="
-free -h
-echo ""
-
-echo "==================== DISK ===================="
-df -h / 2>/dev/null || echo "N/A"
-echo ""
-
 echo "==================== PYTHON ===================="
 python --version
-python3 --version 2>/dev/null || true
 pip --version
 which python
 echo ""
-
 echo "==================== CUDA TOOLKIT ===================="
 nvcc --version 2>/dev/null || echo "nvcc not in PATH"
 echo ""
-
-echo "==================== NVIDIA DRIVER ===================="
-cat /proc/driver/nvidia/version 2>/dev/null || echo "No NVIDIA driver info"
-echo ""
-
-echo "==================== CUDA LIBRARIES ===================="
-ls -la /usr/local/cuda/lib64/*.so* 2>/dev/null | head -20 || echo "No CUDA libs found"
-echo ""
-
-echo "==================== cuDNN ===================="
-cat /usr/include/cudnn_version.h 2>/dev/null | grep -E "CUDNN_MAJOR|CUDNN_MINOR|CUDNN_PATCHLEVEL" | head -3 || echo "cuDNN header not found"
-echo ""
-
 echo "==================== NODE.JS ===================="
 node --version 2>/dev/null || echo "Node.js not installed"
 npm --version 2>/dev/null || echo "npm not installed"
 echo ""
-
 echo "==================== BUILD TOOLS ===================="
 gcc --version 2>/dev/null | head -1 || echo "gcc not installed"
-g++ --version 2>/dev/null | head -1 || echo "g++ not installed"
-cmake --version 2>/dev/null | head -1 || echo "cmake not installed"
 ninja --version 2>/dev/null || echo "ninja not installed"
-make --version 2>/dev/null | head -1 || echo "make not installed"
 git --version 2>/dev/null || echo "git not installed"
 echo ""
-
-echo "==================== ENVIRONMENT VARIABLES ===================="
-echo "CUDA_HOME=${CUDA_HOME:-not set}"
-echo "CUDA_PATH=${CUDA_PATH:-not set}"
-echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-not set}"
-echo "HF_HOME=${HF_HOME:-not set}"
-echo "TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE:-not set}"
-echo ""
-
 echo "================================================================================"
-echo "END OF SYSTEM INFORMATION"
-echo "================================================================================"
-BASH_SCRIPT
+' > "${OUTPUT_PREFIX}_system_info.txt"
 echo -e "${GREEN}  ✓ System information captured${NC}"
 
 # ============================================================================
 # 6. CUDA DETAILED INFO
 # ============================================================================
 echo -e "${YELLOW}[6/10] Extracting CUDA detailed info...${NC}"
-docker run --rm --gpus all --entrypoint bash ${IMAGE_NAME} << 'BASH_SCRIPT' > "${OUTPUT_PREFIX}_cuda_info.txt" 2>&1 || true
+docker run --rm --gpus all --entrypoint bash ${IMAGE_NAME} -c '
 echo "================================================================================"
 echo "USF BIOS - CUDA Detailed Information"
 echo "================================================================================"
@@ -343,64 +298,47 @@ echo ""
 echo "================================================================================"
 echo "END OF CUDA INFORMATION"
 echo "================================================================================"
-BASH_SCRIPT
+' > "${OUTPUT_PREFIX}_cuda_info.txt" 2>&1 || true
 echo -e "${GREEN}  ✓ CUDA info captured${NC}"
 
 # ============================================================================
 # 7. INSTALLED SHARED LIBRARIES (.so files)
 # ============================================================================
 echo -e "${YELLOW}[7/10] Extracting shared libraries info...${NC}"
-docker run --rm --entrypoint bash ${IMAGE_NAME} << 'BASH_SCRIPT' > "${OUTPUT_PREFIX}_shared_libs.txt"
+docker run --rm --entrypoint bash ${IMAGE_NAME} -c '
 echo "================================================================================"
 echo "USF BIOS - Installed Shared Libraries"
 echo "================================================================================"
 echo ""
-
 echo "==================== Python Site-Packages .so Files ===================="
 find /usr/local/lib/python3.11/dist-packages -name "*.so" 2>/dev/null | head -100
 echo ""
 echo "Total .so files in site-packages:"
 find /usr/local/lib/python3.11/dist-packages -name "*.so" 2>/dev/null | wc -l
 echo ""
-
 echo "==================== CUDA Libraries ===================="
 ls -la /usr/local/cuda/lib64/*.so* 2>/dev/null | head -50 || echo "No CUDA libs"
 echo ""
-
 echo "================================================================================"
-BASH_SCRIPT
+' > "${OUTPUT_PREFIX}_shared_libs.txt"
 echo -e "${GREEN}  ✓ Shared libraries captured${NC}"
 
 # ============================================================================
 # 8. EXTERNAL REPOS (Pre-cloned)
 # ============================================================================
 echo -e "${YELLOW}[8/10] Extracting external repos info...${NC}"
-docker run --rm --entrypoint bash ${IMAGE_NAME} << 'BASH_SCRIPT' > "${OUTPUT_PREFIX}_external_repos.txt"
+docker run --rm --entrypoint bash ${IMAGE_NAME} -c '
 echo "================================================================================"
 echo "USF BIOS - Pre-cloned External Repositories"
 echo "================================================================================"
 echo ""
-
 if [ -d /app/external_repos ]; then
-    for repo in /app/external_repos/*/; do
-        if [ -d "$repo" ]; then
-            repo_name=$(basename "$repo")
-            echo "Repository: $repo_name"
-            if [ -d "$repo/.git" ]; then
-                cd "$repo"
-                echo "  Branch: $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown')"
-                echo "  Commit: $(git rev-parse HEAD 2>/dev/null || echo 'unknown')"
-                echo "  Date: $(git log -1 --format=%cd 2>/dev/null || echo 'unknown')"
-            fi
-            echo ""
-        fi
-    done
+    ls -la /app/external_repos/ 2>/dev/null
 else
     echo "No external repos directory found"
 fi
-
 echo "================================================================================"
-BASH_SCRIPT
+' > "${OUTPUT_PREFIX}_external_repos.txt"
 echo -e "${GREEN}  ✓ External repos captured${NC}"
 
 # ============================================================================
