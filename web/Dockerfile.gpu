@@ -289,17 +289,23 @@ ENV TMP=/app/tmp
 
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies (excluding nodejs - will install Node 20 separately)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
-    nodejs \
-    npm \
     build-essential \
     ninja-build \
     libaio-dev \
+    ca-certificates \
+    gnupg \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
+
+# Install Node.js 20 (required for Next.js - apt nodejs is too old)
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    node --version && npm --version && \
+    rm -rf /var/lib/apt/lists/*
 
 # ============================================================================
 # CREATE ALL CACHE DIRECTORIES DURING BUILD
