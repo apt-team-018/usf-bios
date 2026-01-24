@@ -170,6 +170,16 @@ class JobManager:
         
         return False
     
+    async def fail_job(self, job_id: str, error_message: str) -> bool:
+        """Mark a job as failed with an error message"""
+        async with self._lock:
+            if job_id in self._jobs:
+                self._jobs[job_id].status = JobStatus.FAILED
+                self._jobs[job_id].error = error_message
+                self._jobs[job_id].completed_at = datetime.now()
+                return True
+        return False
+    
     def stop_training_process_by_pid(self, pid: int) -> bool:
         """Stop a training process by its PID (fallback when job state is lost)."""
         try:
