@@ -285,7 +285,7 @@ export default function Home() {
     num_generations: 8,
     // Base parameters
     dataset_paths: [],
-    output_dir: 'output',
+    output_dir: '',  // Empty by default - backend auto-generates when locked
     num_train_epochs: 3,
     learning_rate: 0.0001,
     per_device_train_batch_size: 1,
@@ -651,6 +651,11 @@ export default function Home() {
       if (res.ok) {
         const data = await res.json()
         setOutputPathConfig(data)
+        // When output path is locked, clear any user-provided output_dir
+        // The backend will auto-generate the path using job_id
+        if (data.mode === 'locked') {
+          setConfig(prev => ({ ...prev, output_dir: '' }))
+        }
       }
     } catch (e) {
       console.error('Failed to fetch output path config:', e)
