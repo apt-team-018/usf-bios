@@ -3,7 +3,7 @@ FROM node:18-alpine
 
 LABEL maintainer="US Inc <support@us.inc>"
 LABEL description="USF BIOS Frontend UI"
-LABEL version="1.0.10"
+LABEL version="1.0.11"
 
 # Set working directory
 WORKDIR /app

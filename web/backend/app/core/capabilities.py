@@ -628,6 +628,8 @@ class SystemValidator:
         # Return models from _LOCKED_MODELS with all linked data
         # Each tuple: (source, path, display_name, model_type, architecture)
         result = []
+        if not _LOCKED_MODELS:
+            return result
         for model in _LOCKED_MODELS:
             source, path, name, model_type, architecture = model
             

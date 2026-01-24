@@ -44,8 +44,9 @@ _LOCKED_SOURCES = "local"  # LOCAL ONLY - no HuggingFace, no ModelScope
 _LOCKED_DATASET_SOURCES = "local"  # LOCAL ONLY
 
 # Architecture pattern restrictions (ALL must match)
-_LOCKED_ARCH_ENDS_WITH = "ForCausalLM"  # Architecture must end with this
-_LOCKED_ARCH_STARTS_WITH = "UsfOmega"  # Architecture must start with this
+# Set to empty string to allow any architecture
+_LOCKED_ARCH_ENDS_WITH = ""  # Allow any architecture
+_LOCKED_ARCH_STARTS_WITH = ""  # Allow any architecture
 
 # Derived values from _LOCKED_MODELS (for backward compatibility)
 _LOCKED_MODEL_PATHS = ",".join([f"LOCAL::{m[1]}" for m in _LOCKED_MODELS])
