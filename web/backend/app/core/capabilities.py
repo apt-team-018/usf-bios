@@ -510,17 +510,23 @@ class SystemValidator:
         
         # Check source compatibility
         if source_lower not in self.supported_sources_set:
+            print(f"[VALIDATE] Source '{source_lower}' not in supported sources: {self.supported_sources_set}")
             return False, "Invalid source type"
         
         # Check model path if restrictions are set
         allowed_models = self._parse_model_paths()
+        print(f"[VALIDATE] Allowed models: {allowed_models}")
+        print(f"[VALIDATE] Checking: source={source_lower}, path={model_path}")
         if allowed_models:
             # Check if this model+source combination is allowed
             for allowed_source, allowed_path in allowed_models:
+                print(f"[VALIDATE] Comparing: ({source_lower}=={allowed_source}) and ({model_path}=={allowed_path})")
                 if source_lower == allowed_source and model_path == allowed_path:
+                    print(f"[VALIDATE] Match found!")
                     return True, ""
             
             # Not in allowed list
+            print(f"[VALIDATE] No match found - model not in allowed list")
             model_names = [p for _, p in allowed_models]
             if len(model_names) == 1:
                 return False, "Invalid configuration"
