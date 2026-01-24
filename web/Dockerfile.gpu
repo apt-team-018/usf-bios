@@ -366,16 +366,19 @@ RUN echo "" && \
     echo "numpy<2.0.0" >> /tmp/torch-constraints.txt && \
     echo "pillow<12.0" >> /tmp/torch-constraints.txt && \
     echo "fsspec<=2025.3.0" >> /tmp/torch-constraints.txt && \
+    echo "transformers==4.57.6" >> /tmp/torch-constraints.txt && \
     python -c "import torch; print(f'✓ PyTorch {torch.__version__} with CUDA {torch.version.cuda}')" && \
-    echo "✓ Constraints file created at /tmp/torch-constraints.txt"
+    echo "✓ Constraints file created at /tmp/torch-constraints.txt (includes transformers pin)"
 
 # ============================================================================
 # STEP 2: Install Custom Transformers Fork (CRITICAL - supports usf_omega)
+# Uses custom fork: https://github.com/apt-team-018/usf-transformers
+# PINNED to 4.57.6 - DO NOT UPGRADE OR DOWNGRADE
 # ============================================================================
 RUN echo "" && \
-    echo "=== STEP 2/8: Installing Transformers ===" && \
-    pip install --no-cache-dir "transformers>=4.33,<4.58" && \
-    python -c "import transformers; print(f'✓ Transformers: {transformers.__version__}')" && \
+    echo "=== STEP 2/8: Installing Custom USF Transformers Fork ===" && \
+    pip install --no-cache-dir git+https://github.com/apt-team-018/usf-transformers.git@production-v4.57.6 && \
+    python -c "import transformers; print(f'✓ USF Transformers Fork: {transformers.__version__}')" && \
     python -c "from transformers import AutoConfig, PreTrainedModel; print('✓ AutoConfig & PreTrainedModel available')"
 
 # ============================================================================
@@ -391,13 +394,13 @@ RUN echo "" && \
     which usf_bios && echo "✓ usf_bios CLI registered"
 
 # ============================================================================
-# STEP 4: Reinstall Custom Transformers (ensure not overwritten)
+# STEP 4: Reinstall Custom Transformers Fork (ensure not overwritten)
 # ============================================================================
 RUN echo "" && \
-    echo "=== STEP 4/8: Ensuring Transformers (ms-swift 3.12) ===" && \
+    echo "=== STEP 4/8: Ensuring Custom USF Transformers Fork ===" && \
     pip uninstall -y transformers && \
-    pip install --no-cache-dir "transformers>=4.33,<4.58" && \
-    python -c "import transformers; print(f'✓ Transformers reinstalled: {transformers.__version__}')"
+    pip install --no-cache-dir git+https://github.com/apt-team-018/usf-transformers.git@production-v4.57.6 && \
+    python -c "import transformers; print(f'✓ USF Transformers Fork reinstalled: {transformers.__version__}')"
 
 # ============================================================================
 # STEP 5: Install Backend Requirements
@@ -519,11 +522,13 @@ RUN echo "=== Verifying PyTorch 2.4.0 stack ===" && \
 # CRITICAL: Uninstall torchao (sglang installs it, incompatible with torch 2.4.0)
 # Then reinstall transformers/peft/trl with compatible versions
 # NOTE: trl 0.24.0 requires transformers>=4.56.1
-RUN echo "=== Removing torchao and reinstalling transformers ===" && \
-    pip uninstall -y torchao 2>/dev/null || true && \
+RUN echo "=== Removing torchao and reinstalling USF Transformers Fork ===" && \
+    pip uninstall -y torchao transformers 2>/dev/null || true && \
     rm -rf /usr/local/lib/python3.11/dist-packages/torchao* || true && \
-    pip install --no-cache-dir "transformers>=4.56.1,<4.58" "trl>=0.15,<0.25" "peft>=0.11,<0.19" && \
-    python -c "import transformers; print(f'✓ Transformers {transformers.__version__}')" && \
+    rm -rf /usr/local/lib/python3.11/dist-packages/transformers* || true && \
+    pip install --no-cache-dir git+https://github.com/apt-team-018/usf-transformers.git@production-v4.57.6 && \
+    pip install --no-cache-dir "trl>=0.15,<0.25" "peft>=0.11,<0.19" && \
+    python -c "import transformers; print(f'✓ USF Transformers Fork {transformers.__version__}')" && \
     python -c "import peft; print(f'✓ PEFT {peft.__version__}')" && \
     python -c "import trl; print(f'✓ TRL {trl.__version__}')"
 
@@ -614,19 +619,20 @@ RUN python -c "import nltk; nltk.download('punkt'); nltk.download('averaged_perc
 # CRITICAL: Fix package versions using ms-swift 3.12 compatible versions
 # https://github.com/modelscope/ms-swift/blob/release/3.12/requirements/framework.txt
 # ============================================================================
-RUN echo "=== Fixing package compatibility (ms-swift 3.12) ===" && \
+RUN echo "=== Fixing package compatibility (ms-swift 3.12) - USF Transformers Fork ===" && \
     pip uninstall -y torchao transformers peft trl huggingface-hub tokenizers 2>/dev/null || true && \
     pip cache purge || true && \
     rm -rf /usr/local/lib/python3.11/dist-packages/transformers* || true && \
     rm -rf /usr/local/lib/python3.11/dist-packages/torchao* || true && \
+    pip install --no-cache-dir git+https://github.com/apt-team-018/usf-transformers.git@production-v4.57.6 && \
     pip install --no-cache-dir --constraint /tmp/torch-constraints.txt \
-        "transformers>=4.33,<4.58" "trl>=0.15,<0.25" "peft>=0.11,<0.19" && \
-    python -c "import transformers; print(f'✓ Transformers: {transformers.__version__}')" && \
+        "trl>=0.15,<0.25" "peft>=0.11,<0.19" && \
+    python -c "import transformers; print(f'✓ USF Transformers Fork: {transformers.__version__}')" && \
     python -c "from transformers import PreTrainedModel; print('✓ PreTrainedModel available')" && \
     python -c "import peft; print(f'✓ PEFT: {peft.__version__}')" && \
     python -c "from peft import LoraConfig; print('✓ PEFT imports OK')" && \
     python -c "import trl; print(f'✓ TRL: {trl.__version__}')" && \
-    echo "✓ Package compatibility restored (ms-swift 3.12)"
+    echo "✓ Package compatibility restored (ms-swift 3.12 + USF Transformers Fork)"
 
 # FINAL CLEANUP: Remove packages that conflict with torch 2.4.0 stack
 # unsloth/unsloth-zoo require torchao>=0.13.0, lmdeploy has peft conflicts
@@ -673,10 +679,11 @@ RUN echo "" && \
     cd /app && pip install --no-cache-dir -e . && \
     echo "  ✓ usf_bios reinstalled with compiled binaries"
 
-# Ensure transformers is ms-swift 3.12 compatible (final check)
+# FINAL: Ensure USF Transformers Fork is installed (4.57.6 - DO NOT CHANGE)
 RUN pip uninstall -y transformers torchao 2>/dev/null || true && \
-    pip install --no-cache-dir "transformers>=4.33,<4.58" && \
-    python -c "import transformers; print(f'✓ Transformers (final): {transformers.__version__}')"
+    rm -rf /usr/local/lib/python3.11/dist-packages/transformers* || true && \
+    pip install --no-cache-dir git+https://github.com/apt-team-018/usf-transformers.git@production-v4.57.6 && \
+    python -c "import transformers; assert transformers.__version__ == '4.57.6', f'Wrong version: {transformers.__version__}'; print(f'✓ USF Transformers Fork (final): {transformers.__version__}')"
 
 # ============================================================================
 # FINAL VERIFICATION: Ensure usf_bios works in production image
