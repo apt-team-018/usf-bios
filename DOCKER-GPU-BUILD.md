@@ -39,7 +39,7 @@ git pull origin main
 Required for installing the custom USF Transformers fork:
 
 ```bash
-export GITHUB_TOKEN=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
+export GITHUB_TOKEN=ghp_YOUR_TOKEN_HERE
 ```
 
 ### Step 3: Build Docker Image
@@ -233,7 +233,7 @@ Use `--no-cache` when:
 
 ```bash
 # Ensure GITHUB_TOKEN is exported
-export GITHUB_TOKEN=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
+export GITHUB_TOKEN=ghp_YOUR_TOKEN_HERE
 
 # Verify token works
 curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/user
