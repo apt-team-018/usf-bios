@@ -152,6 +152,21 @@ ENV HOME=/app
 ENV PYTHONPATH=/app:/app/web/backend
 
 # ============================================================================
+# MODEL RESTRICTIONS - HARDCODED in compiled .so files
+# NO environment variables are used for model/architecture restrictions
+# Values are compiled into system_guard.cpython-*.so and capabilities.cpython-*.so
+# at Docker build time. NO ONE can change these values at runtime or deployment.
+# ============================================================================
+# Hardcoded values (for reference only - actual values in compiled .so):
+#   Model Path: /workspace/models/usf_omega
+#   Model Name: USF Omega Chat
+#   Model Type: usf_omega
+#   Architecture: UsfOmegaForCausalLM (must start with UsfOmega, end with ForCausalLM)
+#   Model Source: local only
+#   Dataset Source: local only
+# ============================================================================
+
+# ============================================================================
 # COMPREHENSIVE CACHE DIRECTORIES for all ML training scenarios:
 # - SFT, LoRA, QLoRA, Full Fine-tuning
 # - RLHF, PPO, DPO, GRPO, GKD, KTO

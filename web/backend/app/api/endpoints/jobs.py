@@ -635,10 +635,18 @@ async def get_job_metrics(job_id: str, limit: int = Query(500, ge=1, le=2000), d
         
         # Define which metrics are relevant for each training type
         METRIC_CONFIG = {
+            # ============================================================
+            # SUPERVISED FINE-TUNING (SFT)
+            # ============================================================
             "sft": {
                 "display_name": "Supervised Fine-Tuning",
                 "primary_metrics": ["loss", "learning_rate", "grad_norm"],
                 "eval_metrics": ["eval_loss", "eval_accuracy"],
+                "graph_configs": [
+                    {"key": "loss", "label": "Training Loss", "unit": "", "color": "#3B82F6"},
+                    {"key": "learning_rate", "label": "Learning Rate", "unit": "", "color": "#10B981"},
+                    {"key": "grad_norm", "label": "Gradient Norm", "unit": "", "color": "#F59E0B"},
+                ],
                 "show_reward": False,
                 "show_dpo": False,
             },
@@ -646,6 +654,11 @@ async def get_job_metrics(job_id: str, limit: int = Query(500, ge=1, le=2000), d
                 "display_name": "Full Fine-Tuning",
                 "primary_metrics": ["loss", "learning_rate", "grad_norm"],
                 "eval_metrics": ["eval_loss", "eval_accuracy"],
+                "graph_configs": [
+                    {"key": "loss", "label": "Training Loss", "unit": "", "color": "#3B82F6"},
+                    {"key": "learning_rate", "label": "Learning Rate", "unit": "", "color": "#10B981"},
+                    {"key": "grad_norm", "label": "Gradient Norm", "unit": "", "color": "#F59E0B"},
+                ],
                 "show_reward": False,
                 "show_dpo": False,
             },
@@ -653,43 +666,194 @@ async def get_job_metrics(job_id: str, limit: int = Query(500, ge=1, le=2000), d
                 "display_name": "LoRA Fine-Tuning",
                 "primary_metrics": ["loss", "learning_rate", "grad_norm"],
                 "eval_metrics": ["eval_loss", "eval_accuracy"],
+                "graph_configs": [
+                    {"key": "loss", "label": "Training Loss", "unit": "", "color": "#3B82F6"},
+                    {"key": "learning_rate", "label": "Learning Rate", "unit": "", "color": "#10B981"},
+                    {"key": "grad_norm", "label": "Gradient Norm", "unit": "", "color": "#F59E0B"},
+                ],
                 "show_reward": False,
                 "show_dpo": False,
             },
+            "qlora": {
+                "display_name": "QLoRA Fine-Tuning",
+                "primary_metrics": ["loss", "learning_rate", "grad_norm"],
+                "eval_metrics": ["eval_loss", "eval_accuracy"],
+                "graph_configs": [
+                    {"key": "loss", "label": "Training Loss", "unit": "", "color": "#3B82F6"},
+                    {"key": "learning_rate", "label": "Learning Rate", "unit": "", "color": "#10B981"},
+                    {"key": "grad_norm", "label": "Gradient Norm", "unit": "", "color": "#F59E0B"},
+                ],
+                "show_reward": False,
+                "show_dpo": False,
+            },
+            "adalora": {
+                "display_name": "AdaLoRA Fine-Tuning",
+                "primary_metrics": ["loss", "learning_rate", "grad_norm"],
+                "eval_metrics": ["eval_loss", "eval_accuracy"],
+                "graph_configs": [
+                    {"key": "loss", "label": "Training Loss", "unit": "", "color": "#3B82F6"},
+                    {"key": "learning_rate", "label": "Learning Rate", "unit": "", "color": "#10B981"},
+                    {"key": "grad_norm", "label": "Gradient Norm", "unit": "", "color": "#F59E0B"},
+                ],
+                "show_reward": False,
+                "show_dpo": False,
+            },
+            # ============================================================
+            # PRE-TRAINING
+            # ============================================================
             "pretrain": {
                 "display_name": "Pre-Training",
-                "primary_metrics": ["loss", "learning_rate", "grad_norm"],
+                "primary_metrics": ["loss", "learning_rate", "grad_norm", "perplexity"],
                 "eval_metrics": ["eval_loss", "eval_perplexity"],
+                "graph_configs": [
+                    {"key": "loss", "label": "Training Loss", "unit": "", "color": "#3B82F6"},
+                    {"key": "perplexity", "label": "Perplexity", "unit": "", "color": "#8B5CF6"},
+                    {"key": "learning_rate", "label": "Learning Rate", "unit": "", "color": "#10B981"},
+                    {"key": "grad_norm", "label": "Gradient Norm", "unit": "", "color": "#F59E0B"},
+                ],
                 "show_reward": False,
                 "show_dpo": False,
             },
+            "pt": {
+                "display_name": "Pre-Training",
+                "primary_metrics": ["loss", "learning_rate", "grad_norm", "perplexity"],
+                "eval_metrics": ["eval_loss", "eval_perplexity"],
+                "graph_configs": [
+                    {"key": "loss", "label": "Training Loss", "unit": "", "color": "#3B82F6"},
+                    {"key": "perplexity", "label": "Perplexity", "unit": "", "color": "#8B5CF6"},
+                    {"key": "learning_rate", "label": "Learning Rate", "unit": "", "color": "#10B981"},
+                ],
+                "show_reward": False,
+                "show_dpo": False,
+            },
+            # ============================================================
+            # REINFORCEMENT LEARNING FROM HUMAN FEEDBACK (RLHF)
+            # ============================================================
             "rlhf": {
                 "display_name": "RLHF",
-                "primary_metrics": ["reward", "kl_divergence", "policy_loss", "value_loss"],
-                "eval_metrics": ["entropy"],
+                "primary_metrics": ["reward", "kl_divergence", "policy_loss", "value_loss", "entropy"],
+                "eval_metrics": ["approx_kl", "clip_fraction"],
+                "graph_configs": [
+                    {"key": "reward", "label": "Reward", "unit": "", "color": "#10B981"},
+                    {"key": "kl_divergence", "label": "KL Divergence", "unit": "", "color": "#F59E0B"},
+                    {"key": "policy_loss", "label": "Policy Loss", "unit": "", "color": "#3B82F6"},
+                    {"key": "value_loss", "label": "Value Loss", "unit": "", "color": "#EF4444"},
+                    {"key": "entropy", "label": "Entropy", "unit": "", "color": "#8B5CF6"},
+                ],
                 "show_reward": True,
                 "show_dpo": False,
             },
             "ppo": {
-                "display_name": "PPO",
-                "primary_metrics": ["reward", "policy_loss", "value_loss", "entropy"],
-                "eval_metrics": ["kl_divergence"],
+                "display_name": "PPO (Proximal Policy Optimization)",
+                "primary_metrics": ["reward", "policy_loss", "value_loss", "entropy", "kl_divergence"],
+                "eval_metrics": ["approx_kl", "clip_fraction"],
+                "graph_configs": [
+                    {"key": "reward", "label": "Reward", "unit": "", "color": "#10B981"},
+                    {"key": "policy_loss", "label": "Policy Loss", "unit": "", "color": "#3B82F6"},
+                    {"key": "value_loss", "label": "Value Loss", "unit": "", "color": "#EF4444"},
+                    {"key": "entropy", "label": "Entropy", "unit": "nats", "color": "#8B5CF6"},
+                    {"key": "kl_divergence", "label": "KL Divergence", "unit": "", "color": "#F59E0B"},
+                ],
                 "show_reward": True,
                 "show_dpo": False,
             },
+            # ============================================================
+            # DIRECT PREFERENCE OPTIMIZATION (DPO) & VARIANTS
+            # ============================================================
             "dpo": {
-                "display_name": "DPO",
+                "display_name": "DPO (Direct Preference Optimization)",
                 "primary_metrics": ["loss", "chosen_rewards", "rejected_rewards", "reward_margin"],
-                "eval_metrics": ["eval_loss"],
+                "eval_metrics": ["eval_loss", "accuracy"],
+                "graph_configs": [
+                    {"key": "loss", "label": "DPO Loss", "unit": "", "color": "#3B82F6"},
+                    {"key": "chosen_rewards", "label": "Chosen Rewards", "unit": "", "color": "#10B981"},
+                    {"key": "rejected_rewards", "label": "Rejected Rewards", "unit": "", "color": "#EF4444"},
+                    {"key": "reward_margin", "label": "Reward Margin", "unit": "", "color": "#F59E0B"},
+                ],
                 "show_reward": False,
                 "show_dpo": True,
             },
+            "kto": {
+                "display_name": "KTO (Kahneman-Tversky Optimization)",
+                "primary_metrics": ["loss", "chosen_rewards", "rejected_rewards", "kl_divergence"],
+                "eval_metrics": ["eval_loss"],
+                "graph_configs": [
+                    {"key": "loss", "label": "KTO Loss", "unit": "", "color": "#3B82F6"},
+                    {"key": "chosen_rewards", "label": "Desirable Rewards", "unit": "", "color": "#10B981"},
+                    {"key": "rejected_rewards", "label": "Undesirable Rewards", "unit": "", "color": "#EF4444"},
+                    {"key": "kl_divergence", "label": "KL Divergence", "unit": "", "color": "#F59E0B"},
+                ],
+                "show_reward": False,
+                "show_dpo": True,
+            },
+            "simpo": {
+                "display_name": "SimPO (Simple Preference Optimization)",
+                "primary_metrics": ["loss", "chosen_rewards", "rejected_rewards", "reward_margin"],
+                "eval_metrics": ["eval_loss"],
+                "graph_configs": [
+                    {"key": "loss", "label": "SimPO Loss", "unit": "", "color": "#3B82F6"},
+                    {"key": "chosen_rewards", "label": "Chosen Rewards", "unit": "", "color": "#10B981"},
+                    {"key": "rejected_rewards", "label": "Rejected Rewards", "unit": "", "color": "#EF4444"},
+                    {"key": "reward_margin", "label": "Reward Margin", "unit": "", "color": "#F59E0B"},
+                ],
+                "show_reward": False,
+                "show_dpo": True,
+            },
+            "orpo": {
+                "display_name": "ORPO (Odds Ratio Preference Optimization)",
+                "primary_metrics": ["loss", "chosen_rewards", "rejected_rewards", "log_odds"],
+                "eval_metrics": ["eval_loss", "accuracy"],
+                "graph_configs": [
+                    {"key": "loss", "label": "ORPO Loss", "unit": "", "color": "#3B82F6"},
+                    {"key": "chosen_rewards", "label": "Chosen Log Probs", "unit": "", "color": "#10B981"},
+                    {"key": "rejected_rewards", "label": "Rejected Log Probs", "unit": "", "color": "#EF4444"},
+                ],
+                "show_reward": False,
+                "show_dpo": True,
+            },
+            "rpo": {
+                "display_name": "RPO (Relative Preference Optimization)",
+                "primary_metrics": ["loss", "chosen_rewards", "rejected_rewards", "reward_margin"],
+                "eval_metrics": ["eval_loss"],
+                "graph_configs": [
+                    {"key": "loss", "label": "RPO Loss", "unit": "", "color": "#3B82F6"},
+                    {"key": "chosen_rewards", "label": "Chosen Rewards", "unit": "", "color": "#10B981"},
+                    {"key": "rejected_rewards", "label": "Rejected Rewards", "unit": "", "color": "#EF4444"},
+                ],
+                "show_reward": False,
+                "show_dpo": True,
+            },
+            # ============================================================
+            # GROUP RELATIVE POLICY OPTIMIZATION (GRPO)
+            # ============================================================
             "grpo": {
-                "display_name": "GRPO",
-                "primary_metrics": ["reward", "loss", "kl_divergence"],
-                "eval_metrics": ["policy_loss"],
+                "display_name": "GRPO (Group Relative Policy Optimization)",
+                "primary_metrics": ["reward", "loss", "kl_divergence", "policy_loss"],
+                "eval_metrics": ["entropy", "approx_kl"],
+                "graph_configs": [
+                    {"key": "reward", "label": "Group Reward", "unit": "", "color": "#10B981"},
+                    {"key": "loss", "label": "GRPO Loss", "unit": "", "color": "#3B82F6"},
+                    {"key": "kl_divergence", "label": "KL Penalty", "unit": "", "color": "#F59E0B"},
+                    {"key": "policy_loss", "label": "Policy Loss", "unit": "", "color": "#EF4444"},
+                ],
                 "show_reward": True,
                 "show_dpo": False,
+            },
+            # ============================================================
+            # REWARD MODEL TRAINING
+            # ============================================================
+            "rm": {
+                "display_name": "Reward Model Training",
+                "primary_metrics": ["loss", "accuracy", "chosen_rewards", "rejected_rewards"],
+                "eval_metrics": ["eval_loss", "eval_accuracy"],
+                "graph_configs": [
+                    {"key": "loss", "label": "RM Loss", "unit": "", "color": "#3B82F6"},
+                    {"key": "accuracy", "label": "Accuracy", "unit": "%", "color": "#10B981"},
+                    {"key": "chosen_rewards", "label": "Chosen Score", "unit": "", "color": "#8B5CF6"},
+                    {"key": "rejected_rewards", "label": "Rejected Score", "unit": "", "color": "#EF4444"},
+                ],
+                "show_reward": False,
+                "show_dpo": True,
             },
         }
         
@@ -756,6 +920,7 @@ async def get_job_metrics(job_id: str, limit: int = Query(500, ge=1, le=2000), d
             "train_type_display": config["display_name"],
             "primary_metrics": config["primary_metrics"],
             "eval_metrics": config["eval_metrics"],
+            "graph_configs": config.get("graph_configs", []),
             "count": len(formatted_metrics),
             "metrics": formatted_metrics
         }
@@ -770,14 +935,37 @@ async def get_job_metrics(job_id: str, limit: int = Query(500, ge=1, le=2000), d
 
 @router.get("/{job_id}/tensorboard")
 async def get_tensorboard_data(job_id: str):
-    """Get TensorBoard data for a job.
+    """Get TensorBoard data for a job with data validation.
     
     Reads TensorBoard event files from the job's output directory.
     USF BIOS writes TensorBoard data to: {output_dir}/runs/
+    
+    IMPORTANT: Only returns validated data. If data appears corrupt or
+    inconsistent, it is excluded to maintain user trust.
     """
     import os
+    import math
     from pathlib import Path
     from ...core.capabilities import get_system_settings
+    
+    def is_valid_metric_value(value: float) -> bool:
+        """Validate that a metric value is reasonable and not corrupt."""
+        if value is None:
+            return False
+        if math.isnan(value) or math.isinf(value):
+            return False
+        # Reject extremely large values that indicate corruption
+        if abs(value) > 1e10:
+            return False
+        return True
+    
+    def validate_metric_series(values: list) -> list:
+        """Validate a series of metric values, removing invalid entries."""
+        validated = []
+        for v in values:
+            if is_valid_metric_value(v.get("value")):
+                validated.append(v)
+        return validated
     
     try:
         output_dir = get_system_settings().OUTPUT_DIR / job_id
@@ -787,6 +975,7 @@ async def get_tensorboard_data(job_id: str):
         search_dirs = [
             output_dir / "runs",  # Primary: USF BIOS default location
             output_dir,           # Fallback: direct in output_dir
+            output_dir / "logs",  # Alternative location
         ]
         
         # Find TensorBoard event files
@@ -802,34 +991,72 @@ async def get_tensorboard_data(job_id: str):
             return {
                 "job_id": job_id,
                 "has_tensorboard": False,
+                "data_source": "none",
                 "metrics": {},
-                "message": "No TensorBoard data found"
+                "message": "No TensorBoard data found yet"
             }
         
-        # Read TensorBoard data
+        # Read TensorBoard data with validation
         try:
             from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
             
             all_metrics = {}
+            total_valid_points = 0
+            total_invalid_points = 0
+            
             for tb_file in tb_files:
-                ea = EventAccumulator(tb_file)
-                ea.Reload()
-                tags = ea.Tags().get('scalars', [])
-                
-                for tag in tags:
-                    values = ea.Scalars(tag)
-                    if tag not in all_metrics:
-                        all_metrics[tag] = []
-                    for v in values:
-                        all_metrics[tag].append({
-                            "step": v.step,
-                            "value": v.value,
-                            "wall_time": v.wall_time
-                        })
+                try:
+                    ea = EventAccumulator(tb_file)
+                    ea.Reload()
+                    tags = ea.Tags().get('scalars', [])
+                    
+                    for tag in tags:
+                        values = ea.Scalars(tag)
+                        # Normalize tag name (TensorBoard uses various formats)
+                        normalized_tag = tag.replace('train/', '').replace('eval/', 'eval_').replace('/', '_').lower()
+                        
+                        if normalized_tag not in all_metrics:
+                            all_metrics[normalized_tag] = []
+                        
+                        for v in values:
+                            if is_valid_metric_value(v.value):
+                                all_metrics[normalized_tag].append({
+                                    "step": v.step,
+                                    "value": round(v.value, 6),  # Limit precision
+                                    "wall_time": v.wall_time
+                                })
+                                total_valid_points += 1
+                            else:
+                                total_invalid_points += 1
+                except Exception as file_error:
+                    # Skip corrupted files silently
+                    continue
+            
+            # Remove empty metrics
+            all_metrics = {k: v for k, v in all_metrics.items() if len(v) > 0}
+            
+            # Sort each metric by step
+            for key in all_metrics:
+                all_metrics[key].sort(key=lambda x: x["step"])
+            
+            if not all_metrics:
+                return {
+                    "job_id": job_id,
+                    "has_tensorboard": False,
+                    "data_source": "tensorboard_empty",
+                    "metrics": {},
+                    "message": "TensorBoard files found but no valid data yet"
+                }
             
             return {
                 "job_id": job_id,
                 "has_tensorboard": True,
+                "data_source": "tensorboard",
+                "data_quality": {
+                    "valid_points": total_valid_points,
+                    "invalid_points": total_invalid_points,
+                    "quality_score": round(total_valid_points / max(1, total_valid_points + total_invalid_points), 2)
+                },
                 "available_metrics": list(all_metrics.keys()),
                 "metrics": all_metrics
             }
@@ -837,13 +1064,309 @@ async def get_tensorboard_data(job_id: str):
             return {
                 "job_id": job_id,
                 "has_tensorboard": False,
-                "error": "TensorBoard not installed"
+                "data_source": "unavailable",
+                "error": "TensorBoard library not installed"
             }
             
     except Exception as e:
         return {
             "job_id": job_id,
             "has_tensorboard": False,
+            "data_source": "error",
+            "error": str(e)
+        }
+
+
+@router.get("/{job_id}/metrics/unified")
+async def get_unified_metrics(
+    job_id: str, 
+    limit: int = Query(500, ge=1, le=2000),
+    prefer_tensorboard: bool = Query(True),
+    db: Session = Depends(get_db)
+):
+    """Get unified training metrics combining TensorBoard and parsed log data.
+    
+    This endpoint provides the most accurate real-time metrics by:
+    1. Preferring TensorBoard data when available (more accurate)
+    2. Falling back to parsed log data if TensorBoard unavailable
+    3. Validating all data points before returning
+    4. NEVER returning potentially incorrect data
+    
+    Data Sources Priority:
+    - tensorboard: Highest accuracy, direct from training framework
+    - database: Good accuracy, parsed from training logs
+    - none: No data available yet
+    """
+    import math
+    
+    def is_valid_value(val) -> bool:
+        """Check if a value is valid for display."""
+        if val is None:
+            return False
+        if isinstance(val, float):
+            if math.isnan(val) or math.isinf(val):
+                return False
+            if abs(val) > 1e10:
+                return False
+        return True
+    
+    try:
+        # Get job info for training type
+        job = await job_manager.get_job(job_id)
+        if not job:
+            return {"job_id": job_id, "error": "Job not found", "metrics": []}
+        
+        train_type = job.config.train_type.value if job and job.config else "sft"
+        training_method = getattr(job.config, 'training_method', None)
+        method_value = training_method.value if hasattr(training_method, 'value') else 'sft'
+        
+        # Determine effective training type for metric selection
+        # RLHF methods override train_type for metric purposes
+        effective_type = train_type
+        if method_value == 'rlhf' and job.config.rlhf_type:
+            rlhf_type = job.config.rlhf_type.value if hasattr(job.config.rlhf_type, 'value') else job.config.rlhf_type
+            effective_type = rlhf_type  # Use specific RLHF type (dpo, ppo, kto, etc.)
+        
+        # Define metric configurations for each training type
+        TRAINING_TYPE_METRICS = {
+            # SFT and variants
+            "sft": ["loss", "learning_rate", "grad_norm", "epoch"],
+            "lora": ["loss", "learning_rate", "grad_norm", "epoch"],
+            "qlora": ["loss", "learning_rate", "grad_norm", "epoch"],
+            "adalora": ["loss", "learning_rate", "grad_norm", "epoch"],
+            "full": ["loss", "learning_rate", "grad_norm", "epoch"],
+            # Pre-training
+            "pt": ["loss", "learning_rate", "grad_norm", "perplexity", "epoch"],
+            "pretrain": ["loss", "learning_rate", "grad_norm", "perplexity", "epoch"],
+            # DPO and variants
+            "dpo": ["loss", "learning_rate", "chosen_rewards", "rejected_rewards", "reward_margin"],
+            "kto": ["loss", "learning_rate", "chosen_rewards", "rejected_rewards", "kl_divergence"],
+            "simpo": ["loss", "learning_rate", "chosen_rewards", "rejected_rewards", "reward_margin"],
+            "orpo": ["loss", "learning_rate", "chosen_rewards", "rejected_rewards"],
+            "rpo": ["loss", "learning_rate", "chosen_rewards", "rejected_rewards"],
+            # PPO/RLHF
+            "ppo": ["reward", "policy_loss", "value_loss", "entropy", "kl_divergence", "learning_rate"],
+            "grpo": ["reward", "loss", "kl_divergence", "policy_loss", "learning_rate"],
+            "rlhf": ["reward", "policy_loss", "value_loss", "entropy", "kl_divergence"],
+            # Reward Model
+            "rm": ["loss", "accuracy", "chosen_rewards", "rejected_rewards"],
+        }
+        
+        relevant_metrics = TRAINING_TYPE_METRICS.get(effective_type, TRAINING_TYPE_METRICS["sft"])
+        
+        unified_data = []
+        data_source = "none"
+        data_quality = 1.0
+        
+        # Try TensorBoard first if preferred
+        if prefer_tensorboard:
+            tb_response = await get_tensorboard_data(job_id)
+            if tb_response.get("has_tensorboard") and tb_response.get("metrics"):
+                tb_metrics = tb_response["metrics"]
+                data_source = "tensorboard"
+                data_quality = tb_response.get("data_quality", {}).get("quality_score", 1.0)
+                
+                # Find the metric with most data points to use as reference for steps
+                max_len = 0
+                reference_metric = None
+                for key in ["loss", "train_loss", "reward"]:
+                    if key in tb_metrics and len(tb_metrics[key]) > max_len:
+                        max_len = len(tb_metrics[key])
+                        reference_metric = key
+                
+                if reference_metric:
+                    # Build unified data from TensorBoard
+                    for i, ref_point in enumerate(tb_metrics[reference_metric]):
+                        step = ref_point["step"]
+                        data_point = {
+                            "step": step,
+                            "timestamp": ref_point.get("wall_time"),
+                            "data_source": "tensorboard"
+                        }
+                        
+                        # Add all available metrics for this step
+                        for metric_key in relevant_metrics:
+                            # Try various naming conventions
+                            for tb_key in [metric_key, f"train_{metric_key}", f"train/{metric_key}"]:
+                                if tb_key in tb_metrics:
+                                    # Find value at this step
+                                    for m in tb_metrics[tb_key]:
+                                        if m["step"] == step and is_valid_value(m["value"]):
+                                            data_point[metric_key] = m["value"]
+                                            break
+                        
+                        unified_data.append(data_point)
+        
+        # If no TensorBoard data, use database metrics
+        if not unified_data:
+            service = JobService(db)
+            db_metrics = service.get_job_metrics(job_id, limit=limit)
+            
+            if db_metrics:
+                data_source = "database"
+                for m in db_metrics:
+                    data_point = {
+                        "step": m.step,
+                        "epoch": m.epoch,
+                        "timestamp": m.timestamp.isoformat() if m.timestamp else None,
+                        "data_source": "database"
+                    }
+                    
+                    # Add validated metrics only
+                    if is_valid_value(m.loss):
+                        data_point["loss"] = round(m.loss, 6)
+                    if is_valid_value(m.learning_rate):
+                        data_point["learning_rate"] = m.learning_rate
+                    if is_valid_value(m.grad_norm):
+                        data_point["grad_norm"] = round(m.grad_norm, 4)
+                    if is_valid_value(m.eval_loss):
+                        data_point["eval_loss"] = round(m.eval_loss, 6)
+                    if is_valid_value(m.reward):
+                        data_point["reward"] = round(m.reward, 4)
+                    if is_valid_value(m.kl_divergence):
+                        data_point["kl_divergence"] = round(m.kl_divergence, 6)
+                    if is_valid_value(m.policy_loss):
+                        data_point["policy_loss"] = round(m.policy_loss, 6)
+                    if is_valid_value(m.value_loss):
+                        data_point["value_loss"] = round(m.value_loss, 6)
+                    if is_valid_value(m.entropy):
+                        data_point["entropy"] = round(m.entropy, 6)
+                    if is_valid_value(m.chosen_rewards):
+                        data_point["chosen_rewards"] = round(m.chosen_rewards, 4)
+                    if is_valid_value(m.rejected_rewards):
+                        data_point["rejected_rewards"] = round(m.rejected_rewards, 4)
+                    if is_valid_value(m.reward_margin):
+                        data_point["reward_margin"] = round(m.reward_margin, 4)
+                    
+                    # Extra metrics
+                    if m.extra_metrics:
+                        for key, val in m.extra_metrics.items():
+                            if is_valid_value(val):
+                                data_point[key] = round(val, 6) if isinstance(val, float) else val
+                    
+                    unified_data.append(data_point)
+        
+        # Filter to only include data points with at least one relevant metric
+        filtered_data = []
+        for point in unified_data:
+            has_relevant = any(key in point and is_valid_value(point.get(key)) for key in relevant_metrics)
+            if has_relevant:
+                filtered_data.append(point)
+        
+        return {
+            "job_id": job_id,
+            "training_type": effective_type,
+            "training_method": method_value,
+            "data_source": data_source,
+            "data_quality": data_quality,
+            "relevant_metrics": relevant_metrics,
+            "count": len(filtered_data),
+            "metrics": filtered_data[-limit:] if len(filtered_data) > limit else filtered_data
+        }
+        
+    except Exception as e:
+        return {
+            "job_id": job_id,
+            "data_source": "error",
+            "error": str(e),
+            "metrics": []
+        }
+
+
+@router.get("/history/all")
+async def get_training_history(
+    limit: int = Query(50, ge=1, le=200),
+    include_metrics: bool = Query(True),
+    db: Session = Depends(get_db)
+):
+    """Get training history with all past trainings.
+    
+    Returns a list of all training jobs with their final metrics,
+    output paths, and status. Ordered by creation date (newest first).
+    """
+    from pathlib import Path
+    from ...core.capabilities import get_system_settings
+    
+    try:
+        jobs = await job_manager.get_all_jobs()
+        
+        # Sort by created_at descending (newest first)
+        jobs.sort(key=lambda x: x.created_at, reverse=True)
+        jobs = jobs[:limit]
+        
+        history = []
+        service = JobService(db)
+        
+        for job in jobs:
+            job_data = {
+                "job_id": job.job_id,
+                "job_name": job.name,
+                "status": job.status.value if hasattr(job.status, 'value') else str(job.status),
+                "created_at": job.created_at.isoformat() if job.created_at else None,
+                "started_at": job.started_at.isoformat() if job.started_at else None,
+                "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+                "current_step": job.current_step,
+                "total_steps": job.total_steps,
+                "error": job.error,
+            }
+            
+            # Add training config info
+            if job.config:
+                train_type = job.config.train_type.value if hasattr(job.config.train_type, 'value') else str(job.config.train_type)
+                training_method = getattr(job.config, 'training_method', None)
+                method_value = training_method.value if hasattr(training_method, 'value') else 'sft'
+                
+                job_data["config"] = {
+                    "train_type": train_type,
+                    "training_method": method_value,
+                    "num_epochs": job.config.num_train_epochs,
+                    "learning_rate": job.config.learning_rate,
+                    "batch_size": job.config.per_device_train_batch_size,
+                }
+            
+            # Add output path info
+            output_dir = get_system_settings().OUTPUT_DIR / job.job_id
+            job_data["output_path"] = str(output_dir)
+            job_data["output_exists"] = output_dir.exists()
+            
+            # Check for adapter/checkpoint files
+            if output_dir.exists():
+                adapters = list(output_dir.glob("**/adapter_model.safetensors")) + list(output_dir.glob("**/adapter_model.bin"))
+                job_data["has_adapter"] = len(adapters) > 0
+                if adapters:
+                    job_data["adapter_path"] = str(adapters[0].parent)
+                
+                checkpoints = [d for d in output_dir.iterdir() if d.is_dir() and d.name.startswith("checkpoint-")]
+                job_data["checkpoint_count"] = len(checkpoints)
+            else:
+                job_data["has_adapter"] = False
+                job_data["checkpoint_count"] = 0
+            
+            # Add final metrics if requested
+            if include_metrics:
+                try:
+                    metrics = service.get_job_metrics(job.job_id, limit=1)
+                    if metrics:
+                        last_metric = metrics[-1]
+                        job_data["final_metrics"] = {
+                            "loss": last_metric.loss,
+                            "learning_rate": last_metric.learning_rate,
+                            "epoch": last_metric.epoch,
+                            "step": last_metric.step,
+                        }
+                except Exception:
+                    job_data["final_metrics"] = None
+            
+            history.append(job_data)
+        
+        return {
+            "count": len(history),
+            "history": history
+        }
+    except Exception as e:
+        return {
+            "count": 0,
+            "history": [],
             "error": str(e)
         }
 

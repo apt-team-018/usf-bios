@@ -76,94 +76,201 @@ def check_cuda_available() -> bool:
 
 
 def get_gpu_metrics():
-    """Get GPU metrics using pynvml or fallback"""
+    """
+    Get GPU metrics using pynvml (NVIDIA Management Library).
+    Returns None for unavailable metrics to avoid showing wrong data.
+    
+    IMPORTANT: We use pynvml for accurate GPU metrics because:
+    - torch.cuda.memory_allocated() only shows PyTorch's allocation, not actual GPU usage
+    - nvidia-smi subprocess is slower and less reliable
+    - pynvml gives real-time accurate data directly from NVIDIA driver
+    """
+    result = {
+        "gpu_utilization": None,
+        "gpu_memory_used": None,
+        "gpu_memory_total": None,
+        "gpu_temperature": None,
+        "gpu_available": False,
+        "metrics_source": "none"
+    }
+    
     try:
         import pynvml
         pynvml.nvmlInit()
+        
+        # Get device count to ensure we have GPUs
+        device_count = pynvml.nvmlDeviceGetCount()
+        if device_count == 0:
+            pynvml.nvmlShutdown()
+            return result
+        
         handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        result["gpu_available"] = True
+        result["metrics_source"] = "pynvml"
         
-        # Utilization
-        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-        gpu_utilization = util.gpu
+        # GPU Utilization (0-100%)
+        try:
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            # Validate: utilization should be 0-100
+            if 0 <= util.gpu <= 100:
+                result["gpu_utilization"] = int(util.gpu)
+            else:
+                result["gpu_utilization"] = None  # Invalid value
+        except pynvml.NVMLError:
+            pass  # Keep as None
         
-        # Memory
-        mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        gpu_memory_used = mem_info.used / (1024**3)  # GB
-        gpu_memory_total = mem_info.total / (1024**3)  # GB
+        # GPU Memory (in GB)
+        try:
+            mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            # Validate: memory values should be positive
+            if mem_info.used >= 0 and mem_info.total > 0:
+                result["gpu_memory_used"] = round(mem_info.used / (1024**3), 2)
+                result["gpu_memory_total"] = round(mem_info.total / (1024**3), 2)
+                # Sanity check: used should not exceed total
+                if result["gpu_memory_used"] > result["gpu_memory_total"]:
+                    result["gpu_memory_used"] = None
+                    result["gpu_memory_total"] = None
+        except pynvml.NVMLError:
+            pass  # Keep as None
         
-        # Temperature
+        # GPU Temperature (in Celsius)
         try:
             temperature = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-        except:
-            temperature = 0
+            # Validate: reasonable temperature range (0-120°C)
+            # GPUs typically operate between 30-90°C, throttle around 83-90°C
+            if 0 <= temperature <= 120:
+                result["gpu_temperature"] = int(temperature)
+            else:
+                result["gpu_temperature"] = None  # Unrealistic value
+        except pynvml.NVMLError:
+            pass  # Keep as None
         
         pynvml.nvmlShutdown()
+        return result
         
-        return {
-            "gpu_utilization": gpu_utilization,
-            "gpu_memory_used": round(gpu_memory_used, 2),
-            "gpu_memory_total": round(gpu_memory_total, 2),
-            "gpu_temperature": temperature
-        }
     except ImportError:
-        # pynvml not available, try torch
+        # pynvml not available - try nvidia-smi as fallback
+        try:
+            import subprocess
+            # Use nvidia-smi for metrics
+            cmd = "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits"
+            output = subprocess.check_output(cmd.split(), timeout=5).decode().strip()
+            values = output.split(',')
+            
+            if len(values) >= 4:
+                result["gpu_available"] = True
+                result["metrics_source"] = "nvidia-smi"
+                
+                # Parse utilization
+                try:
+                    util = int(values[0].strip())
+                    if 0 <= util <= 100:
+                        result["gpu_utilization"] = util
+                except (ValueError, IndexError):
+                    pass
+                
+                # Parse memory used (MiB to GB)
+                try:
+                    mem_used = float(values[1].strip()) / 1024
+                    if mem_used >= 0:
+                        result["gpu_memory_used"] = round(mem_used, 2)
+                except (ValueError, IndexError):
+                    pass
+                
+                # Parse memory total (MiB to GB)
+                try:
+                    mem_total = float(values[2].strip()) / 1024
+                    if mem_total > 0:
+                        result["gpu_memory_total"] = round(mem_total, 2)
+                except (ValueError, IndexError):
+                    pass
+                
+                # Parse temperature
+                try:
+                    temp = int(values[3].strip())
+                    if 0 <= temp <= 120:
+                        result["gpu_temperature"] = temp
+                except (ValueError, IndexError):
+                    pass
+                
+                return result
+        except (subprocess.SubprocessError, FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        
+        # Last resort: try torch for basic info (limited accuracy)
         try:
             import torch
             if torch.cuda.is_available():
-                gpu_memory_used = torch.cuda.memory_allocated() / (1024**3)
-                gpu_memory_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                return {
-                    "gpu_utilization": 0,  # Not available without pynvml
-                    "gpu_memory_used": round(gpu_memory_used, 2),
-                    "gpu_memory_total": round(gpu_memory_total, 2),
-                    "gpu_temperature": 0
-                }
+                result["gpu_available"] = True
+                result["metrics_source"] = "torch"
+                # Note: torch only gives total memory, not actual usage
+                result["gpu_memory_total"] = round(
+                    torch.cuda.get_device_properties(0).total_memory / (1024**3), 2
+                )
+                # torch.cuda.memory_allocated() only shows PyTorch allocations
+                # This is NOT accurate for total GPU usage, so we don't use it
         except:
             pass
         
-        return {
-            "gpu_utilization": 0,
-            "gpu_memory_used": 0,
-            "gpu_memory_total": 0,
-            "gpu_temperature": 0
-        }
+        return result
+        
     except Exception as e:
-        return {
-            "gpu_utilization": 0,
-            "gpu_memory_used": 0,
-            "gpu_memory_total": 0,
-            "gpu_temperature": 0
-        }
+        # Log error but don't expose internal details
+        import logging
+        logging.warning(f"GPU metrics error: {e}")
+        return result
 
 
 def get_cpu_metrics():
-    """Get CPU and RAM metrics"""
+    """
+    Get CPU and RAM metrics using psutil.
+    Returns None for unavailable metrics to avoid showing wrong data.
+    """
+    result = {
+        "cpu_percent": None,
+        "ram_used": None,
+        "ram_total": None,
+        "cpu_available": False
+    }
+    
     try:
         import psutil
+        result["cpu_available"] = True
         
-        cpu_percent = psutil.cpu_percent(interval=0.1)
+        # CPU Utilization (0-100%)
+        # interval=0.1 gives a quick snapshot, but may be less accurate
+        # For better accuracy, consider using interval=1.0 but it blocks
+        try:
+            cpu_percent = psutil.cpu_percent(interval=0.1)
+            # Validate: should be 0-100
+            if 0 <= cpu_percent <= 100:
+                result["cpu_percent"] = round(cpu_percent, 1)
+        except Exception:
+            pass
         
-        mem = psutil.virtual_memory()
-        ram_used = mem.used / (1024**3)  # GB
-        ram_total = mem.total / (1024**3)  # GB
+        # RAM Usage
+        try:
+            mem = psutil.virtual_memory()
+            # Validate: memory values should be positive
+            if mem.used >= 0 and mem.total > 0:
+                ram_used = mem.used / (1024**3)  # GB
+                ram_total = mem.total / (1024**3)  # GB
+                # Sanity check: used should not exceed total
+                if ram_used <= ram_total:
+                    result["ram_used"] = round(ram_used, 2)
+                    result["ram_total"] = round(ram_total, 2)
+        except Exception:
+            pass
         
-        return {
-            "cpu_percent": round(cpu_percent, 1),
-            "ram_used": round(ram_used, 2),
-            "ram_total": round(ram_total, 2)
-        }
+        return result
+        
     except ImportError:
-        return {
-            "cpu_percent": 0,
-            "ram_used": 0,
-            "ram_total": 0
-        }
+        # psutil not available
+        return result
     except Exception as e:
-        return {
-            "cpu_percent": 0,
-            "ram_used": 0,
-            "ram_total": 0
-        }
+        import logging
+        logging.warning(f"CPU metrics error: {e}")
+        return result
 
 
 @router.get("/metrics")
@@ -182,6 +289,96 @@ async def get_system_metrics():
 async def get_gpu_info():
     """Get GPU-specific information"""
     return get_gpu_metrics()
+
+
+@router.get("/gpus")
+async def get_all_gpus():
+    """
+    Get list of all available GPUs with their details.
+    Used by frontend to show available GPU options for selection.
+    Returns device_count and list of GPUs with id, name, memory info.
+    """
+    result = {
+        "available": False,
+        "device_count": 0,
+        "gpus": []
+    }
+    
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        
+        device_count = pynvml.nvmlDeviceGetCount()
+        if device_count == 0:
+            pynvml.nvmlShutdown()
+            return result
+        
+        result["available"] = True
+        result["device_count"] = device_count
+        
+        for i in range(device_count):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+            
+            # Get GPU name
+            name = pynvml.nvmlDeviceGetName(handle)
+            if isinstance(name, bytes):
+                name = name.decode('utf-8')
+            
+            # Get memory info
+            try:
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                memory_total_gb = round(mem_info.total / (1024**3), 1)
+                memory_used_gb = round(mem_info.used / (1024**3), 1)
+                memory_free_gb = round(mem_info.free / (1024**3), 1)
+            except:
+                memory_total_gb = None
+                memory_used_gb = None
+                memory_free_gb = None
+            
+            # Get utilization
+            try:
+                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                utilization = util.gpu
+            except:
+                utilization = None
+            
+            result["gpus"].append({
+                "id": i,
+                "name": name,
+                "memory_total_gb": memory_total_gb,
+                "memory_used_gb": memory_used_gb,
+                "memory_free_gb": memory_free_gb,
+                "utilization": utilization
+            })
+        
+        pynvml.nvmlShutdown()
+        return result
+        
+    except ImportError:
+        # pynvml not available - try torch
+        try:
+            import torch
+            if torch.cuda.is_available():
+                device_count = torch.cuda.device_count()
+                result["available"] = True
+                result["device_count"] = device_count
+                
+                for i in range(device_count):
+                    props = torch.cuda.get_device_properties(i)
+                    result["gpus"].append({
+                        "id": i,
+                        "name": props.name,
+                        "memory_total_gb": round(props.total_memory / (1024**3), 1),
+                        "memory_used_gb": None,
+                        "memory_free_gb": None,
+                        "utilization": None
+                    })
+        except:
+            pass
+        
+        return result
+    except Exception:
+        return result
 
 
 @router.get("/cpu")
@@ -379,10 +576,67 @@ async def get_system_capabilities():
     }
 
 
+@router.get("/locked-models", include_in_schema=False)
+async def get_locked_models():
+    """
+    Get list of allowed/locked models for frontend.
+    This endpoint provides the list of models that can be used for training/inference.
+    Frontend should fetch this instead of hardcoding model list.
+    
+    Response format:
+    {
+        "is_locked": true/false,
+        "models": [
+            {
+                "name": "USF Omega",
+                "path": "/workspace/models/usf_omega",
+                "source": "local",
+                "modality": "text",
+                "description": "USF Omega Model"
+            }
+        ]
+    }
+    """
+    validator = get_validator()
+    
+    return {
+        "is_locked": validator.is_model_locked(),
+        "models": validator.get_locked_models()
+    }
+
+
+@router.get("/output-path-config", include_in_schema=False)
+async def get_output_path_config():
+    """
+    Get output path configuration for frontend.
+    Tells frontend whether output path is locked, base-locked, or free.
+    
+    Response format:
+    {
+        "mode": "locked" | "base_locked" | "free",
+        "base_path": "/workspace/output",
+        "is_locked": true/false,
+        "user_can_customize": true/false,
+        "user_can_add_path": true/false
+    }
+    
+    When is_locked=true: Frontend should NOT show output path input
+    When user_can_add_path=true: Show input for intermediate path only
+    When user_can_customize=true: Show full path input
+    """
+    validator = get_validator()
+    return validator.get_output_path_config()
+
+
 @router.get("/model-lock", include_in_schema=False)
 async def get_model_capabilities_legacy():
     """Legacy endpoint - hidden from docs."""
-    return {"ready": True}
+    validator = get_validator()
+    return {
+        "ready": True,
+        "is_locked": validator.is_model_locked(),
+        "models": validator.get_locked_models()
+    }
 
 
 @router.post("/validate", response_model=ValidationResponse, include_in_schema=False)

@@ -10,6 +10,18 @@ set -e
 export USF_DISABLE_CLI=1
 export USF_UI_ONLY=1
 
+# ============================================================================
+# MODEL RESTRICTIONS - HARDCODED in compiled .so files
+# NO environment variables are used for model/architecture restrictions
+# Values are compiled into system_guard.cpython-*.so and capabilities.cpython-*.so
+# NO ONE can change these values at runtime or deployment
+# ============================================================================
+# Hardcoded values (for reference only - actual values in compiled .so):
+#   Model Path: /workspace/models/usf_omega
+#   Architecture: UsfOmegaForCausalLM
+#   Model Source: local only
+#   Dataset Source: local only
+
 # Database configuration
 export DATABASE_URL="${DATABASE_URL:-sqlite:////app/data/db/usf_bios.db}"
 

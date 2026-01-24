@@ -11,6 +11,9 @@ from usf_bios.system_guard import (
     check_system_valid, 
     validate_model, 
     validate_architecture,
+    validate_output_path,
+    get_output_path,
+    get_output_path_config,
     SystemGuardError
 )
 from usf_bios.utils import (ProcessorMixin, get_logger, is_master, parse_args, seed_everything,
@@ -68,6 +71,43 @@ class USFPipeline(ABC, ProcessorMixin):
                 model_source = "local"
             
             validate_model(model_path, model_source)
+        
+        # Validate and enforce output path restrictions
+        # When locked: user-provided path is rejected, only base_path/job_id is allowed
+        # When base_locked: only relative paths allowed on top of base_path
+        output_dir = getattr(args, 'output_dir', None)
+        if output_dir:
+            output_config = get_output_path_config()
+            if output_config.get('is_locked'):
+                # In locked mode, CLI must use the locked base path
+                # Generate a unique job ID for CLI runs
+                import uuid
+                job_id = f"cli_{uuid.uuid4().hex[:12]}"
+                locked_path = get_output_path(job_id, "")
+                
+                # Check if user tried to use a different base path
+                if not output_dir.startswith(output_config.get('base_path', '/workspace/output')):
+                    # Override with locked path - user cannot change base
+                    logger.warning(f"[USF BIOS] Output path locked. Using: {locked_path}")
+                    args.output_dir = locked_path
+                else:
+                    # User used correct base, just ensure single folder structure
+                    # Extract any subfolder they tried to add
+                    base = output_config.get('base_path', '/workspace/output')
+                    user_subpath = output_dir[len(base):].strip('/')
+                    if '/' in user_subpath:
+                        # Multiple folders not allowed in locked mode
+                        logger.warning(f"[USF BIOS] Only single folder allowed in locked mode. Using: {locked_path}")
+                        args.output_dir = locked_path
+                    elif user_subpath:
+                        # Single folder provided - use it as job_id
+                        args.output_dir = get_output_path(user_subpath, "")
+                    else:
+                        # No subfolder - generate one
+                        args.output_dir = locked_path
+            else:
+                # Validate user path (for base_locked mode)
+                validate_output_path(output_dir)
         
         # Architecture validation happens when model is loaded (in model loader)
         # This is 100% reliable as architecture is always in config.json

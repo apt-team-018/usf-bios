@@ -292,18 +292,52 @@ const INCOMPATIBLE_WARNINGS = {
   liger_packing: 'Liger Kernel is incompatible with Packing',
 }
 
+interface GPUInfo {
+  id: number
+  name: string
+  memory_total_gb: number | null
+  memory_free_gb: number | null
+  utilization: number | null
+}
+
 interface Props {
   config: TrainingConfig
   setConfig: (fn: (prev: TrainingConfig) => TrainingConfig) => void
+  availableGpus?: GPUInfo[]
 }
 
-export default function TrainingSettingsStep({ config, setConfig }: Props) {
+export default function TrainingSettingsStep({ config, setConfig, availableGpus = [] }: Props) {
   const typeConfig = PARAM_CONFIG[config.train_type] || {}
   const commonConfig = PARAM_CONFIG.common
   
   // State for custom target modules input
   const [isCustomModules, setIsCustomModules] = useState(false)
   const [customModulesInput, setCustomModulesInput] = useState('')
+  
+  // GPU selection mode: 'auto' | 'select'
+  const [gpuMode, setGpuMode] = useState<'auto' | 'select'>(
+    config.gpu_ids !== null ? 'select' : 'auto'
+  )
+  
+  // Handle GPU checkbox toggle
+  const handleGpuToggle = (gpuId: number) => {
+    const currentIds = config.gpu_ids || []
+    const newIds = currentIds.includes(gpuId)
+      ? currentIds.filter(id => id !== gpuId)
+      : [...currentIds, gpuId].sort((a, b) => a - b)
+    setConfig(p => ({ ...p, gpu_ids: newIds.length > 0 ? newIds : null, num_gpus: null }))
+  }
+  
+  // Handle GPU mode change
+  const handleGpuModeChange = (mode: 'auto' | 'select') => {
+    setGpuMode(mode)
+    if (mode === 'auto') {
+      setConfig(p => ({ ...p, gpu_ids: null, num_gpus: null }))
+    } else {
+      // Default to first GPU when switching to select mode
+      setConfig(p => ({ ...p, gpu_ids: availableGpus.length > 0 ? [0] : null, num_gpus: null }))
+    }
+  }
   
   // Check if current target_modules is a custom value (not in predefined options)
   useEffect(() => {
@@ -363,7 +397,13 @@ export default function TrainingSettingsStep({ config, setConfig }: Props) {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           {Object.entries(TRAINING_METHOD_CONFIG).map(([id, cfg]) => (
             <button key={id} 
-              onClick={() => setConfig(p => ({ ...p, training_method: id as any, rlhf_type: id === 'rlhf' ? 'dpo' : null }))}
+              onClick={() => setConfig(p => ({ 
+                ...p, 
+                training_method: id as any, 
+                rlhf_type: id === 'rlhf' ? 'dpo' : null,
+                // PT (Pre-Training) requires Full parameter training - auto-set train_type
+                train_type: id === 'pt' ? 'full' : p.train_type
+              }))}
               className={`p-4 rounded-lg border-2 text-left transition-all ${config.training_method === id ? 'border-blue-500 bg-white shadow-sm' : 'border-slate-200 bg-white/50 hover:border-slate-300'}`}>
               <span className="font-semibold text-sm block text-slate-900">{cfg.label}</span>
               <span className="text-xs text-slate-500 mt-1 block">{cfg.desc}</span>
@@ -446,26 +486,47 @@ export default function TrainingSettingsStep({ config, setConfig }: Props) {
         </div>
       )}
       
-      {/* Training Type (Parameter Efficient) */}
+      {/* Training Type (Parameter Efficient) - PT only supports Full */}
       <div>
         <div className="flex items-center gap-1 mb-2">
           <label className="text-sm font-medium text-slate-700">Parameter Efficiency</label>
-          <Tooltip text="LoRA: Efficient adapters. QLoRA: 4-bit quantized for less memory. AdaLoRA: Adaptive rank. Full: All parameters (most memory)." />
+          <Tooltip text={config.training_method === 'pt' 
+            ? "Pre-Training requires Full parameter training to create a new base model. LoRA/QLoRA create adapters, not base models."
+            : "LoRA: Efficient adapters. QLoRA: 4-bit quantized for less memory. AdaLoRA: Adaptive rank. Full: All parameters (most memory)."} />
         </div>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-          {[
-            { id: 'lora', name: 'LoRA', desc: 'Balanced' },
-            { id: 'qlora', name: 'QLoRA', desc: 'Low memory' },
-            { id: 'adalora', name: 'AdaLoRA', desc: 'Adaptive' },
-            { id: 'full', name: 'Full', desc: 'Best quality' },
-          ].map((t) => (
-            <button key={t.id} onClick={() => applyDefaults(t.id as any)}
-              className={`p-3 rounded-lg border-2 text-center transition-all ${config.train_type === t.id ? 'border-blue-500 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}>
-              <span className="font-medium text-sm block">{t.name}</span>
-              <span className="text-xs text-slate-500">{t.desc}</span>
-            </button>
-          ))}
-        </div>
+        {config.training_method === 'pt' ? (
+          /* PT (Pre-Training) - Full only */
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+            <div className="flex items-center gap-3">
+              <div className="p-3 rounded-lg border-2 border-blue-500 bg-blue-50 text-center flex-shrink-0">
+                <span className="font-medium text-sm block">Full</span>
+                <span className="text-xs text-slate-500">Required</span>
+              </div>
+              <div className="text-sm text-amber-800">
+                <p className="font-medium">Pre-Training requires Full parameter training</p>
+                <p className="text-xs mt-1 text-amber-600">
+                  Continuous pre-training creates a new base model. LoRA/QLoRA create adapters that sit on top of a base model - not suitable for pre-training.
+                </p>
+              </div>
+            </div>
+          </div>
+        ) : (
+          /* SFT and RLHF - All options available */
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            {[
+              { id: 'lora', name: 'LoRA', desc: 'Balanced' },
+              { id: 'qlora', name: 'QLoRA', desc: 'Low memory' },
+              { id: 'adalora', name: 'AdaLoRA', desc: 'Adaptive' },
+              { id: 'full', name: 'Full', desc: 'Best quality' },
+            ].map((t) => (
+              <button key={t.id} onClick={() => applyDefaults(t.id as any)}
+                className={`p-3 rounded-lg border-2 text-center transition-all ${config.train_type === t.id ? 'border-blue-500 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}>
+                <span className="font-medium text-sm block">{t.name}</span>
+                <span className="text-xs text-slate-500">{t.desc}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* General Settings */}
@@ -770,41 +831,89 @@ export default function TrainingSettingsStep({ config, setConfig }: Props) {
         <div className="mt-4 pt-4 border-t border-emerald-200">
           <div className="flex items-center gap-2 mb-3">
             <span className="font-medium text-sm text-slate-700">GPU Selection</span>
-            <Tooltip text="By default, all available GPUs are used. You can specify which GPUs to use or limit the number of GPUs." />
+            <Tooltip text="Select which GPUs to use for training. You can use all GPUs or select specific ones." />
+            {availableGpus.length > 0 && (
+              <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">
+                {availableGpus.length} GPU{availableGpus.length > 1 ? 's' : ''} available
+              </span>
+            )}
           </div>
-          <div className="space-y-3">
-            <label className="flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all border-slate-200 hover:border-emerald-300 bg-white">
-              <input type="radio" name="gpu_mode" 
-                checked={config.gpu_ids === null && config.num_gpus === null}
-                onChange={() => setConfig(p => ({ ...p, gpu_ids: null, num_gpus: null }))}
-                className="mt-1 text-emerald-600 focus:ring-emerald-500" />
-              <div>
-                <span className="font-medium text-sm text-slate-900">Auto (Use All GPUs)</span>
-                <p className="text-xs text-slate-500">Automatically detect and use all available GPUs for maximum training speed.</p>
-              </div>
-            </label>
-            <label className="flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all border-slate-200 hover:border-emerald-300 bg-white">
-              <input type="radio" name="gpu_mode" 
-                checked={config.num_gpus !== null}
-                onChange={() => setConfig(p => ({ ...p, gpu_ids: null, num_gpus: 1 }))}
-                className="mt-1 text-emerald-600 focus:ring-emerald-500" />
-              <div className="flex-1">
-                <span className="font-medium text-sm text-slate-900">Specify Number of GPUs</span>
-                <p className="text-xs text-slate-500 mb-2">Use a specific number of GPUs (starting from GPU 0).</p>
-                {config.num_gpus !== null && (
-                  <select 
-                    value={config.num_gpus || 1}
-                    onChange={(e) => setConfig(p => ({ ...p, num_gpus: parseInt(e.target.value) }))}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:ring-2 focus:ring-emerald-500">
-                    {[1, 2, 4, 8, 16, 32, 64, 80].map(n => (
-                      <option key={n} value={n}>{n} GPU{n > 1 ? 's' : ''}</option>
-                    ))}
-                  </select>
-                )}
-              </div>
-            </label>
-          </div>
-          <p className="text-xs text-slate-500 mt-2">💡 Multi-GPU training is enabled automatically when more than 1 GPU is used.</p>
+          
+          {availableGpus.length === 0 ? (
+            <div className="p-4 bg-amber-50 rounded-lg border border-amber-200">
+              <p className="text-sm text-amber-700">No GPUs detected. Training requires at least one GPU.</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {/* Auto mode */}
+              <label className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${
+                gpuMode === 'auto' ? 'border-emerald-500 bg-emerald-50' : 'border-slate-200 hover:border-emerald-300 bg-white'
+              }`}>
+                <input type="radio" name="gpu_mode" 
+                  checked={gpuMode === 'auto'}
+                  onChange={() => handleGpuModeChange('auto')}
+                  className="mt-1 text-emerald-600 focus:ring-emerald-500" />
+                <div>
+                  <span className="font-medium text-sm text-slate-900">Auto (Use All {availableGpus.length} GPUs)</span>
+                  <p className="text-xs text-slate-500">Use all available GPUs for maximum training speed.</p>
+                </div>
+              </label>
+              
+              {/* Select specific GPUs mode */}
+              <label className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${
+                gpuMode === 'select' ? 'border-emerald-500 bg-emerald-50' : 'border-slate-200 hover:border-emerald-300 bg-white'
+              }`}>
+                <input type="radio" name="gpu_mode" 
+                  checked={gpuMode === 'select'}
+                  onChange={() => handleGpuModeChange('select')}
+                  className="mt-1 text-emerald-600 focus:ring-emerald-500" />
+                <div className="flex-1">
+                  <span className="font-medium text-sm text-slate-900">Select Specific GPUs</span>
+                  <p className="text-xs text-slate-500 mb-3">Choose which GPUs to use for training.</p>
+                  
+                  {gpuMode === 'select' && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {availableGpus.map((gpu) => (
+                        <label key={gpu.id} 
+                          className={`flex items-center gap-3 p-2 rounded-lg border cursor-pointer transition-all ${
+                            config.gpu_ids?.includes(gpu.id) 
+                              ? 'border-emerald-400 bg-emerald-50' 
+                              : 'border-slate-200 hover:border-emerald-300 bg-white'
+                          }`}>
+                          <input 
+                            type="checkbox"
+                            checked={config.gpu_ids?.includes(gpu.id) || false}
+                            onChange={() => handleGpuToggle(gpu.id)}
+                            className="w-4 h-4 text-emerald-600 rounded focus:ring-emerald-500"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-medium text-sm text-slate-900">GPU {gpu.id}</span>
+                              {gpu.memory_total_gb && (
+                                <span className="text-xs text-slate-500">{gpu.memory_total_gb}GB</span>
+                              )}
+                            </div>
+                            <p className="text-xs text-slate-500 truncate">{gpu.name}</p>
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </label>
+              
+              {/* Show selected GPUs summary */}
+              {gpuMode === 'select' && config.gpu_ids && config.gpu_ids.length > 0 && (
+                <div className="p-2 bg-emerald-50 rounded-lg">
+                  <p className="text-xs text-emerald-700">
+                    <strong>Selected:</strong> GPU {config.gpu_ids.join(', ')} ({config.gpu_ids.length} GPU{config.gpu_ids.length > 1 ? 's' : ''})
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+          
+          <p className="text-xs text-slate-500 mt-2">💡 Multi-GPU training is enabled automatically when more than 1 GPU is selected.</p>
         </div>
       </div>
     </div>

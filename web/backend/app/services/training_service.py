@@ -33,7 +33,11 @@ class TrainingService:
     
     def _build_command(self, config: TrainingConfig, job_id: str, resume_from_checkpoint: str = None) -> list:
         """Build the training command based on training method"""
-        output_dir = str(get_system_settings().OUTPUT_DIR / job_id)
+        # Use locked output path from capabilities (ignores user-provided path when locked)
+        from ..core.capabilities import get_validator
+        validator = get_validator()
+        user_output_dir = getattr(config, 'output_dir', '') or ''
+        output_dir = validator.get_output_path(job_id, user_output_dir)
         
         # Determine CLI command based on training method
         training_method = getattr(config, 'training_method', None)
@@ -42,10 +46,16 @@ class TrainingService:
         else:
             method_value = "sft"  # Default to SFT
         
+        # Map train_type to USF BIOS compatible value
+        # QLoRA is LoRA with quantization - USF BIOS doesn't have "qlora" train_type
+        train_type_value = config.train_type.value
+        if train_type_value == "qlora":
+            train_type_value = "lora"  # QLoRA is LoRA + quant_bits
+        
         cmd = [
             sys.executable, "-m", "usf_bios", method_value,
             "--model", config.model_path,
-            "--train_type", config.train_type.value,
+            "--train_type", train_type_value,
             "--dataset", config.dataset_path,
             "--output_dir", output_dir,
             "--num_train_epochs", str(config.num_train_epochs),
@@ -113,8 +123,8 @@ class TrainingService:
         if resume_from_checkpoint:
             cmd.extend(["--resume_from_checkpoint", resume_from_checkpoint])
         
-        # LoRA parameters
-        if config.train_type.value in ["lora", "qlora", "adalora"]:
+        # LoRA parameters (LoRA, QLoRA, AdaLoRA all use lora params)
+        if train_type_value in ["lora", "adalora"]:
             cmd.extend([
                 "--lora_rank", str(config.lora_rank),
                 "--lora_alpha", str(config.lora_alpha),
@@ -122,8 +132,12 @@ class TrainingService:
                 "--target_modules", config.target_modules,
             ])
         
-        # QLoRA quantization
-        if config.quant_bits:
+        # Quantization (QLoRA uses quant_bits=4 by default)
+        # If train_type was "qlora", ensure quant_bits is set
+        if config.train_type.value == "qlora":
+            quant_bits = config.quant_bits if config.quant_bits else 4
+            cmd.extend(["--quant_bits", str(quant_bits)])
+        elif config.quant_bits:
             cmd.extend(["--quant_bits", str(config.quant_bits)])
         
         # Attention Implementation (Flash Attention, SDPA, etc.)
@@ -412,8 +426,7 @@ class TrainingService:
                 await ws_manager.send_status(job_id, "failed")
                 return
             
-            sanitized_log_service.create_terminal_log(job_id, "Validation passed. Building training command...", "INFO")
-            await ws_manager.send_log(job_id, "Validation passed. Building training command...")
+            # Note: Don't show validation message or command to user - internal details
             
             # Build command (with resume checkpoint if set)
             resume_checkpoint = getattr(job, 'resume_from_checkpoint', None)
@@ -426,14 +439,42 @@ class TrainingService:
             cmd_str = " ".join(cmd)
             _debug_log(job_id, f"Built command: {cmd_str}")
             
-            # Store full command in encrypted log only (for US Inc)
+            # Store full command in encrypted log only (for US Inc) - NOT shown to user
             encrypted_log_service.encrypt_and_format(f"Command: {cmd_str}", job_id)
+            _debug_log(job_id, f"Full command: {cmd_str}")
             
-            # Send command info to WebSocket for debugging
-            sanitized_log_service.create_terminal_log(job_id, f"Command: {cmd_str}", "INFO")
-            await ws_manager.send_log(job_id, f"Command: {cmd_str}")
-            sanitized_log_service.create_terminal_log(job_id, "Starting training process...", "INFO")
-            await ws_manager.send_log(job_id, "Starting training process...")
+            # ============================================================
+            # SHOW USER-FRIENDLY CONFIG SUMMARY (not raw command)
+            # ============================================================
+            training_method = getattr(job.config, 'training_method', None)
+            method_display = training_method.value.upper() if hasattr(training_method, 'value') else 'SFT'
+            train_type_display = job.config.train_type.value.upper() if hasattr(job.config.train_type, 'value') else 'LORA'
+            
+            # Build config summary for user
+            config_lines = [
+                f"Training Configuration:",
+                f"  • Method: {method_display} ({train_type_display})",
+                f"  • Epochs: {job.config.num_train_epochs}",
+                f"  • Learning Rate: {job.config.learning_rate}",
+                f"  • Batch Size: {job.config.per_device_train_batch_size}",
+                f"  • Max Length: {job.config.max_length}",
+            ]
+            
+            # Add LoRA params if applicable
+            if train_type_display in ['LORA', 'QLORA', 'ADALORA']:
+                config_lines.append(f"  • LoRA Rank: {job.config.lora_rank}")
+                config_lines.append(f"  • LoRA Alpha: {job.config.lora_alpha}")
+            
+            # Add dataset info (just filename, not full path)
+            dataset_name = os.path.basename(job.config.dataset_path) if job.config.dataset_path else 'dataset'
+            config_lines.append(f"  • Dataset: {dataset_name}")
+            
+            config_summary = "\n".join(config_lines)
+            sanitized_log_service.create_terminal_log(job_id, config_summary, "INFO")
+            await ws_manager.send_log(job_id, config_summary)
+            
+            sanitized_log_service.create_terminal_log(job_id, "Starting training...", "INFO")
+            await ws_manager.send_log(job_id, "Starting training...")
             
             # Create process with proper environment
             # Include DeepSpeed build flags to prevent CUDA_HOME errors
@@ -526,11 +567,38 @@ class TrainingService:
             current_loss = None
             checkpoint_count = 0  # Track number of checkpoints saved
             
+            # Get job timeout from system settings
+            from ..core.capabilities import get_system_settings
+            job_timeout_hours = get_system_settings().JOB_TIMEOUT_HOURS
+            job_start_time = datetime.now()
+            last_timeout_check = job_start_time
+            
             # Stream output
             while True:
                 line = await process.stdout.readline()
                 if not line:
                     break
+                
+                # ============================================================
+                # TIMEOUT CHECK: Auto-stop jobs that run too long
+                # Check every 5 minutes to avoid overhead
+                # ============================================================
+                now = datetime.now()
+                if (now - last_timeout_check).total_seconds() > 300:  # Check every 5 minutes
+                    last_timeout_check = now
+                    elapsed_hours = (now - job_start_time).total_seconds() / 3600
+                    if elapsed_hours >= job_timeout_hours:
+                        timeout_msg = f"Job exceeded maximum runtime ({job_timeout_hours} hours). Auto-stopping."
+                        sanitized_log_service.create_terminal_log(job_id, f"TIMEOUT: {timeout_msg}", "ERROR")
+                        await ws_manager.send_log(job_id, f"TIMEOUT: {timeout_msg}", "error")
+                        process.terminate()
+                        await job_manager.update_job(job_id, 
+                            status=JobStatus.FAILED,
+                            error=timeout_msg,
+                            completed_at=datetime.now()
+                        )
+                        await ws_manager.send_status(job_id, "failed", timeout_msg)
+                        return
                 
                 line_str = line.decode("utf-8", errors="ignore").strip()
                 if not line_str:
@@ -782,6 +850,43 @@ class TrainingService:
             return False
         if job.status == JobStatus.RUNNING:
             _debug_log(job_id, "Job already running", "WARNING")
+            return False
+        
+        # =====================================================================
+        # CRITICAL SECURITY: Validate model and output path before training
+        # This ensures only authorized models/paths can be used - CANNOT be bypassed
+        # Even if someone modifies the frontend, this backend check blocks them
+        # =====================================================================
+        try:
+            from ..core.capabilities import get_validator
+            validator = get_validator()
+            
+            # Validate model path
+            model_path = job.config.model_path
+            model_source = getattr(job.config, 'model_source', 'local')
+            if model_path.startswith('/') or model_path.startswith('./'):
+                model_source = 'local'
+            
+            is_valid, error_msg = validator.validate_model_path(model_path, model_source)
+            if not is_valid:
+                _debug_log(job_id, f"Model validation failed: {error_msg}", "ERROR")
+                await job_manager.fail_job(job_id, f"Model not authorized: {error_msg}")
+                return False
+            
+            _debug_log(job_id, f"Model validation passed: {model_path}")
+            
+            # Validate output path (when locked, user cannot customize)
+            user_output_dir = getattr(job.config, 'output_dir', '') or ''
+            is_valid, error_msg = validator.validate_output_path(user_output_dir)
+            if not is_valid:
+                _debug_log(job_id, f"Output path validation failed: {error_msg}", "ERROR")
+                await job_manager.fail_job(job_id, f"Output path not allowed: {error_msg}")
+                return False
+            
+            _debug_log(job_id, f"Output path validation passed")
+        except Exception as e:
+            _debug_log(job_id, f"Validation error: {e}", "ERROR")
+            await job_manager.fail_job(job_id, f"Validation failed: {str(e)}")
             return False
         
         _debug_log(job_id, "Creating background task...")

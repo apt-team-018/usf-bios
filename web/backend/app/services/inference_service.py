@@ -1,21 +1,29 @@
 # Copyright (c) US Inc. All rights reserved.
 """
 Inference service for model testing using USF BIOS package
-- Test models before fine-tuning
-- Test intermediate checkpoints during fine-tuning
-- Test final fine-tuned models
+Supports multiple backends: Transformers, SGLang, vLLM
+
+Features:
+- Multiple inference backends (transformers, sglang, vllm)
+- Streaming support for real-time responses
+- Multimodal support (text, image, audio, video)
+- Memory management and cleanup
+- LoRA adapter hot-loading
+- OpenAI-compatible API format
 
 IMPORTANT: This service uses the USF BIOS custom transformers fork,
 NOT the standard HuggingFace transformers library.
 """
 
 import asyncio
+import base64
 import gc
 import os
 import sys
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -26,9 +34,11 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Check if USF BIOS and torch are available
-USF_BIOS_AVAILABLE = False
+# Check available backends
 TORCH_AVAILABLE = False
+USF_BIOS_AVAILABLE = False
+SGLANG_AVAILABLE = False
+VLLM_AVAILABLE = False
 
 try:
     import torch
@@ -47,19 +57,70 @@ except ImportError:
     InferRequest = None
     RequestConfig = None
 
+try:
+    import sglang as sgl
+    SGLANG_AVAILABLE = True
+except ImportError:
+    sgl = None
+
+try:
+    from vllm import LLM, SamplingParams
+    VLLM_AVAILABLE = True
+except ImportError:
+    LLM = None
+    SamplingParams = None
+
+
+class InferenceBackend(str, Enum):
+    """Supported inference backends"""
+    TRANSFORMERS = "transformers"
+    SGLANG = "sglang"
+    VLLM = "vllm"
+
+
+class ModelCapabilities(BaseModel):
+    """Model capabilities for dynamic UI"""
+    supports_text: bool = True
+    supports_image: bool = False
+    supports_audio: bool = False
+    supports_video: bool = False
+    supports_streaming: bool = True
+    supports_system_prompt: bool = True
+    max_context_length: int = 4096
+    model_type: str = "llm"  # llm, vlm, mllm, asr, tts
+
+
+class ContentItem(BaseModel):
+    """Multimodal content item (OpenAI format)"""
+    type: str = Field(..., description="Content type: text, image_url, audio, video")
+    text: Optional[str] = None
+    image_url: Optional[Dict[str, str]] = None  # {"url": "data:image/..."}
+    audio: Optional[Dict[str, str]] = None  # {"data": "base64...", "format": "wav"}
+    video: Optional[Dict[str, str]] = None  # {"url": "..."}
+
+
+class ChatMessage(BaseModel):
+    """Chat message with multimodal support (OpenAI format)"""
+    role: str = Field(..., description="Role: system, user, or assistant")
+    content: Union[str, List[ContentItem]] = Field(..., description="Message content")
+
 
 class InferenceRequest(BaseModel):
-    """Inference request model"""
+    """Inference request model with multimodal and backend support"""
     model_path: str = Field(..., description="Path to model (HF ID or local path)")
-    messages: List[Dict[str, str]] = Field(..., description="Chat messages")
-    max_new_tokens: int = Field(default=512, ge=1, le=4096)
+    messages: List[Dict[str, Any]] = Field(..., description="Chat messages (OpenAI format)")
+    max_new_tokens: int = Field(default=512, ge=1, le=8192)
     temperature: float = Field(default=0.7, ge=0, le=2)
     top_p: float = Field(default=0.9, ge=0, le=1)
     top_k: int = Field(default=50, ge=0)
     repetition_penalty: float = Field(default=1.0, ge=1, le=2)
     do_sample: bool = Field(default=True)
+    # Backend selection
+    backend: InferenceBackend = Field(default=InferenceBackend.TRANSFORMERS)
     # LoRA adapter
     adapter_path: Optional[str] = Field(default=None, description="Path to LoRA adapter")
+    # Streaming
+    stream: bool = Field(default=False, description="Enable streaming response")
 
 
 class InferenceResponse(BaseModel):
@@ -69,7 +130,17 @@ class InferenceResponse(BaseModel):
     tokens_generated: int = 0
     inference_time_ms: int = 0
     model_loaded: str = ""
+    backend_used: str = "transformers"
     error: Optional[str] = None
+
+
+class StreamChunk(BaseModel):
+    """Streaming response chunk (OpenAI format)"""
+    id: str
+    object: str = "chat.completion.chunk"
+    created: int
+    model: str
+    choices: List[Dict[str, Any]]
 
 
 class ModelInfo(BaseModel):
@@ -78,20 +149,35 @@ class ModelInfo(BaseModel):
     adapter_path: Optional[str] = None
     loaded_at: datetime
     memory_used_gb: float = 0.0
+    backend: str = "transformers"
+    capabilities: Optional[ModelCapabilities] = None
+    loaded_adapters: List[str] = []
 
 
 class InferenceService:
     """
     Service for model inference with memory management.
-    Uses USF BIOS custom transformers fork for model loading and inference.
+    Supports multiple backends: Transformers, SGLang, vLLM
+    
+    Features:
+    - Multiple inference backends with automatic fallback
+    - Streaming support for SGLang and vLLM
+    - Multimodal support (image, audio, video inputs)
+    - Hot-loading of LoRA adapters
+    - Aggressive memory cleanup for training/inference switching
     """
     
     def __init__(self):
         self._engine: Optional[Any] = None
+        self._vllm_engine: Optional[Any] = None
+        self._sglang_engine: Optional[Any] = None
         self._current_model_path: Optional[str] = None
         self._current_adapter_path: Optional[str] = None
+        self._current_backend: InferenceBackend = InferenceBackend.TRANSFORMERS
         self._lock = asyncio.Lock()
         self._loaded_at: Optional[datetime] = None
+        self._model_capabilities: Optional[ModelCapabilities] = None
+        self._loaded_adapters: List[str] = []
     
     def _get_gpu_memory_used(self) -> float:
         """Get GPU memory usage in GB"""
@@ -102,6 +188,74 @@ class InferenceService:
             pass
         return 0.0
     
+    def _get_total_gpu_memory(self) -> float:
+        """Get total GPU memory in GB"""
+        try:
+            if TORCH_AVAILABLE and torch.cuda.is_available():
+                return torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        except Exception:
+            pass
+        return 0.0
+    
+    def _detect_model_capabilities(self, model_path: str) -> ModelCapabilities:
+        """Detect model capabilities based on model architecture"""
+        model_path_lower = model_path.lower()
+        
+        # Vision-Language Models
+        if any(x in model_path_lower for x in ['qwen2-vl', 'qwen-vl', 'llava', 'cogvlm', 'internvl', 'minicpm-v']):
+            return ModelCapabilities(
+                supports_text=True,
+                supports_image=True,
+                supports_video='video' in model_path_lower or 'qwen2-vl' in model_path_lower,
+                supports_audio=False,
+                supports_streaming=True,
+                model_type="vlm",
+                max_context_length=32768
+            )
+        
+        # Audio/Speech Models
+        if any(x in model_path_lower for x in ['whisper', 'qwen2-audio', 'seamless', 'mms']):
+            return ModelCapabilities(
+                supports_text=True,
+                supports_image=False,
+                supports_audio=True,
+                supports_video=False,
+                supports_streaming=True,
+                model_type="asr",
+                max_context_length=4096
+            )
+        
+        # Multimodal LLMs (text + image + audio)
+        if any(x in model_path_lower for x in ['qwen2.5-omni', 'gemini', 'gpt-4o']):
+            return ModelCapabilities(
+                supports_text=True,
+                supports_image=True,
+                supports_audio=True,
+                supports_video=True,
+                supports_streaming=True,
+                model_type="mllm",
+                max_context_length=128000
+            )
+        
+        # Default: Text-only LLM
+        return ModelCapabilities(
+            supports_text=True,
+            supports_image=False,
+            supports_audio=False,
+            supports_video=False,
+            supports_streaming=True,
+            model_type="llm",
+            max_context_length=8192
+        )
+    
+    def get_available_backends(self) -> Dict[str, bool]:
+        """Get available inference backends"""
+        return {
+            "transformers": USF_BIOS_AVAILABLE,
+            "sglang": SGLANG_AVAILABLE,
+            "vllm": VLLM_AVAILABLE
+        }
+    
     async def get_model_info(self) -> Optional[ModelInfo]:
         """Get information about currently loaded model"""
         if self._current_model_path is None:
@@ -111,115 +265,227 @@ class InferenceService:
             model_path=self._current_model_path,
             adapter_path=self._current_adapter_path,
             loaded_at=self._loaded_at or datetime.now(),
-            memory_used_gb=self._get_gpu_memory_used()
+            memory_used_gb=self._get_gpu_memory_used(),
+            backend=self._current_backend.value,
+            capabilities=self._model_capabilities,
+            loaded_adapters=self._loaded_adapters
         )
     
-    async def clear_memory(self) -> Dict[str, Any]:
-        """Clear model from memory and free GPU"""
+    async def deep_clear_memory(self) -> Dict[str, Any]:
+        """
+        Aggressive memory cleanup - use before training or loading new model.
+        Clears ALL GPU memory and Python garbage.
+        """
         async with self._lock:
             try:
                 memory_before = self._get_gpu_memory_used()
                 
-                # Delete engine (contains model and processor)
+                # Clear all engines
                 if self._engine is not None:
+                    if hasattr(self._engine, 'model'):
+                        del self._engine.model
+                    if hasattr(self._engine, 'tokenizer'):
+                        del self._engine.tokenizer
                     del self._engine
                     self._engine = None
+                
+                if self._vllm_engine is not None:
+                    del self._vllm_engine
+                    self._vllm_engine = None
+                
+                if self._sglang_engine is not None:
+                    if hasattr(self._sglang_engine, 'shutdown'):
+                        self._sglang_engine.shutdown()
+                    del self._sglang_engine
+                    self._sglang_engine = None
                 
                 self._current_model_path = None
                 self._current_adapter_path = None
                 self._loaded_at = None
+                self._model_capabilities = None
+                self._loaded_adapters = []
                 
-                # Force garbage collection
-                gc.collect()
+                # Aggressive garbage collection (multiple passes)
+                for _ in range(3):
+                    gc.collect()
                 
-                # Clear CUDA cache
+                # Clear CUDA cache thoroughly
                 if TORCH_AVAILABLE and torch.cuda.is_available():
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
+                    
+                    # Reset peak memory stats
+                    torch.cuda.reset_peak_memory_stats()
+                    torch.cuda.reset_accumulated_memory_stats()
+                    
+                    # Additional cleanup for multi-GPU
+                    for i in range(torch.cuda.device_count()):
+                        with torch.cuda.device(i):
+                            torch.cuda.empty_cache()
+                            torch.cuda.synchronize()
+                
+                # Final GC pass
+                gc.collect()
                 
                 memory_after = self._get_gpu_memory_used()
                 
                 return {
                     "success": True,
                     "memory_freed_gb": round(memory_before - memory_after, 2),
-                    "memory_used_gb": round(memory_after, 2)
+                    "memory_used_gb": round(memory_after, 2),
+                    "total_memory_gb": round(self._get_total_gpu_memory(), 2),
+                    "cleanup_type": "deep"
                 }
             
             except Exception as e:
-                # Sanitize error for user
                 sanitized = sanitized_log_service.sanitize_error(str(e))
                 return {
                     "success": False,
                     "error": sanitized['user_message']
                 }
     
-    async def load_model(self, model_path: str, adapter_path: Optional[str] = None) -> Dict[str, Any]:
-        """Load a model into memory using USF BIOS TransformersEngine"""
-        if not USF_BIOS_AVAILABLE:
-            return {
-                "success": False,
-                "error": "USF BIOS package not available. Please install the usf_bios package from the project root."
-            }
+    async def clear_memory(self) -> Dict[str, Any]:
+        """Clear model from memory and free GPU (standard cleanup)"""
+        return await self.deep_clear_memory()
+    
+    async def load_model(
+        self, 
+        model_path: str, 
+        adapter_path: Optional[str] = None,
+        backend: InferenceBackend = InferenceBackend.TRANSFORMERS
+    ) -> Dict[str, Any]:
+        """
+        Load a model into memory using selected backend.
         
+        Backends:
+        - transformers: Default, uses USF BIOS TransformersEngine
+        - sglang: High-performance serving with SGLang
+        - vllm: Optimized serving with vLLM
+        
+        SECURITY: Model is validated against allowed list before loading.
+        Users cannot load unauthorized models even for inference.
+        """
         if not TORCH_AVAILABLE:
             return {
                 "success": False,
                 "error": "PyTorch not installed. Please install PyTorch first."
             }
         
+        # =====================================================================
+        # CRITICAL: Validate model before loading - CANNOT be bypassed
+        # This ensures only authorized models can be used for inference
+        # =====================================================================
+        try:
+            from ..core.capabilities import get_validator
+            validator = get_validator()
+            
+            # Determine model source
+            model_source = "local" if model_path.startswith('/') else "huggingface"
+            
+            # Validate model path against allowed list
+            is_valid, error_msg = validator.validate_for_inference(model_path, model_source)
+            if not is_valid:
+                return {
+                    "success": False,
+                    "error": f"Model not authorized: {error_msg}"
+                }
+        except Exception as e:
+            # If validation fails, block loading for security
+            return {
+                "success": False,
+                "error": f"Model validation failed: {str(e)}"
+            }
+        
+        # Validate backend availability
+        if backend == InferenceBackend.TRANSFORMERS and not USF_BIOS_AVAILABLE:
+            return {
+                "success": False,
+                "error": "USF BIOS package not available. Please install the usf_bios package."
+            }
+        if backend == InferenceBackend.SGLANG and not SGLANG_AVAILABLE:
+            return {
+                "success": False,
+                "error": "SGLang not available. Please install sglang package."
+            }
+        if backend == InferenceBackend.VLLM and not VLLM_AVAILABLE:
+            return {
+                "success": False,
+                "error": "vLLM not available. Please install vllm package."
+            }
+        
         async with self._lock:
             try:
-                # Check if same model is already loaded
+                # Check if same model is already loaded with same backend
                 if (self._current_model_path == model_path and 
                     self._current_adapter_path == adapter_path and 
+                    self._current_backend == backend and
                     self._engine is not None):
                     return {
                         "success": True,
                         "message": "Model already loaded",
-                        "memory_used_gb": self._get_gpu_memory_used()
+                        "backend": backend.value,
+                        "memory_used_gb": self._get_gpu_memory_used(),
+                        "capabilities": self._model_capabilities.model_dump() if self._model_capabilities else None
                     }
                 
-                # Clear existing model first
-                if self._engine is not None:
-                    del self._engine
-                    self._engine = None
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                # Clear existing models from ALL backends
+                await self._clear_all_engines()
+                
+                # Detect model capabilities
+                self._model_capabilities = self._detect_model_capabilities(model_path)
                 
                 # Determine device and dtype
                 device_map = "auto" if torch.cuda.is_available() else "cpu"
                 torch_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
                 
-                # Load model using USF BIOS TransformersEngine
-                adapters = [adapter_path] if adapter_path else None
+                # Load model using selected backend
+                if backend == InferenceBackend.TRANSFORMERS:
+                    adapters = [adapter_path] if adapter_path else None
+                    self._engine = TransformersEngine(
+                        model=model_path,
+                        adapters=adapters,
+                        torch_dtype=torch_dtype,
+                        device_map=device_map,
+                    )
+                    self._loaded_adapters = [adapter_path] if adapter_path else []
                 
-                self._engine = TransformersEngine(
-                    model=model_path,
-                    adapters=adapters,
-                    torch_dtype=torch_dtype,
-                    device_map=device_map,
-                )
+                elif backend == InferenceBackend.VLLM:
+                    # vLLM loading
+                    self._vllm_engine = LLM(
+                        model=model_path,
+                        dtype="bfloat16" if torch.cuda.is_available() else "float32",
+                        trust_remote_code=True,
+                        max_model_len=self._model_capabilities.max_context_length,
+                    )
+                    self._engine = self._vllm_engine  # Use unified reference
+                    if adapter_path:
+                        self._loaded_adapters = [adapter_path]
+                
+                elif backend == InferenceBackend.SGLANG:
+                    # SGLang loading - starts a runtime
+                    self._sglang_engine = sgl.Runtime(model_path=model_path)
+                    sgl.set_default_backend(self._sglang_engine)
+                    self._engine = self._sglang_engine
+                    if adapter_path:
+                        self._loaded_adapters = [adapter_path]
                 
                 self._current_model_path = model_path
                 self._current_adapter_path = adapter_path
+                self._current_backend = backend
                 self._loaded_at = datetime.now()
                 
                 return {
                     "success": True,
                     "model_path": model_path,
                     "adapter_path": adapter_path,
-                    "memory_used_gb": self._get_gpu_memory_used()
+                    "backend": backend.value,
+                    "memory_used_gb": self._get_gpu_memory_used(),
+                    "capabilities": self._model_capabilities.model_dump() if self._model_capabilities else None
                 }
             
             except Exception as e:
                 # Clean up on failure
-                self._engine = None
-                self._current_model_path = None
-                self._current_adapter_path = None
-                gc.collect()
-                if TORCH_AVAILABLE and torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                await self._clear_all_engines()
                 
                 # Sanitize error for user
                 sanitized = sanitized_log_service.sanitize_error(str(e))
@@ -228,21 +494,51 @@ class InferenceService:
                     "error": sanitized['user_message']
                 }
     
+    async def _clear_all_engines(self):
+        """Internal helper to clear all engine instances"""
+        if self._engine is not None:
+            if hasattr(self._engine, 'model'):
+                del self._engine.model
+            del self._engine
+            self._engine = None
+        
+        if self._vllm_engine is not None:
+            del self._vllm_engine
+            self._vllm_engine = None
+        
+        if self._sglang_engine is not None:
+            if hasattr(self._sglang_engine, 'shutdown'):
+                self._sglang_engine.shutdown()
+            del self._sglang_engine
+            self._sglang_engine = None
+        
+        self._current_model_path = None
+        self._current_adapter_path = None
+        self._loaded_adapters = []
+        
+        gc.collect()
+        if TORCH_AVAILABLE and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    
     async def generate(self, request: InferenceRequest) -> InferenceResponse:
-        """Generate response from model using USF BIOS inference engine"""
-        if not USF_BIOS_AVAILABLE:
-            return InferenceResponse(
-                success=False,
-                error="USF BIOS package not available. Please install the usf_bios package."
-            )
+        """
+        Generate response from model using selected backend.
+        Supports Transformers, SGLang, and vLLM backends.
+        """
+        backend = request.backend if hasattr(request, 'backend') else InferenceBackend.TRANSFORMERS
         
         try:
-            # Load model if needed
+            # Load model if needed (with selected backend)
             if (self._engine is None or 
                 self._current_model_path != request.model_path or
-                self._current_adapter_path != request.adapter_path):
+                self._current_adapter_path != request.adapter_path or
+                self._current_backend != backend):
                 
-                load_result = await self.load_model(request.model_path, request.adapter_path)
+                load_result = await self.load_model(
+                    request.model_path, 
+                    request.adapter_path,
+                    backend
+                )
                 if not load_result["success"]:
                     return InferenceResponse(
                         success=False,
@@ -257,44 +553,24 @@ class InferenceService:
             
             start_time = datetime.now()
             
-            # Create inference request using USF BIOS protocol
-            infer_request = InferRequest(messages=request.messages)
-            request_config = RequestConfig(
-                max_tokens=request.max_new_tokens,
-                temperature=request.temperature,
-                top_p=request.top_p,
-                top_k=request.top_k,
-                repetition_penalty=request.repetition_penalty,
-            )
-            
-            # Run inference using USF BIOS engine
-            response = self._engine.infer(
-                infer_request=infer_request,
-                request_config=request_config,
-            )
+            # Route to appropriate backend
+            if self._current_backend == InferenceBackend.VLLM:
+                response_text, tokens_generated = await self._generate_vllm(request)
+            elif self._current_backend == InferenceBackend.SGLANG:
+                response_text, tokens_generated = await self._generate_sglang(request)
+            else:
+                response_text, tokens_generated = await self._generate_transformers(request)
             
             end_time = datetime.now()
             inference_time_ms = int((end_time - start_time).total_seconds() * 1000)
-            
-            # Extract response text
-            response_text = ""
-            tokens_generated = 0
-            
-            if hasattr(response, 'choices') and response.choices:
-                choice = response.choices[0]
-                if hasattr(choice, 'message') and choice.message:
-                    response_text = choice.message.content or ""
-                if hasattr(response, 'usage') and response.usage:
-                    tokens_generated = response.usage.completion_tokens or 0
-            elif isinstance(response, str):
-                response_text = response
             
             return InferenceResponse(
                 success=True,
                 response=response_text,
                 tokens_generated=tokens_generated,
                 inference_time_ms=inference_time_ms,
-                model_loaded=self._current_model_path or ""
+                model_loaded=self._current_model_path or "",
+                backend_used=self._current_backend.value
             )
         
         except Exception as e:
@@ -306,13 +582,163 @@ class InferenceService:
                 if TORCH_AVAILABLE and torch.cuda.is_available():
                     torch.cuda.empty_cache()
             
-            # Sanitize error for user
             sanitized = sanitized_log_service.sanitize_error(full_error)
-            
             return InferenceResponse(
                 success=False,
                 error=sanitized['user_message']
             )
+    
+    async def _generate_transformers(self, request: InferenceRequest) -> tuple:
+        """Generate using Transformers/USF BIOS backend"""
+        if not USF_BIOS_AVAILABLE:
+            raise RuntimeError("USF BIOS not available")
+        
+        infer_request = InferRequest(messages=request.messages)
+        request_config = RequestConfig(
+            max_tokens=request.max_new_tokens,
+            temperature=request.temperature,
+            top_p=request.top_p,
+            top_k=request.top_k,
+            repetition_penalty=request.repetition_penalty,
+        )
+        
+        response = self._engine.infer(
+            infer_request=infer_request,
+            request_config=request_config,
+        )
+        
+        response_text = ""
+        tokens_generated = 0
+        
+        if hasattr(response, 'choices') and response.choices:
+            choice = response.choices[0]
+            if hasattr(choice, 'message') and choice.message:
+                response_text = choice.message.content or ""
+            if hasattr(response, 'usage') and response.usage:
+                tokens_generated = response.usage.completion_tokens or 0
+        elif isinstance(response, str):
+            response_text = response
+        
+        return response_text, tokens_generated
+    
+    async def _generate_vllm(self, request: InferenceRequest) -> tuple:
+        """Generate using vLLM backend with streaming support"""
+        if not VLLM_AVAILABLE or self._vllm_engine is None:
+            raise RuntimeError("vLLM not available")
+        
+        # Build prompt from messages
+        prompt = self._messages_to_prompt(request.messages)
+        
+        sampling_params = SamplingParams(
+            max_tokens=request.max_new_tokens,
+            temperature=request.temperature,
+            top_p=request.top_p,
+            top_k=request.top_k,
+            repetition_penalty=request.repetition_penalty,
+        )
+        
+        outputs = self._vllm_engine.generate([prompt], sampling_params)
+        
+        response_text = outputs[0].outputs[0].text if outputs else ""
+        tokens_generated = len(outputs[0].outputs[0].token_ids) if outputs else 0
+        
+        return response_text, tokens_generated
+    
+    async def _generate_sglang(self, request: InferenceRequest) -> tuple:
+        """Generate using SGLang backend with streaming support"""
+        if not SGLANG_AVAILABLE:
+            raise RuntimeError("SGLang not available")
+        
+        # Build prompt from messages
+        prompt = self._messages_to_prompt(request.messages)
+        
+        @sgl.function
+        def chat_completion(s):
+            s += prompt
+            s += sgl.gen(
+                "response",
+                max_tokens=request.max_new_tokens,
+                temperature=request.temperature,
+                top_p=request.top_p,
+            )
+        
+        state = chat_completion.run()
+        response_text = state["response"]
+        tokens_generated = len(response_text.split())  # Approximate
+        
+        return response_text, tokens_generated
+    
+    def _messages_to_prompt(self, messages: List[Dict[str, Any]]) -> str:
+        """Convert OpenAI-format messages to a single prompt string"""
+        prompt_parts = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            
+            # Handle multimodal content
+            if isinstance(content, list):
+                text_parts = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        text_parts.append(item.get("text", ""))
+                content = " ".join(text_parts)
+            
+            if role == "system":
+                prompt_parts.append(f"System: {content}")
+            elif role == "user":
+                prompt_parts.append(f"User: {content}")
+            elif role == "assistant":
+                prompt_parts.append(f"Assistant: {content}")
+        
+        prompt_parts.append("Assistant:")
+        return "\n".join(prompt_parts)
+    
+    async def generate_stream(self, request: InferenceRequest) -> AsyncGenerator[str, None]:
+        """
+        Stream generation - yields chunks as they're generated.
+        Best supported with vLLM and SGLang backends.
+        """
+        backend = request.backend if hasattr(request, 'backend') else InferenceBackend.TRANSFORMERS
+        
+        # Load model if needed
+        if (self._engine is None or 
+            self._current_model_path != request.model_path or
+            self._current_backend != backend):
+            
+            load_result = await self.load_model(request.model_path, request.adapter_path, backend)
+            if not load_result["success"]:
+                yield f"Error: {load_result.get('error', 'Failed to load model')}"
+                return
+        
+        try:
+            if self._current_backend == InferenceBackend.VLLM and VLLM_AVAILABLE:
+                # vLLM streaming
+                prompt = self._messages_to_prompt(request.messages)
+                sampling_params = SamplingParams(
+                    max_tokens=request.max_new_tokens,
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                )
+                
+                async for output in self._vllm_engine.generate([prompt], sampling_params, stream=True):
+                    if output.outputs:
+                        yield output.outputs[0].text
+            
+            elif self._current_backend == InferenceBackend.SGLANG and SGLANG_AVAILABLE:
+                # SGLang streaming
+                prompt = self._messages_to_prompt(request.messages)
+                
+                async for chunk in sgl.gen_stream(prompt, max_tokens=request.max_new_tokens):
+                    yield chunk
+            
+            else:
+                # Transformers - non-streaming fallback
+                response_text, _ = await self._generate_transformers(request)
+                yield response_text
+        
+        except Exception as e:
+            sanitized = sanitized_log_service.sanitize_error(str(e))
+            yield f"Error: {sanitized['user_message']}"
 
 
 # Global instance

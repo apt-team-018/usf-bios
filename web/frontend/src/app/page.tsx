@@ -14,6 +14,49 @@ import {
 import TrainingSettingsStep from '@/components/TrainingSettings'
 import DatasetConfig from '@/components/DatasetConfig'
 
+// ============================================================
+// LOCKED MODEL CONFIGURATION
+// Models are fetched from backend API - NOT hardcoded here.
+// This ensures security - frontend cannot be modified to bypass.
+// ============================================================
+interface LockedModel {
+  name: string      // Display name (shown to users)
+  path: string      // Actual path (hidden from users)
+  source: 'local' | 'huggingface' | 'modelscope'
+  modality: 'text' | 'vision' | 'audio' | 'video'
+  description?: string
+}
+
+// ============================================================
+// SHIMMER/SKELETON LOADING COMPONENT
+// Use this for loading states throughout the UI
+// ============================================================
+const Shimmer = ({ className = '', width = 'w-full', height = 'h-4' }: { 
+  className?: string
+  width?: string
+  height?: string 
+}) => (
+  <div className={`animate-pulse bg-gradient-to-r from-slate-200 via-slate-300 to-slate-200 bg-[length:200%_100%] rounded ${width} ${height} ${className}`} 
+    style={{ animation: 'shimmer 1.5s ease-in-out infinite' }} />
+)
+
+const ShimmerCard = ({ lines = 3 }: { lines?: number }) => (
+  <div className="bg-white rounded-lg border border-slate-200 p-4 space-y-3">
+    <Shimmer width="w-1/3" height="h-5" />
+    {Array.from({ length: lines }).map((_, i) => (
+      <Shimmer key={i} width={i === lines - 1 ? 'w-2/3' : 'w-full'} height="h-3" />
+    ))}
+  </div>
+)
+
+// Add shimmer animation CSS (injected via style tag in component)
+const shimmerStyles = `
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+`
+
 // Types
 interface TrainingConfig {
   model_path: string
@@ -119,8 +162,20 @@ interface SystemCapabilities {
 
 interface TrainingMetric {
   step: number
+  epoch?: number
   loss: number
   learning_rate: number
+  grad_norm?: number
+  eval_loss?: number
+  reward?: number
+  kl_divergence?: number
+  policy_loss?: number
+  value_loss?: number
+  entropy?: number
+  chosen_rewards?: number
+  rejected_rewards?: number
+  reward_margin?: number
+  extra_metrics?: Record<string, number>
   timestamp: number
 }
 
@@ -129,6 +184,36 @@ interface LoadedAdapter {
   name: string
   path: string
   active: boolean
+}
+
+interface TrainingHistoryItem {
+  job_id: string
+  job_name: string
+  status: string
+  created_at: string | null
+  started_at: string | null
+  completed_at: string | null
+  current_step: number
+  total_steps: number
+  error: string | null
+  config?: {
+    train_type: string
+    training_method: string
+    num_epochs: number
+    learning_rate: number
+    batch_size: number
+  }
+  output_path: string
+  output_exists: boolean
+  has_adapter: boolean
+  adapter_path?: string
+  checkpoint_count: number
+  final_metrics?: {
+    loss: number | null
+    learning_rate: number | null
+    epoch: number | null
+    step: number | null
+  } | null
 }
 
 interface ChatMessage {
@@ -151,11 +236,19 @@ interface UploadedDataset {
 
 type MainTab = 'train' | 'inference'
 
-const TRAIN_STEPS = [
+// Training steps - dynamically configured based on locked models
+// If single model is locked, skip the "Select Model" step entirely
+const TRAIN_STEPS_FULL = [
   { id: 1, title: 'Select Model', icon: Cpu },
   { id: 2, title: 'Configure Dataset', icon: Database },
   { id: 3, title: 'Training Settings', icon: Settings },
   { id: 4, title: 'Review & Start', icon: Play },
+]
+
+const TRAIN_STEPS_LOCKED = [
+  { id: 1, title: 'Configure Dataset', icon: Database },
+  { id: 2, title: 'Training Settings', icon: Settings },
+  { id: 3, title: 'Review & Start', icon: Play },
 ]
 
 export default function Home() {
@@ -166,6 +259,7 @@ export default function Home() {
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null)
   const [trainingLogs, setTrainingLogs] = useState<string[]>([])
   
+  // Initialize config - will be updated when locked models are fetched
   const [config, setConfig] = useState<TrainingConfig>({
     model_path: '',
     model_source: 'local',
@@ -252,6 +346,8 @@ export default function Home() {
   
   // Enhanced inference state
   const [isModelLoading, setIsModelLoading] = useState(false)
+  const [isCleaningMemory, setIsCleaningMemory] = useState(false)
+  const [loadingMessage, setLoadingMessage] = useState('')
   const [loadedAdapters, setLoadedAdapters] = useState<LoadedAdapter[]>([])
   const [chatMode, setChatMode] = useState<'chat' | 'completion'>('chat')
   const [systemPrompt, setSystemPrompt] = useState('')
@@ -296,8 +392,56 @@ export default function Home() {
   const [systemExpired, setSystemExpired] = useState(false)
   const [expirationChecked, setExpirationChecked] = useState(false)
   
+  // Locked models - fetched from backend API (NOT hardcoded for security)
+  const [lockedModels, setLockedModels] = useState<LockedModel[]>([])
+  const [isModelLockLoaded, setIsModelLockLoaded] = useState(false)
+  
+  // Available GPUs - fetched from backend API for dynamic GPU selection
+  const [availableGpus, setAvailableGpus] = useState<{
+    id: number
+    name: string
+    memory_total_gb: number | null
+    memory_free_gb: number | null
+    utilization: number | null
+  }[]>([])
+  
+  // Output path configuration - fetched from backend API
+  const [outputPathConfig, setOutputPathConfig] = useState<{
+    mode: 'locked' | 'base_locked' | 'free'
+    base_path: string
+    is_locked: boolean
+    user_can_customize: boolean
+    user_can_add_path: boolean
+  }>({
+    mode: 'locked',
+    base_path: '/workspace/output',
+    is_locked: true,
+    user_can_customize: false,
+    user_can_add_path: false
+  })
+  
+  // Derived values from locked models (computed, not hardcoded)
+  const IS_MODEL_LOCKED = lockedModels.length > 0
+  const IS_SINGLE_MODEL = lockedModels.length === 1
+  const DEFAULT_MODEL = lockedModels[0] || null
+  
+  // Dynamic training steps based on locked model configuration
+  const TRAIN_STEPS = IS_SINGLE_MODEL ? TRAIN_STEPS_LOCKED : TRAIN_STEPS_FULL
+  const TOTAL_STEPS = TRAIN_STEPS.length
+  
+  // Helper to get model name from path
+  const getModelDisplayName = (path: string): string => {
+    const lockedModel = lockedModels.find(m => m.path === path)
+    return lockedModel ? lockedModel.name : path
+  }
+  
   // Training metrics for graphs
   const [trainingMetrics, setTrainingMetrics] = useState<TrainingMetric[]>([])
+  
+  // Training history
+  const [trainingHistory, setTrainingHistory] = useState<TrainingHistoryItem[]>([])
+  const [showHistory, setShowHistory] = useState(false)
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false)
   
   // Mobile menu
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
@@ -366,6 +510,78 @@ export default function Home() {
     }
   }, [])
 
+  // Fetch training history
+  const fetchTrainingHistory = useCallback(async () => {
+    setIsLoadingHistory(true)
+    try {
+      const res = await fetch('/api/jobs/history/all?limit=50&include_metrics=true')
+      if (res.ok) {
+        const data = await res.json()
+        setTrainingHistory(data.history || [])
+      }
+    } catch (e) {
+      console.error('Failed to fetch training history:', e)
+    } finally {
+      setIsLoadingHistory(false)
+    }
+  }, [])
+
+  // Fetch locked models from backend API - CRITICAL for security
+  // Models MUST come from backend, NOT hardcoded in frontend
+  const fetchLockedModels = useCallback(async () => {
+    try {
+      const res = await fetch('/api/system/locked-models')
+      if (res.ok) {
+        const data = await res.json()
+        if (data.is_locked && data.models && data.models.length > 0) {
+          setLockedModels(data.models)
+          // Auto-select first model if single model locked
+          if (data.models.length === 1) {
+            const model = data.models[0]
+            setConfig(prev => ({
+              ...prev,
+              model_path: model.path,
+              model_source: model.source,
+              modality: model.modality || 'text'
+            }))
+          }
+        }
+        setIsModelLockLoaded(true)
+      }
+    } catch (e) {
+      console.error('Failed to fetch locked models:', e)
+      setIsModelLockLoaded(true)
+    }
+  }, [])
+
+  // Fetch available GPUs from backend API for dynamic GPU selection
+  const fetchAvailableGpus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/system/gpus')
+      if (res.ok) {
+        const data = await res.json()
+        if (data.available && data.gpus && data.gpus.length > 0) {
+          setAvailableGpus(data.gpus)
+        }
+      }
+    } catch (e) {
+      console.error('Failed to fetch available GPUs:', e)
+    }
+  }, [])
+
+  // Fetch output path configuration from backend API
+  const fetchOutputPathConfig = useCallback(async () => {
+    try {
+      const res = await fetch('/api/system/output-path-config')
+      if (res.ok) {
+        const data = await res.json()
+        setOutputPathConfig(data)
+      }
+    } catch (e) {
+      console.error('Failed to fetch output path config:', e)
+    }
+  }, [])
+
   // Fetch system capabilities - what this system can fine-tune
   const fetchSystemCapabilities = useCallback(async () => {
     try {
@@ -404,7 +620,17 @@ export default function Home() {
       const res = await fetch('/api/system/metrics')
       if (res.ok) {
         const data = await res.json()
-        // Only update if we have actual data, mark as available
+        // Check if we have actual valid data (not null)
+        // gpu_available and cpu_available indicate if hardware is detected
+        const hasGpuData = data.gpu_available === true && (
+          data.gpu_utilization !== null || 
+          data.gpu_memory_used !== null
+        )
+        const hasCpuData = data.cpu_available === true && (
+          data.cpu_percent !== null || 
+          data.ram_used !== null
+        )
+        
         setSystemMetrics({
           gpu_utilization: data.gpu_utilization ?? null,
           gpu_memory_used: data.gpu_memory_used ?? null,
@@ -413,7 +639,7 @@ export default function Home() {
           cpu_percent: data.cpu_percent ?? null,
           ram_used: data.ram_used ?? null,
           ram_total: data.ram_total ?? null,
-          available: data.gpu_memory_total > 0 || data.cpu_percent > 0
+          available: hasGpuData || hasCpuData
         })
       }
     } catch (e) {
@@ -491,14 +717,17 @@ export default function Home() {
     }
   }, [expirationChecked, systemExpired, checkActiveTraining])
 
-  // Fetch system status and capabilities on mount (only if not expired)
+  // Fetch system status, capabilities, locked models, available GPUs, and output path config on mount (only if not expired)
   useEffect(() => {
     if (systemExpired) return
     fetchSystemStatus()
     fetchSystemCapabilities()
+    fetchLockedModels()  // CRITICAL: Fetch locked models from backend API
+    fetchAvailableGpus()  // Fetch available GPUs for dynamic selection
+    fetchOutputPathConfig()  // Fetch output path configuration
     const interval = setInterval(fetchSystemStatus, 10000) // Check every 10 seconds
     return () => clearInterval(interval)
-  }, [fetchSystemStatus, fetchSystemCapabilities, systemExpired])
+  }, [fetchSystemStatus, fetchSystemCapabilities, fetchLockedModels, fetchAvailableGpus, fetchOutputPathConfig, systemExpired])
 
   // Poll system metrics during training or inference
   useEffect(() => {
@@ -552,49 +781,122 @@ export default function Home() {
     }
   }, [jobStatus?.job_id, isTraining])
 
-  // WebSocket for training updates (real-time progress)
+  // WebSocket connection state
+  const [wsConnected, setWsConnected] = useState(false)
+  const wsRef = useRef<WebSocket | null>(null)
+  const wsReconnectAttempts = useRef(0)
+  const maxWsReconnectAttempts = 5
+  
+  // WebSocket for training updates (real-time progress) with auto-reconnect
   useEffect(() => {
     if (jobStatus?.job_id && isTraining) {
-      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      const ws = new WebSocket(`${wsProtocol}//${window.location.host}/api/jobs/ws/${jobStatus.job_id}`)
+      let reconnectTimeout: NodeJS.Timeout
       
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data)
-          // Note: Logs are now handled by file-based polling (no duplicates)
-          // WebSocket only handles progress and status updates
-          if (data.type === 'progress') {
-            // Update job status
-            setJobStatus(prev => prev ? {
-              ...prev,
-              current_step: data.step || prev.current_step,
-              total_steps: data.total_steps || prev.total_steps,
-              current_loss: data.loss ?? prev.current_loss,
-              learning_rate: data.learning_rate ?? prev.learning_rate,
-              epoch: data.epoch ?? prev.epoch,
-              total_epochs: data.total_epochs ?? prev.total_epochs,
-              samples_per_second: data.samples_per_second ?? prev.samples_per_second,
-              eta_seconds: data.eta_seconds ?? prev.eta_seconds,
-            } : null)
-            
-            // Note: Metrics for graphs are now fetched from database via polling
-            // WebSocket progress only updates the current status display
-          }
-          if (data.type === 'status') {
-            if (data.status === 'completed' || data.status === 'failed' || data.status === 'stopped') {
-              setIsTraining(false)
+      const connectWebSocket = () => {
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+        const ws = new WebSocket(`${wsProtocol}//${window.location.host}/api/jobs/ws/${jobStatus.job_id}`)
+        wsRef.current = ws
+        
+        ws.onopen = () => {
+          console.log('[WS] Connected')
+          setWsConnected(true)
+          wsReconnectAttempts.current = 0
+        }
+        
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data)
+            // WebSocket handles progress and status updates
+            if (data.type === 'progress') {
+              setJobStatus(prev => prev ? {
+                ...prev,
+                current_step: data.step || prev.current_step,
+                total_steps: data.total_steps || prev.total_steps,
+                current_loss: data.loss ?? prev.current_loss,
+                learning_rate: data.learning_rate ?? prev.learning_rate,
+                epoch: data.epoch ?? prev.epoch,
+                total_epochs: data.total_epochs ?? prev.total_epochs,
+                samples_per_second: data.samples_per_second ?? prev.samples_per_second,
+                eta_seconds: data.eta_seconds ?? prev.eta_seconds,
+              } : null)
             }
-            setJobStatus(prev => prev ? { ...prev, status: data.status } : null)
+            if (data.type === 'status') {
+              if (data.status === 'completed' || data.status === 'failed' || data.status === 'stopped') {
+                setIsTraining(false)
+              }
+              setJobStatus(prev => prev ? { ...prev, status: data.status } : null)
+            }
+          } catch (e) {
+            console.error('[WS] Parse error:', e)
           }
-        } catch (e) {
-          console.error('WebSocket parse error:', e)
+        }
+        
+        ws.onerror = (e) => {
+          console.error('[WS] Error:', e)
+          setWsConnected(false)
+        }
+        
+        ws.onclose = () => {
+          console.log('[WS] Closed')
+          setWsConnected(false)
+          wsRef.current = null
+          
+          // Auto-reconnect if still training and under max attempts
+          if (isTraining && wsReconnectAttempts.current < maxWsReconnectAttempts) {
+            wsReconnectAttempts.current++
+            const delay = Math.min(1000 * Math.pow(2, wsReconnectAttempts.current), 10000)
+            console.log(`[WS] Reconnecting in ${delay}ms (attempt ${wsReconnectAttempts.current})`)
+            reconnectTimeout = setTimeout(connectWebSocket, delay)
+          }
         }
       }
       
-      ws.onerror = (e) => console.error('WebSocket error:', e)
-      ws.onclose = () => console.log('WebSocket closed')
+      connectWebSocket()
       
-      return () => ws.close()
+      return () => {
+        clearTimeout(reconnectTimeout)
+        if (wsRef.current) {
+          wsRef.current.close()
+          wsRef.current = null
+        }
+      }
+    }
+  }, [jobStatus?.job_id, isTraining])
+  
+  // Fallback polling for job status (when WebSocket fails or as backup)
+  // Polls every 2 seconds - ensures we ALWAYS have updated status even if WS fails
+  useEffect(() => {
+    if (jobStatus?.job_id && isTraining) {
+      const pollJobStatus = async () => {
+        try {
+          const res = await fetch(`/api/jobs/${jobStatus.job_id}`)
+          if (res.ok) {
+            const data = await res.json()
+            if (data.job) {
+              // Update status from polling
+              setJobStatus(prev => prev ? {
+                ...prev,
+                status: data.job.status || prev.status,
+                current_step: data.job.current_step ?? prev.current_step,
+                total_steps: data.job.total_steps ?? prev.total_steps,
+                current_loss: data.job.current_loss ?? prev.current_loss,
+                epoch: data.job.epoch ?? prev.epoch,
+              } : null)
+              
+              // Detect completion/failure
+              if (data.job.status === 'completed' || data.job.status === 'failed' || data.job.status === 'stopped') {
+                setIsTraining(false)
+              }
+            }
+          }
+        } catch (e) {
+          console.error('[POLL] Status error:', e)
+        }
+      }
+      
+      // Poll every 2 seconds as backup
+      const interval = setInterval(pollJobStatus, 2000)
+      return () => clearInterval(interval)
     }
   }, [jobStatus?.job_id, isTraining])
 
@@ -670,57 +972,321 @@ export default function Home() {
     train_type: string
     display_name: string
     primary_metrics: string[]
+    graph_configs: Array<{key: string, label: string, unit: string, color: string}>
   } | null>(null)
+  
+  // GPU metrics history for GPU utilization graph
+  const [gpuMetricsHistory, setGpuMetricsHistory] = useState<Array<{
+    timestamp: number
+    gpu_utilization: number | null
+    gpu_memory_used: number | null
+    gpu_temperature: number | null
+  }>>([])
+  
+  // Track GPU metrics over time for graphs
+  useEffect(() => {
+    if (isTraining && systemMetrics.available) {
+      setGpuMetricsHistory(prev => {
+        const newEntry = {
+          timestamp: Date.now(),
+          gpu_utilization: systemMetrics.gpu_utilization,
+          gpu_memory_used: systemMetrics.gpu_memory_used,
+          gpu_temperature: systemMetrics.gpu_temperature
+        }
+        // Keep last 100 data points
+        const updated = [...prev, newEntry].slice(-100)
+        return updated
+      })
+    }
+  }, [systemMetrics, isTraining])
 
-  // Poll for training metrics from database (for graphs)
-  // Only fetches metrics relevant to the training type (SFT, RLHF, DPO, etc.)
+  // Data source tracking for metrics (tensorboard vs database)
+  const [metricsDataSource, setMetricsDataSource] = useState<string>('none')
+  const [metricsDataQuality, setMetricsDataQuality] = useState<number>(1.0)
+  
+  // Poll for training metrics using UNIFIED endpoint
+  // Prefers TensorBoard data (most accurate), falls back to database
+  // IMPORTANT: Only shows validated data - never shows wrong/corrupt data
   useEffect(() => {
     if (jobStatus?.job_id && (isTraining || jobStatus.status === 'completed')) {
       const fetchMetrics = async () => {
         try {
-          const res = await fetch(`/api/jobs/${jobStatus.job_id}/metrics?limit=500`)
+          // Use unified endpoint which combines TensorBoard + database with validation
+          const res = await fetch(`/api/jobs/${jobStatus.job_id}/metrics/unified?limit=500&prefer_tensorboard=true`)
           if (res.ok) {
             const data = await res.json()
             
+            // Track data source for transparency
+            setMetricsDataSource(data.data_source || 'none')
+            setMetricsDataQuality(data.data_quality || 1.0)
+            
             // Store training type info for dynamic graph rendering
-            if (data.train_type) {
+            if (data.training_type) {
+              // Map training type to graph configs - ALL 20+ TRAINING TYPES
+              const GRAPH_CONFIGS: Record<string, Array<{key: string, label: string, unit: string, color: string}>> = {
+                // ============================================================
+                // SUPERVISED FINE-TUNING (SFT) & VARIANTS
+                // ============================================================
+                sft: [
+                  {key: 'loss', label: 'Training Loss', unit: '', color: '#3B82F6'},
+                  {key: 'learning_rate', label: 'Learning Rate', unit: '', color: '#10B981'},
+                  {key: 'grad_norm', label: 'Gradient Norm', unit: '', color: '#F59E0B'},
+                ],
+                lora: [
+                  {key: 'loss', label: 'Training Loss', unit: '', color: '#3B82F6'},
+                  {key: 'learning_rate', label: 'Learning Rate', unit: '', color: '#10B981'},
+                  {key: 'grad_norm', label: 'Gradient Norm', unit: '', color: '#F59E0B'},
+                ],
+                qlora: [
+                  {key: 'loss', label: 'Training Loss', unit: '', color: '#3B82F6'},
+                  {key: 'learning_rate', label: 'Learning Rate', unit: '', color: '#10B981'},
+                  {key: 'grad_norm', label: 'Gradient Norm', unit: '', color: '#F59E0B'},
+                ],
+                adalora: [
+                  {key: 'loss', label: 'Training Loss', unit: '', color: '#3B82F6'},
+                  {key: 'learning_rate', label: 'Learning Rate', unit: '', color: '#10B981'},
+                  {key: 'grad_norm', label: 'Gradient Norm', unit: '', color: '#F59E0B'},
+                ],
+                full: [
+                  {key: 'loss', label: 'Training Loss', unit: '', color: '#3B82F6'},
+                  {key: 'learning_rate', label: 'Learning Rate', unit: '', color: '#10B981'},
+                  {key: 'grad_norm', label: 'Gradient Norm', unit: '', color: '#F59E0B'},
+                ],
+                // ============================================================
+                // PRE-TRAINING & CONTINUOUS PRE-TRAINING
+                // ============================================================
+                pt: [
+                  {key: 'loss', label: 'Training Loss', unit: '', color: '#3B82F6'},
+                  {key: 'perplexity', label: 'Perplexity', unit: '', color: '#8B5CF6'},
+                  {key: 'learning_rate', label: 'Learning Rate', unit: '', color: '#10B981'},
+                  {key: 'grad_norm', label: 'Gradient Norm', unit: '', color: '#F59E0B'},
+                ],
+                pretrain: [
+                  {key: 'loss', label: 'Training Loss', unit: '', color: '#3B82F6'},
+                  {key: 'perplexity', label: 'Perplexity', unit: '', color: '#8B5CF6'},
+                  {key: 'learning_rate', label: 'Learning Rate', unit: '', color: '#10B981'},
+                  {key: 'grad_norm', label: 'Gradient Norm', unit: '', color: '#F59E0B'},
+                ],
+                cpt: [
+                  {key: 'loss', label: 'Training Loss', unit: '', color: '#3B82F6'},
+                  {key: 'perplexity', label: 'Perplexity', unit: '', color: '#8B5CF6'},
+                  {key: 'learning_rate', label: 'Learning Rate', unit: '', color: '#10B981'},
+                  {key: 'tokens_per_second', label: 'Tokens/sec', unit: 'tok/s', color: '#06B6D4'},
+                ],
+                // ============================================================
+                // DIRECT PREFERENCE OPTIMIZATION (DPO) & VARIANTS
+                // ============================================================
+                dpo: [
+                  {key: 'loss', label: 'DPO Loss', unit: '', color: '#3B82F6'},
+                  {key: 'chosen_rewards', label: 'Chosen Rewards', unit: '', color: '#10B981'},
+                  {key: 'rejected_rewards', label: 'Rejected Rewards', unit: '', color: '#EF4444'},
+                  {key: 'reward_margin', label: 'Reward Margin', unit: '', color: '#F59E0B'},
+                ],
+                kto: [
+                  {key: 'loss', label: 'KTO Loss', unit: '', color: '#3B82F6'},
+                  {key: 'chosen_rewards', label: 'Desirable Rewards', unit: '', color: '#10B981'},
+                  {key: 'rejected_rewards', label: 'Undesirable Rewards', unit: '', color: '#EF4444'},
+                  {key: 'kl_divergence', label: 'KL Divergence', unit: '', color: '#F59E0B'},
+                ],
+                simpo: [
+                  {key: 'loss', label: 'SimPO Loss', unit: '', color: '#3B82F6'},
+                  {key: 'chosen_rewards', label: 'Chosen Rewards', unit: '', color: '#10B981'},
+                  {key: 'rejected_rewards', label: 'Rejected Rewards', unit: '', color: '#EF4444'},
+                  {key: 'reward_margin', label: 'Margin', unit: '', color: '#F59E0B'},
+                ],
+                orpo: [
+                  {key: 'loss', label: 'ORPO Loss', unit: '', color: '#3B82F6'},
+                  {key: 'chosen_rewards', label: 'Chosen Log Probs', unit: '', color: '#10B981'},
+                  {key: 'rejected_rewards', label: 'Rejected Log Probs', unit: '', color: '#EF4444'},
+                  {key: 'log_odds', label: 'Log Odds Ratio', unit: '', color: '#F59E0B'},
+                ],
+                rpo: [
+                  {key: 'loss', label: 'RPO Loss', unit: '', color: '#3B82F6'},
+                  {key: 'chosen_rewards', label: 'Chosen Rewards', unit: '', color: '#10B981'},
+                  {key: 'rejected_rewards', label: 'Rejected Rewards', unit: '', color: '#EF4444'},
+                  {key: 'reward_margin', label: 'Margin', unit: '', color: '#F59E0B'},
+                ],
+                cpo: [
+                  {key: 'loss', label: 'CPO Loss', unit: '', color: '#3B82F6'},
+                  {key: 'chosen_rewards', label: 'Chosen Rewards', unit: '', color: '#10B981'},
+                  {key: 'rejected_rewards', label: 'Rejected Rewards', unit: '', color: '#EF4444'},
+                ],
+                ipo: [
+                  {key: 'loss', label: 'IPO Loss', unit: '', color: '#3B82F6'},
+                  {key: 'chosen_rewards', label: 'Chosen Rewards', unit: '', color: '#10B981'},
+                  {key: 'rejected_rewards', label: 'Rejected Rewards', unit: '', color: '#EF4444'},
+                ],
+                // ============================================================
+                // PPO & REINFORCEMENT LEARNING
+                // ============================================================
+                ppo: [
+                  {key: 'reward', label: 'Reward', unit: '', color: '#10B981'},
+                  {key: 'policy_loss', label: 'Policy Loss', unit: '', color: '#3B82F6'},
+                  {key: 'value_loss', label: 'Value Loss', unit: '', color: '#EF4444'},
+                  {key: 'entropy', label: 'Entropy', unit: 'nats', color: '#8B5CF6'},
+                  {key: 'kl_divergence', label: 'KL Divergence', unit: '', color: '#F59E0B'},
+                ],
+                grpo: [
+                  {key: 'reward', label: 'Group Reward', unit: '', color: '#10B981'},
+                  {key: 'loss', label: 'GRPO Loss', unit: '', color: '#3B82F6'},
+                  {key: 'kl_divergence', label: 'KL Penalty', unit: '', color: '#F59E0B'},
+                  {key: 'policy_loss', label: 'Policy Loss', unit: '', color: '#EF4444'},
+                ],
+                rlhf: [
+                  {key: 'reward', label: 'Reward', unit: '', color: '#10B981'},
+                  {key: 'kl_divergence', label: 'KL Divergence', unit: '', color: '#F59E0B'},
+                  {key: 'policy_loss', label: 'Policy Loss', unit: '', color: '#3B82F6'},
+                  {key: 'value_loss', label: 'Value Loss', unit: '', color: '#EF4444'},
+                  {key: 'entropy', label: 'Entropy', unit: 'nats', color: '#8B5CF6'},
+                ],
+                reinforce: [
+                  {key: 'reward', label: 'Reward', unit: '', color: '#10B981'},
+                  {key: 'policy_loss', label: 'Policy Loss', unit: '', color: '#3B82F6'},
+                  {key: 'entropy', label: 'Entropy', unit: 'nats', color: '#8B5CF6'},
+                  {key: 'kl_divergence', label: 'KL Divergence', unit: '', color: '#F59E0B'},
+                ],
+                // ============================================================
+                // KNOWLEDGE DISTILLATION
+                // ============================================================
+                gkd: [
+                  {key: 'loss', label: 'Total Loss', unit: '', color: '#3B82F6'},
+                  {key: 'distillation_loss', label: 'Distillation Loss', unit: '', color: '#8B5CF6'},
+                  {key: 'student_loss', label: 'Student Loss', unit: '', color: '#10B981'},
+                  {key: 'teacher_kl', label: 'Teacher KL', unit: '', color: '#F59E0B'},
+                ],
+                kd: [
+                  {key: 'loss', label: 'Total Loss', unit: '', color: '#3B82F6'},
+                  {key: 'distillation_loss', label: 'Distillation Loss', unit: '', color: '#8B5CF6'},
+                  {key: 'student_loss', label: 'Student Loss', unit: '', color: '#10B981'},
+                ],
+                // ============================================================
+                // REWARD MODEL TRAINING
+                // ============================================================
+                rm: [
+                  {key: 'loss', label: 'RM Loss', unit: '', color: '#3B82F6'},
+                  {key: 'accuracy', label: 'Accuracy', unit: '%', color: '#10B981'},
+                  {key: 'chosen_rewards', label: 'Chosen Score', unit: '', color: '#8B5CF6'},
+                  {key: 'rejected_rewards', label: 'Rejected Score', unit: '', color: '#EF4444'},
+                ],
+                // ============================================================
+                // SPEECH & AUDIO (ASR/TTS)
+                // ============================================================
+                asr: [
+                  {key: 'loss', label: 'CTC Loss', unit: '', color: '#3B82F6'},
+                  {key: 'wer', label: 'WER', unit: '%', color: '#EF4444'},
+                  {key: 'cer', label: 'CER', unit: '%', color: '#F59E0B'},
+                  {key: 'learning_rate', label: 'Learning Rate', unit: '', color: '#10B981'},
+                ],
+                tts: [
+                  {key: 'loss', label: 'Total Loss', unit: '', color: '#3B82F6'},
+                  {key: 'mel_loss', label: 'Mel Loss', unit: '', color: '#8B5CF6'},
+                  {key: 'duration_loss', label: 'Duration Loss', unit: '', color: '#F59E0B'},
+                  {key: 'pitch_loss', label: 'Pitch Loss', unit: '', color: '#10B981'},
+                ],
+                // ============================================================
+                // MULTIMODAL (Vision-Language)
+                // ============================================================
+                vlm: [
+                  {key: 'loss', label: 'Total Loss', unit: '', color: '#3B82F6'},
+                  {key: 'image_loss', label: 'Image Loss', unit: '', color: '#8B5CF6'},
+                  {key: 'text_loss', label: 'Text Loss', unit: '', color: '#10B981'},
+                  {key: 'contrastive_loss', label: 'Contrastive Loss', unit: '', color: '#F59E0B'},
+                ],
+                mllm: [
+                  {key: 'loss', label: 'Training Loss', unit: '', color: '#3B82F6'},
+                  {key: 'learning_rate', label: 'Learning Rate', unit: '', color: '#10B981'},
+                  {key: 'grad_norm', label: 'Gradient Norm', unit: '', color: '#F59E0B'},
+                ],
+              }
+              
+              const displayNames: Record<string, string> = {
+                // SFT variants
+                sft: 'Supervised Fine-Tuning',
+                lora: 'LoRA Fine-Tuning',
+                qlora: 'QLoRA (4-bit) Fine-Tuning',
+                adalora: 'AdaLoRA Fine-Tuning',
+                full: 'Full Fine-Tuning',
+                // Pre-training
+                pt: 'Pre-Training',
+                pretrain: 'Pre-Training',
+                cpt: 'Continuous Pre-Training',
+                // DPO variants
+                dpo: 'DPO (Direct Preference Optimization)',
+                kto: 'KTO (Kahneman-Tversky Optimization)',
+                simpo: 'SimPO (Simple Preference Optimization)',
+                orpo: 'ORPO (Odds Ratio Preference Optimization)',
+                rpo: 'RPO (Relative Preference Optimization)',
+                cpo: 'CPO (Contrastive Preference Optimization)',
+                ipo: 'IPO (Identity Preference Optimization)',
+                // PPO/RLHF
+                ppo: 'PPO (Proximal Policy Optimization)',
+                grpo: 'GRPO (Group Relative Policy Optimization)',
+                rlhf: 'RLHF (Reinforcement Learning from Human Feedback)',
+                reinforce: 'REINFORCE Policy Gradient',
+                // Knowledge Distillation
+                gkd: 'GKD (Generalized Knowledge Distillation)',
+                kd: 'Knowledge Distillation',
+                // Reward Model
+                rm: 'Reward Model Training',
+                // Speech
+                asr: 'ASR (Automatic Speech Recognition)',
+                tts: 'TTS (Text-to-Speech)',
+                // Multimodal
+                vlm: 'VLM (Vision-Language Model)',
+                mllm: 'MLLM (Multimodal LLM)',
+              }
+              
               setTrainTypeInfo({
-                train_type: data.train_type,
-                display_name: data.train_type_display || data.train_type.toUpperCase(),
-                primary_metrics: data.primary_metrics || ['loss', 'learning_rate']
+                train_type: data.training_type,
+                display_name: displayNames[data.training_type] || data.training_type.toUpperCase(),
+                primary_metrics: data.relevant_metrics || ['loss', 'learning_rate'],
+                graph_configs: GRAPH_CONFIGS[data.training_type] || GRAPH_CONFIGS['sft']
               })
             }
             
-            if (data.metrics && data.metrics.length > 0) {
-              // Convert database metrics to graph format
-              // Only includes metrics relevant to this training type (no irrelevant fields)
-              const graphMetrics = data.metrics.map((m: any) => ({
-                step: m.step,
-                epoch: m.epoch,
-                // Common metrics
-                loss: m.loss,
-                learning_rate: m.learning_rate,
-                grad_norm: m.grad_norm,
-                eval_loss: m.eval_loss,
-                // RLHF/PPO metrics (only present if relevant)
-                reward: m.reward,
-                kl_divergence: m.kl_divergence,
-                policy_loss: m.policy_loss,
-                value_loss: m.value_loss,
-                entropy: m.entropy,
-                // DPO metrics (only present if relevant)
-                chosen_rewards: m.chosen_rewards,
-                rejected_rewards: m.rejected_rewards,
-                reward_margin: m.reward_margin,
-                // Extra
-                extra_metrics: m.extra_metrics,
-                timestamp: m.timestamp ? new Date(m.timestamp).getTime() : Date.now()
-              }))
-              setTrainingMetrics(graphMetrics)
+            // Only update metrics if we have valid data
+            // CRITICAL: Never show invalid/corrupt data to user
+            if (data.metrics && data.metrics.length > 0 && data.data_source !== 'error') {
+              // Filter out any remaining invalid values client-side as extra safety
+              const isValidValue = (val: any): boolean => {
+                if (val === null || val === undefined) return false
+                if (typeof val === 'number' && (isNaN(val) || !isFinite(val))) return false
+                return true
+              }
+              
+              const validatedMetrics = data.metrics
+                .filter((m: any) => m.step !== undefined && m.step !== null)
+                .map((m: any) => {
+                  const metric: any = {
+                    step: m.step,
+                    timestamp: m.timestamp ? new Date(m.timestamp).getTime() : Date.now()
+                  }
+                  // Only include valid values
+                  if (isValidValue(m.epoch)) metric.epoch = m.epoch
+                  if (isValidValue(m.loss)) metric.loss = m.loss
+                  if (isValidValue(m.learning_rate)) metric.learning_rate = m.learning_rate
+                  if (isValidValue(m.grad_norm)) metric.grad_norm = m.grad_norm
+                  if (isValidValue(m.eval_loss)) metric.eval_loss = m.eval_loss
+                  if (isValidValue(m.reward)) metric.reward = m.reward
+                  if (isValidValue(m.kl_divergence)) metric.kl_divergence = m.kl_divergence
+                  if (isValidValue(m.policy_loss)) metric.policy_loss = m.policy_loss
+                  if (isValidValue(m.value_loss)) metric.value_loss = m.value_loss
+                  if (isValidValue(m.entropy)) metric.entropy = m.entropy
+                  if (isValidValue(m.chosen_rewards)) metric.chosen_rewards = m.chosen_rewards
+                  if (isValidValue(m.rejected_rewards)) metric.rejected_rewards = m.rejected_rewards
+                  if (isValidValue(m.reward_margin)) metric.reward_margin = m.reward_margin
+                  if (isValidValue(m.perplexity)) metric.perplexity = m.perplexity
+                  if (isValidValue(m.accuracy)) metric.accuracy = m.accuracy
+                  if (m.extra_metrics) metric.extra_metrics = m.extra_metrics
+                  return metric
+                })
+              
+              setTrainingMetrics(validatedMetrics)
             }
           }
         } catch (e) {
           console.error('Failed to fetch metrics:', e)
+          // Don't update metrics on error - keep showing last valid data
         }
       }
       
@@ -923,6 +1489,11 @@ export default function Home() {
     try {
       setIsStartingTraining(true)
       setTrainingLogs([])
+      setLoadingMessage('Preparing for training...')
+      
+      // Step 1: Clean GPU memory before training to ensure maximum available VRAM
+      setLoadingMessage('Cleaning GPU memory before training...')
+      await deepCleanMemory()
       
       // Create job with combined dataset path and optional custom name
       const jobConfig = {
@@ -961,10 +1532,12 @@ export default function Home() {
       setIsTraining(true)
       setCurrentStep(5)
       setTrainingName('') // Clear the input after successful creation
+      setLoadingMessage('') // Clear loading message
     } catch (e) {
       alert(`Failed to start training: ${e}`)
     } finally {
       setIsStartingTraining(false)
+      setLoadingMessage('')
     }
   }
 
@@ -1005,23 +1578,53 @@ export default function Home() {
     }
   }
 
+  // Deep memory cleanup - use before loading new models or starting training
+  const deepCleanMemory = async (): Promise<boolean> => {
+    setIsCleaningMemory(true)
+    setLoadingMessage('Cleaning GPU memory...')
+    try {
+      const res = await fetch('/api/inference/deep-clear-memory', { method: 'POST' })
+      const data = await res.json()
+      if (data.success) {
+        await fetchInferenceStatus()
+        return true
+      }
+      console.error('Memory cleanup failed:', data.error)
+      return false
+    } catch (e) {
+      console.error('Memory cleanup error:', e)
+      return false
+    } finally {
+      setIsCleaningMemory(false)
+    }
+  }
+
   const clearMemory = async () => {
+    setIsCleaningMemory(true)
+    setLoadingMessage('Clearing memory...')
     try {
       const res = await fetch('/api/inference/clear-memory', { method: 'POST' })
       if (res.ok) {
         await fetchInferenceStatus()
-        alert('Memory cleared successfully')
       }
     } catch (e) {
-      alert(`Failed to clear memory: ${e}`)
+      console.error(`Failed to clear memory: ${e}`)
+    } finally {
+      setIsCleaningMemory(false)
+      setLoadingMessage('')
     }
   }
 
-  // Load model for inference
+  // Load model for inference (basic - used by inference page input)
   const loadModel = async () => {
     if (!inferenceModel.trim()) return
     setIsModelLoading(true)
+    setLoadingMessage('Loading model...')
     try {
+      // First clean memory
+      await deepCleanMemory()
+      
+      setLoadingMessage('Loading base model...')
       const res = await fetch('/api/inference/load', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1035,6 +1638,87 @@ export default function Home() {
       }
     } catch (e) {
       alert(`Failed to load model: ${e}`)
+    } finally {
+      setIsModelLoading(false)
+      setLoadingMessage('')
+    }
+  }
+
+  // Comprehensive load model with adapter - used after training or from history
+  const loadModelForInference = async (modelPath: string, adapterPath?: string, switchToInference: boolean = true) => {
+    setIsModelLoading(true)
+    setLoadingMessage('Preparing to load model...')
+    
+    try {
+      // Step 1: Deep clean GPU memory first
+      setLoadingMessage('Cleaning GPU memory...')
+      const cleanResult = await deepCleanMemory()
+      if (!cleanResult) {
+        console.warn('Memory cleanup may have failed, continuing anyway...')
+      }
+      
+      // Step 2: Load base model
+      setLoadingMessage(`Loading base model: ${getModelDisplayName(modelPath)}...`)
+      const loadRes = await fetch('/api/inference/load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_path: modelPath })
+      })
+      const loadData = await loadRes.json()
+      
+      if (!loadData.success) {
+        alert(`Failed to load model: ${loadData.error || 'Unknown error'}`)
+        return false
+      }
+      
+      // Step 3: Load adapter if provided
+      if (adapterPath) {
+        setLoadingMessage('Loading fine-tuned adapter...')
+        const adapterRes = await fetch('/api/inference/load', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            model_path: modelPath,
+            adapter_path: adapterPath 
+          })
+        })
+        const adapterData = await adapterRes.json()
+        
+        if (adapterData.success) {
+          // Add to loaded adapters list
+          const newAdapter: LoadedAdapter = {
+            id: `adapter-${Date.now()}`,
+            name: adapterPath.split('/').pop() || 'fine-tuned',
+            path: adapterPath,
+            active: true
+          }
+          setLoadedAdapters(prev => [...prev.map(a => ({ ...a, active: false })), newAdapter])
+        } else {
+          console.warn('Adapter load failed:', adapterData.error)
+        }
+      }
+      
+      // Step 4: Update UI state
+      setInferenceModel(modelPath)
+      if (adapterPath) {
+        setAdapterPath(adapterPath)
+      }
+      await fetchInferenceStatus()
+      
+      // Step 5: Switch to inference tab if requested
+      if (switchToInference) {
+        setMainTab('inference')
+        setChatMessages([]) // Clear chat for fresh start
+      }
+      
+      setLoadingMessage('Model loaded successfully!')
+      setTimeout(() => setLoadingMessage(''), 2000)
+      return true
+      
+    } catch (e) {
+      console.error('Error loading model:', e)
+      alert(`Failed to load model: ${e}`)
+      return false
     } finally {
       setIsModelLoading(false)
     }
@@ -1150,12 +1834,24 @@ export default function Home() {
   }
 
   const canProceed = () => {
-    switch (currentStep) {
-      case 1: return config.model_path.length > 0
-      case 2: return config.dataset_paths.length > 0
-      case 3: return true
-      case 4: return true
-      default: return false
+    // Dynamic step validation based on locked model mode
+    if (IS_SINGLE_MODEL) {
+      // Steps: 1=Dataset, 2=Settings, 3=Review
+      switch (currentStep) {
+        case 1: return config.dataset_paths.length > 0  // Dataset step
+        case 2: return true  // Settings step
+        case 3: return true  // Review step
+        default: return false
+      }
+    } else {
+      // Steps: 1=Model, 2=Dataset, 3=Settings, 4=Review
+      switch (currentStep) {
+        case 1: return config.model_path.length > 0  // Model step
+        case 2: return config.dataset_paths.length > 0  // Dataset step
+        case 3: return true  // Settings step
+        case 4: return true  // Review step
+        default: return false
+      }
     }
   }
 
@@ -1210,6 +1906,48 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-white">
+      {/* Shimmer Animation Styles */}
+      <style dangerouslySetInnerHTML={{ __html: shimmerStyles }} />
+      
+      {/* Global Loading Overlay - Shows during model loading or memory cleanup */}
+      {(isModelLoading || isCleaningMemory) && loadingMessage && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[60]">
+          <div className="bg-white rounded-2xl p-8 max-w-md w-full mx-4 shadow-2xl">
+            <div className="text-center space-y-4">
+              {/* Animated Icon */}
+              <div className="relative mx-auto w-20 h-20">
+                <div className="absolute inset-0 rounded-full bg-blue-100 animate-ping opacity-75" />
+                <div className="relative w-20 h-20 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-lg">
+                  {isCleaningMemory ? (
+                    <Trash2 className="w-8 h-8 text-white animate-pulse" />
+                  ) : (
+                    <Cpu className="w-8 h-8 text-white" />
+                  )}
+                </div>
+              </div>
+              
+              {/* Loading Spinner */}
+              <Loader2 className="w-6 h-6 text-blue-500 animate-spin mx-auto" />
+              
+              {/* Message */}
+              <div>
+                <p className="text-lg font-semibold text-slate-900">
+                  {isCleaningMemory ? 'Cleaning Memory' : 'Loading Model'}
+                </p>
+                <p className="text-sm text-slate-500 mt-1">{loadingMessage}</p>
+              </div>
+              
+              {/* Progress Indicator */}
+              <div className="w-full h-1.5 bg-slate-200 rounded-full overflow-hidden">
+                <div className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 rounded-full animate-pulse" style={{ width: '60%' }} />
+              </div>
+              
+              <p className="text-xs text-slate-400">Please wait, this may take a moment...</p>
+            </div>
+          </div>
+        </div>
+      )}
+      
       {/* Delete Confirmation Modal */}
       {deleteTarget && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
@@ -1393,6 +2131,18 @@ export default function Home() {
         {(isTraining || (jobStatus && (jobStatus.status === 'completed' || jobStatus.status === 'failed' || jobStatus.status === 'stopped'))) && jobStatus && (
           <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-4 sm:p-6">
             <div className="space-y-4">
+              {/* Model Info Banner - Shows which model is being trained */}
+              <div className="bg-gradient-to-r from-slate-50 to-blue-50 border border-slate-200 rounded-lg p-3 flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0">
+                  <Cpu className="w-5 h-5 text-blue-600" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs text-slate-500 uppercase tracking-wide font-medium">Model</p>
+                  <p className="font-semibold text-slate-900 truncate">{getModelDisplayName(config.model_path)}</p>
+                </div>
+                {IS_MODEL_LOCKED && <Lock className="w-4 h-4 text-slate-400 flex-shrink-0" />}
+              </div>
+              
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <div>
                   <h2 className="text-xl font-bold text-slate-900">Training Progress</h2>
@@ -1435,28 +2185,36 @@ export default function Home() {
                 </div>
               )}
               
-              {/* Real-time Metrics */}
+              {/* Real-time Metrics - Use trainingMetrics for final values when training completes */}
+              {(() => {
+                // Get final values from trainingMetrics if available (more reliable after training)
+                const lastMetric = trainingMetrics.length > 0 ? trainingMetrics[trainingMetrics.length - 1] : null
+                const finalLoss = lastMetric?.loss ?? jobStatus.current_loss
+                const finalEpoch = lastMetric?.epoch ?? jobStatus.epoch
+                const finalLR = lastMetric?.learning_rate ?? jobStatus.learning_rate
+                
+                return (
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
                 <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-lg p-3 text-center border border-blue-200">
                   <BarChart3 className="w-5 h-5 mx-auto text-blue-600 mb-1" />
                   <span className="text-[10px] text-blue-600 font-medium uppercase">Loss</span>
-                  <p className="text-xl font-bold text-blue-900">{jobStatus.current_loss !== null && jobStatus.current_loss !== undefined ? jobStatus.current_loss.toFixed(4) : '--'}</p>
+                  <p className="text-xl font-bold text-blue-900">{finalLoss !== null && finalLoss !== undefined ? finalLoss.toFixed(4) : '--'}</p>
                 </div>
                 <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-lg p-3 text-center border border-purple-200">
                   <Layers className="w-5 h-5 mx-auto text-purple-600 mb-1" />
                   <span className="text-[10px] text-purple-600 font-medium uppercase">Epoch</span>
-                  <p className="text-xl font-bold text-purple-900">{jobStatus.epoch !== null && jobStatus.epoch !== undefined ? jobStatus.epoch : '--'}</p>
+                  <p className="text-xl font-bold text-purple-900">{finalEpoch !== null && finalEpoch !== undefined ? finalEpoch : '--'}</p>
                 </div>
                 <div className="bg-gradient-to-br from-green-50 to-green-100 rounded-lg p-3 text-center border border-green-200">
                   <Activity className="w-5 h-5 mx-auto text-green-600 mb-1" />
-                  <span className="text-[10px] text-green-600 font-medium uppercase">Speed</span>
-                  <p className="text-xl font-bold text-green-900">{jobStatus.samples_per_second ? `${jobStatus.samples_per_second.toFixed(1)}` : '--'}<span className="text-xs font-normal"> s/s</span></p>
+                  <span className="text-[10px] text-green-600 font-medium uppercase">LR</span>
+                  <p className="text-xl font-bold text-green-900">{finalLR ? finalLR.toExponential(1) : '--'}</p>
                 </div>
                 <div className={`bg-gradient-to-br ${systemMetrics.available && systemMetrics.gpu_utilization !== null ? 'from-cyan-50 to-cyan-100 border-cyan-200' : 'from-slate-50 to-slate-100 border-slate-200'} rounded-lg p-3 text-center border`}>
                   <Cpu className="w-5 h-5 mx-auto text-cyan-600 mb-1" />
                   <span className="text-[10px] text-cyan-600 font-medium uppercase">GPU %</span>
                   <p className={`text-xl font-bold ${systemMetrics.available && systemMetrics.gpu_utilization !== null ? 'text-cyan-900' : 'text-slate-400'}`}>
-                    {systemMetrics.available && systemMetrics.gpu_utilization !== null ? `${systemMetrics.gpu_utilization}%` : '0%'}
+                    {systemMetrics.available && systemMetrics.gpu_utilization !== null ? `${systemMetrics.gpu_utilization}%` : '--'}
                   </p>
                 </div>
                 <div className={`bg-gradient-to-br ${systemMetrics.available && systemMetrics.gpu_memory_used !== null ? 'from-amber-50 to-amber-100 border-amber-200' : 'from-slate-50 to-slate-100 border-slate-200'} rounded-lg p-3 text-center border`}>
@@ -1476,79 +2234,401 @@ export default function Home() {
                   </p>
                 </div>
               </div>
+                )
+              })()}
 
-              {/* Training Graphs - Loss and Learning Rate */}
+              {/* ============================================================ */}
+              {/* PROFESSIONAL TRAINING GRAPHS - Dynamic based on training type */}
+              {/* Data validated: Only shows accurate data, hides if unavailable */}
+              {/* ============================================================ */}
               {trainingMetrics.length > 1 && (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {/* Loss Graph */}
-                  <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
-                    <h4 className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
-                      <BarChart3 className="w-4 h-4 text-blue-500" /> Training Loss
-                    </h4>
-                    <div className="h-32 relative bg-white rounded p-2">
-                      <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
-                        {(() => {
-                          const data = trainingMetrics.filter(m => m.loss > 0)
-                          if (data.length < 2) return null
-                          const maxLoss = Math.max(...data.map(x => x.loss))
-                          const minLoss = Math.min(...data.map(x => x.loss))
-                          const range = maxLoss - minLoss || 1
-                          const points = data.map((m, i) => {
-                            const x = (i / (data.length - 1)) * 100
-                            const y = 100 - ((m.loss - minLoss) / range) * 90 - 5
-                            return `${x},${y}`
-                          }).join(' ')
-                          return <polyline fill="none" stroke="#3b82f6" strokeWidth="2" points={points} />
-                        })()}
-                      </svg>
-                      <div className="absolute bottom-1 left-2 text-[10px] text-slate-500">
-                        Min: {Math.min(...trainingMetrics.filter(m => m.loss > 0).map(x => x.loss)).toFixed(4)}
-                      </div>
-                      <div className="absolute top-1 right-2 text-[10px] text-slate-500">
-                        Max: {Math.max(...trainingMetrics.filter(m => m.loss > 0).map(x => x.loss)).toFixed(4)}
+                <div className="space-y-4">
+                  {/* Training Type Header with Data Source Indicator */}
+                  {trainTypeInfo && (
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                      <h3 className="text-sm font-semibold text-slate-700">
+                        {trainTypeInfo.display_name} Metrics
+                      </h3>
+                      <div className="flex items-center gap-2">
+                        {/* Data Source Badge */}
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+                          metricsDataSource === 'tensorboard' 
+                            ? 'bg-green-100 text-green-700' 
+                            : metricsDataSource === 'database'
+                            ? 'bg-blue-100 text-blue-700'
+                            : 'bg-slate-100 text-slate-500'
+                        }`}>
+                          {metricsDataSource === 'tensorboard' ? '● TensorBoard' : 
+                           metricsDataSource === 'database' ? '● Parsed Logs' : '○ Loading...'}
+                        </span>
+                        <span className="text-xs text-slate-500 bg-slate-100 px-2 py-1 rounded">
+                          {trainingMetrics.length} points
+                        </span>
                       </div>
                     </div>
-                    <div className="flex justify-between text-xs text-slate-500 mt-1">
-                      <span>Step {trainingMetrics[0]?.step || 0}</span>
-                      <span>Current: {trainingMetrics[trainingMetrics.length - 1]?.loss?.toFixed(4) || '--'}</span>
-                      <span>Step {trainingMetrics[trainingMetrics.length - 1]?.step || 0}</span>
-                    </div>
+                  )}
+                  
+                  {/* Dynamic Metric Graphs based on training type */}
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    {(trainTypeInfo?.graph_configs || [
+                      {key: 'loss', label: 'Training Loss', unit: '', color: '#3B82F6'},
+                      {key: 'learning_rate', label: 'Learning Rate', unit: '', color: '#10B981'}
+                    ]).map((graphConfig) => {
+                      const metricKey = graphConfig.key as keyof TrainingMetric
+                      const data = trainingMetrics.filter(m => {
+                        const val = m[metricKey]
+                        return val !== undefined && val !== null && typeof val === 'number' && !isNaN(val)
+                      })
+                      if (data.length < 2) return null
+                      
+                      const values = data.map(m => m[metricKey] as number)
+                      const maxVal = Math.max(...values)
+                      const minVal = Math.min(...values)
+                      const range = maxVal - minVal || 1
+                      const currentVal = values[values.length - 1]
+                      const isExponential = Math.abs(maxVal) < 0.01 || Math.abs(maxVal) > 1000
+                      
+                      const formatValue = (v: number) => {
+                        if (isExponential) return v.toExponential(2)
+                        if (v < 1) return v.toFixed(4)
+                        return v.toFixed(2)
+                      }
+                      
+                      // Calculate Y-axis ticks (5 ticks)
+                      const yTicks = Array.from({length: 5}, (_, i) => minVal + (range * i / 4))
+                      
+                      return (
+                        <div key={graphConfig.key} className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
+                          {/* Graph Header */}
+                          <div className="px-4 py-2 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+                            <h4 className="text-sm font-medium text-slate-700 flex items-center gap-2">
+                              <div className="w-3 h-3 rounded-full" style={{backgroundColor: graphConfig.color}} />
+                              {graphConfig.label}
+                              {graphConfig.unit && <span className="text-slate-400 text-xs">({graphConfig.unit})</span>}
+                            </h4>
+                            <span className="text-xs font-mono bg-white px-2 py-0.5 rounded border border-slate-200" style={{color: graphConfig.color}}>
+                              {formatValue(currentVal)}
+                            </span>
+                          </div>
+                          
+                          {/* Graph Body */}
+                          <div className="p-3">
+                            <div className="flex">
+                              {/* Y-Axis Labels */}
+                              <div className="flex flex-col justify-between text-[9px] text-slate-400 pr-2 h-32 w-12 flex-shrink-0">
+                                {yTicks.reverse().map((tick, i) => (
+                                  <span key={i} className="text-right font-mono">{formatValue(tick)}</span>
+                                ))}
+                              </div>
+                              
+                              {/* Graph Area */}
+                              <div className="flex-1 h-32 relative">
+                                {/* Grid Lines */}
+                                <svg className="absolute inset-0 w-full h-full" preserveAspectRatio="none">
+                                  {[0, 25, 50, 75, 100].map(y => (
+                                    <line key={y} x1="0" y1={`${y}%`} x2="100%" y2={`${y}%`} stroke="#e2e8f0" strokeWidth="1" />
+                                  ))}
+                                  {[0, 25, 50, 75, 100].map(x => (
+                                    <line key={x} x1={`${x}%`} y1="0" x2={`${x}%`} y2="100%" stroke="#e2e8f0" strokeWidth="1" strokeDasharray="2,2" />
+                                  ))}
+                                </svg>
+                                
+                                {/* Data Line */}
+                                <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+                                  {/* Area fill */}
+                                  <path
+                                    fill={graphConfig.color}
+                                    fillOpacity="0.1"
+                                    d={`M 0,100 ${data.map((m, i) => {
+                                      const x = (i / (data.length - 1)) * 100
+                                      const y = 100 - ((m[metricKey] as number - minVal) / range) * 95 - 2.5
+                                      return `L ${x},${y}`
+                                    }).join(' ')} L 100,100 Z`}
+                                  />
+                                  {/* Line */}
+                                  <polyline
+                                    fill="none"
+                                    stroke={graphConfig.color}
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    points={data.map((m, i) => {
+                                      const x = (i / (data.length - 1)) * 100
+                                      const y = 100 - ((m[metricKey] as number - minVal) / range) * 95 - 2.5
+                                      return `${x},${y}`
+                                    }).join(' ')}
+                                  />
+                                </svg>
+                              </div>
+                            </div>
+                            
+                            {/* X-Axis Labels */}
+                            <div className="flex justify-between text-[9px] text-slate-400 mt-1 ml-12 font-mono">
+                              <span>Step {data[0]?.step || 0}</span>
+                              <span>Step {data[Math.floor(data.length / 2)]?.step || 0}</span>
+                              <span>Step {data[data.length - 1]?.step || 0}</span>
+                            </div>
+                          </div>
+                          
+                          {/* Graph Footer - Stats */}
+                          <div className="px-4 py-2 bg-slate-50 border-t border-slate-100 grid grid-cols-3 gap-2 text-xs">
+                            <div className="text-center">
+                              <span className="text-slate-400 block">Min</span>
+                              <span className="font-mono text-slate-600">{formatValue(minVal)}</span>
+                            </div>
+                            <div className="text-center">
+                              <span className="text-slate-400 block">Max</span>
+                              <span className="font-mono text-slate-600">{formatValue(maxVal)}</span>
+                            </div>
+                            <div className="text-center">
+                              <span className="text-slate-400 block">Current</span>
+                              <span className="font-mono font-semibold" style={{color: graphConfig.color}}>{formatValue(currentVal)}</span>
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    })}
                   </div>
-
-                  {/* Learning Rate Graph */}
-                  <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
-                    <h4 className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
-                      <BarChart3 className="w-4 h-4 text-green-500" /> Learning Rate
-                    </h4>
-                    <div className="h-32 relative bg-white rounded p-2">
-                      <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+                  
+                  {/* ============================================================ */}
+                  {/* SYSTEM METRICS GRAPHS (Weights & Biases Style) */}
+                  {/* GPU Utilization, VRAM, Temperature over time */}
+                  {/* ============================================================ */}
+                  {gpuMetricsHistory.length > 3 && (
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2">
+                          <Cpu className="w-4 h-4 text-cyan-500" />
+                          System Metrics
+                        </h3>
+                        <span className="text-xs text-slate-500 bg-slate-100 px-2 py-1 rounded">
+                          {gpuMetricsHistory.length} samples
+                        </span>
+                      </div>
+                      
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        {/* GPU Utilization Graph */}
                         {(() => {
-                          const data = trainingMetrics.filter(m => m.learning_rate > 0)
+                          const data = gpuMetricsHistory.filter(m => m.gpu_utilization !== null)
                           if (data.length < 2) return null
-                          const maxLR = Math.max(...data.map(x => x.learning_rate))
-                          const minLR = Math.min(...data.map(x => x.learning_rate))
-                          const range = maxLR - minLR || 1
-                          const points = data.map((m, i) => {
-                            const x = (i / (data.length - 1)) * 100
-                            const y = 100 - ((m.learning_rate - minLR) / range) * 90 - 5
-                            return `${x},${y}`
-                          }).join(' ')
-                          return <polyline fill="none" stroke="#22c55e" strokeWidth="2" points={points} />
+                          const values = data.map(m => m.gpu_utilization || 0)
+                          const minVal = Math.min(...values)
+                          const maxVal = Math.max(...values)
+                          const avgVal = values.reduce((a, b) => a + b, 0) / values.length
+                          const currentVal = values[values.length - 1]
+                          
+                          return (
+                            <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
+                              <div className="px-4 py-2 border-b border-slate-100 bg-gradient-to-r from-cyan-50 to-slate-50 flex items-center justify-between">
+                                <h4 className="text-sm font-medium text-slate-700 flex items-center gap-2">
+                                  <div className="w-3 h-3 rounded-full bg-cyan-500" />
+                                  GPU Utilization
+                                  <span className="text-slate-400 text-xs">(%)</span>
+                                </h4>
+                                <span className="text-xs font-mono bg-white px-2 py-0.5 rounded border border-cyan-200 text-cyan-600">
+                                  {currentVal.toFixed(0)}%
+                                </span>
+                              </div>
+                              <div className="p-3">
+                                <div className="flex">
+                                  <div className="flex flex-col justify-between text-[9px] text-slate-400 pr-2 h-24 w-10 flex-shrink-0 font-mono">
+                                    <span>100%</span>
+                                    <span>50%</span>
+                                    <span>0%</span>
+                                  </div>
+                                  <div className="flex-1 h-24 relative bg-slate-50 rounded">
+                                    <svg className="absolute inset-0 w-full h-full" preserveAspectRatio="none">
+                                      {[0, 25, 50, 75, 100].map(y => (
+                                        <line key={y} x1="0" y1={`${y}%`} x2="100%" y2={`${y}%`} stroke="#e2e8f0" strokeWidth="1" />
+                                      ))}
+                                    </svg>
+                                    <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+                                      <path fill="#06b6d4" fillOpacity="0.15"
+                                        d={`M 0,100 ${data.map((m, i) => `L ${(i / (data.length - 1)) * 100},${100 - (m.gpu_utilization || 0)}`).join(' ')} L 100,100 Z`}
+                                      />
+                                      <polyline fill="none" stroke="#06b6d4" strokeWidth="2" strokeLinecap="round"
+                                        points={data.map((m, i) => `${(i / (data.length - 1)) * 100},${100 - (m.gpu_utilization || 0)}`).join(' ')}
+                                      />
+                                    </svg>
+                                  </div>
+                                </div>
+                              </div>
+                              <div className="px-4 py-2 bg-slate-50 border-t border-slate-100 grid grid-cols-3 gap-2 text-xs">
+                                <div className="text-center">
+                                  <span className="text-slate-400 block">Min</span>
+                                  <span className="font-mono text-slate-600">{minVal.toFixed(0)}%</span>
+                                </div>
+                                <div className="text-center">
+                                  <span className="text-slate-400 block">Avg</span>
+                                  <span className="font-mono text-slate-600">{avgVal.toFixed(0)}%</span>
+                                </div>
+                                <div className="text-center">
+                                  <span className="text-slate-400 block">Max</span>
+                                  <span className="font-mono text-cyan-600 font-semibold">{maxVal.toFixed(0)}%</span>
+                                </div>
+                              </div>
+                            </div>
+                          )
                         })()}
-                      </svg>
-                      <div className="absolute bottom-1 left-2 text-[10px] text-slate-500">
-                        Min: {Math.min(...trainingMetrics.filter(m => m.learning_rate > 0).map(x => x.learning_rate)).toExponential(2)}
-                      </div>
-                      <div className="absolute top-1 right-2 text-[10px] text-slate-500">
-                        Max: {Math.max(...trainingMetrics.filter(m => m.learning_rate > 0).map(x => x.learning_rate)).toExponential(2)}
+                        
+                        {/* VRAM Usage Graph */}
+                        {(() => {
+                          const data = gpuMetricsHistory.filter(m => m.gpu_memory_used !== null)
+                          if (data.length < 2) return null
+                          const maxMem = systemMetrics.gpu_memory_total || 24
+                          const values = data.map(m => m.gpu_memory_used || 0)
+                          const minVal = Math.min(...values)
+                          const maxVal = Math.max(...values)
+                          const avgVal = values.reduce((a, b) => a + b, 0) / values.length
+                          const currentVal = values[values.length - 1]
+                          
+                          return (
+                            <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
+                              <div className="px-4 py-2 border-b border-slate-100 bg-gradient-to-r from-amber-50 to-slate-50 flex items-center justify-between">
+                                <h4 className="text-sm font-medium text-slate-700 flex items-center gap-2">
+                                  <div className="w-3 h-3 rounded-full bg-amber-500" />
+                                  VRAM Usage
+                                  <span className="text-slate-400 text-xs">(GB)</span>
+                                </h4>
+                                <span className="text-xs font-mono bg-white px-2 py-0.5 rounded border border-amber-200 text-amber-600">
+                                  {currentVal.toFixed(1)}/{maxMem.toFixed(0)}G
+                                </span>
+                              </div>
+                              <div className="p-3">
+                                <div className="flex">
+                                  <div className="flex flex-col justify-between text-[9px] text-slate-400 pr-2 h-24 w-10 flex-shrink-0 font-mono">
+                                    <span>{maxMem.toFixed(0)}G</span>
+                                    <span>{(maxMem / 2).toFixed(0)}G</span>
+                                    <span>0G</span>
+                                  </div>
+                                  <div className="flex-1 h-24 relative bg-slate-50 rounded">
+                                    <svg className="absolute inset-0 w-full h-full" preserveAspectRatio="none">
+                                      {[0, 25, 50, 75, 100].map(y => (
+                                        <line key={y} x1="0" y1={`${y}%`} x2="100%" y2={`${y}%`} stroke="#e2e8f0" strokeWidth="1" />
+                                      ))}
+                                    </svg>
+                                    <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+                                      <path fill="#f59e0b" fillOpacity="0.15"
+                                        d={`M 0,100 ${data.map((m, i) => `L ${(i / (data.length - 1)) * 100},${100 - ((m.gpu_memory_used || 0) / maxMem) * 100}`).join(' ')} L 100,100 Z`}
+                                      />
+                                      <polyline fill="none" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round"
+                                        points={data.map((m, i) => `${(i / (data.length - 1)) * 100},${100 - ((m.gpu_memory_used || 0) / maxMem) * 100}`).join(' ')}
+                                      />
+                                    </svg>
+                                  </div>
+                                </div>
+                              </div>
+                              <div className="px-4 py-2 bg-slate-50 border-t border-slate-100 grid grid-cols-3 gap-2 text-xs">
+                                <div className="text-center">
+                                  <span className="text-slate-400 block">Min</span>
+                                  <span className="font-mono text-slate-600">{minVal.toFixed(1)}G</span>
+                                </div>
+                                <div className="text-center">
+                                  <span className="text-slate-400 block">Avg</span>
+                                  <span className="font-mono text-slate-600">{avgVal.toFixed(1)}G</span>
+                                </div>
+                                <div className="text-center">
+                                  <span className="text-slate-400 block">Peak</span>
+                                  <span className="font-mono text-amber-600 font-semibold">{maxVal.toFixed(1)}G</span>
+                                </div>
+                              </div>
+                            </div>
+                          )
+                        })()}
+                        
+                        {/* GPU Temperature Graph */}
+                        {(() => {
+                          const data = gpuMetricsHistory.filter(m => m.gpu_temperature !== null)
+                          if (data.length < 2) return null
+                          const values = data.map(m => m.gpu_temperature || 0)
+                          const minVal = Math.min(...values)
+                          const maxVal = Math.max(...values)
+                          const avgVal = values.reduce((a, b) => a + b, 0) / values.length
+                          const currentVal = values[values.length - 1]
+                          // Temperature scale: 30-90°C
+                          const tempMin = 30, tempMax = 90, tempRange = tempMax - tempMin
+                          
+                          return (
+                            <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
+                              <div className="px-4 py-2 border-b border-slate-100 bg-gradient-to-r from-orange-50 to-slate-50 flex items-center justify-between">
+                                <h4 className="text-sm font-medium text-slate-700 flex items-center gap-2">
+                                  <div className="w-3 h-3 rounded-full bg-orange-500" />
+                                  GPU Temperature
+                                  <span className="text-slate-400 text-xs">(°C)</span>
+                                </h4>
+                                <span className={`text-xs font-mono bg-white px-2 py-0.5 rounded border ${
+                                  currentVal > 80 ? 'border-red-200 text-red-600' : 
+                                  currentVal > 70 ? 'border-orange-200 text-orange-600' : 
+                                  'border-green-200 text-green-600'
+                                }`}>
+                                  {currentVal.toFixed(0)}°C
+                                </span>
+                              </div>
+                              <div className="p-3">
+                                <div className="flex">
+                                  <div className="flex flex-col justify-between text-[9px] text-slate-400 pr-2 h-24 w-10 flex-shrink-0 font-mono">
+                                    <span>{tempMax}°</span>
+                                    <span>{(tempMin + tempMax) / 2}°</span>
+                                    <span>{tempMin}°</span>
+                                  </div>
+                                  <div className="flex-1 h-24 relative bg-slate-50 rounded">
+                                    <svg className="absolute inset-0 w-full h-full" preserveAspectRatio="none">
+                                      {[0, 25, 50, 75, 100].map(y => (
+                                        <line key={y} x1="0" y1={`${y}%`} x2="100%" y2={`${y}%`} stroke="#e2e8f0" strokeWidth="1" />
+                                      ))}
+                                      {/* Warning zone (>70°C) */}
+                                      <rect x="0" y="0" width="100%" height={`${((tempMax - 70) / tempRange) * 100}%`} fill="#fef3c7" fillOpacity="0.5" />
+                                      {/* Danger zone (>80°C) */}
+                                      <rect x="0" y="0" width="100%" height={`${((tempMax - 80) / tempRange) * 100}%`} fill="#fee2e2" fillOpacity="0.5" />
+                                    </svg>
+                                    <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+                                      <path fill="#f97316" fillOpacity="0.15"
+                                        d={`M 0,100 ${data.map((m, i) => {
+                                          const y = 100 - (((m.gpu_temperature || tempMin) - tempMin) / tempRange) * 100
+                                          return `L ${(i / (data.length - 1)) * 100},${Math.max(0, Math.min(100, y))}`
+                                        }).join(' ')} L 100,100 Z`}
+                                      />
+                                      <polyline fill="none" stroke="#f97316" strokeWidth="2" strokeLinecap="round"
+                                        points={data.map((m, i) => {
+                                          const y = 100 - (((m.gpu_temperature || tempMin) - tempMin) / tempRange) * 100
+                                          return `${(i / (data.length - 1)) * 100},${Math.max(0, Math.min(100, y))}`
+                                        }).join(' ')}
+                                      />
+                                    </svg>
+                                  </div>
+                                </div>
+                              </div>
+                              <div className="px-4 py-2 bg-slate-50 border-t border-slate-100 grid grid-cols-3 gap-2 text-xs">
+                                <div className="text-center">
+                                  <span className="text-slate-400 block">Min</span>
+                                  <span className="font-mono text-slate-600">{minVal.toFixed(0)}°C</span>
+                                </div>
+                                <div className="text-center">
+                                  <span className="text-slate-400 block">Avg</span>
+                                  <span className="font-mono text-slate-600">{avgVal.toFixed(0)}°C</span>
+                                </div>
+                                <div className="text-center">
+                                  <span className="text-slate-400 block">Peak</span>
+                                  <span className={`font-mono font-semibold ${
+                                    maxVal > 80 ? 'text-red-600' : maxVal > 70 ? 'text-orange-600' : 'text-green-600'
+                                  }`}>{maxVal.toFixed(0)}°C</span>
+                                </div>
+                              </div>
+                            </div>
+                          )
+                        })()}
                       </div>
                     </div>
-                    <div className="flex justify-between text-xs text-slate-500 mt-1">
-                      <span>Step {trainingMetrics[0]?.step || 0}</span>
-                      <span>Current: {trainingMetrics[trainingMetrics.length - 1]?.learning_rate?.toExponential(2) || '--'}</span>
-                      <span>Step {trainingMetrics[trainingMetrics.length - 1]?.step || 0}</span>
-                    </div>
-                  </div>
+                  )}
+                </div>
+              )}
+              
+              {/* Placeholder when no metrics yet */}
+              {trainingMetrics.length <= 1 && isTraining && (
+                <div className="bg-slate-50 rounded-lg border border-slate-200 p-6 text-center">
+                  <Loader2 className="w-8 h-8 animate-spin text-blue-500 mx-auto mb-2" />
+                  <p className="text-sm text-slate-600">Waiting for training metrics...</p>
+                  <p className="text-xs text-slate-400 mt-1">Metrics will appear after the first training step</p>
                 </div>
               )}
               
@@ -1569,6 +2649,42 @@ export default function Home() {
                 </div>
               </div>
               
+              {/* Training Completion Summary - show when completed */}
+              {jobStatus.status === 'completed' && (
+                <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                  <h4 className="font-semibold text-green-800 flex items-center gap-2 mb-3">
+                    <CheckCircle className="w-5 h-5" /> Training Completed Successfully
+                  </h4>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex items-start gap-2">
+                      <FolderOpen className="w-4 h-4 text-green-600 mt-0.5 flex-shrink-0" />
+                      <div>
+                        <span className="text-green-700 font-medium">Output Path:</span>
+                        <code className="block text-green-800 bg-green-100 px-2 py-1 rounded mt-1 text-xs break-all">
+                          /app/data/outputs/{jobStatus.job_id}
+                        </code>
+                      </div>
+                    </div>
+                    {trainingMetrics.length > 0 && (
+                      <div className="grid grid-cols-2 gap-2 mt-3 pt-3 border-t border-green-200">
+                        <div className="text-green-700">
+                          <span className="font-medium">Final Loss:</span> {trainingMetrics[trainingMetrics.length - 1]?.loss?.toFixed(4) || '--'}
+                        </div>
+                        <div className="text-green-700">
+                          <span className="font-medium">Total Steps:</span> {jobStatus.current_step || trainingMetrics[trainingMetrics.length - 1]?.step || '--'}
+                        </div>
+                        <div className="text-green-700">
+                          <span className="font-medium">Epochs:</span> {trainingMetrics[trainingMetrics.length - 1]?.epoch || jobStatus.total_epochs || '--'}
+                        </div>
+                        <div className="text-green-700">
+                          <span className="font-medium">Training Type:</span> {trainTypeInfo?.display_name || 'SFT'}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+              
               {/* Error message when failed */}
               {jobStatus.status === 'failed' && jobStatus.error && (
                 <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
@@ -1586,11 +2702,232 @@ export default function Home() {
               
               {/* Start New Training Button - show when completed/failed/stopped */}
               {!isTraining && (jobStatus.status === 'completed' || jobStatus.status === 'failed' || jobStatus.status === 'stopped') && (
-                <button onClick={resetTrainingState}
-                  className="w-full py-3 bg-blue-500 text-white rounded-lg font-medium hover:bg-blue-600 flex items-center justify-center gap-2">
-                  <Play className="w-5 h-5" /> Start New Training
-                </button>
+                <div className="space-y-3">
+                  {/* Load for Inference - Only show for completed training with adapter */}
+                  {jobStatus.status === 'completed' && (
+                    <button 
+                      onClick={() => loadModelForInference(config.model_path, config.output_dir)}
+                      disabled={isModelLoading || isCleaningMemory}
+                      className="w-full py-3 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-lg font-medium hover:from-green-600 hover:to-emerald-700 disabled:opacity-50 flex items-center justify-center gap-2 shadow-lg shadow-green-500/20 transition-all">
+                      {isModelLoading ? (
+                        <>
+                          <Loader2 className="w-5 h-5 animate-spin" />
+                          {loadingMessage || 'Loading...'}
+                        </>
+                      ) : (
+                        <>
+                          <MessageSquare className="w-5 h-5" />
+                          Load for Inference
+                        </>
+                      )}
+                    </button>
+                  )}
+                  
+                  <div className="flex gap-2">
+                    <button onClick={resetTrainingState}
+                      disabled={isModelLoading}
+                      className="flex-1 py-3 bg-blue-500 text-white rounded-lg font-medium hover:bg-blue-600 disabled:opacity-50 flex items-center justify-center gap-2">
+                      <Play className="w-5 h-5" /> Start New Training
+                    </button>
+                    <button onClick={() => { setShowHistory(true); fetchTrainingHistory(); }}
+                      disabled={isModelLoading}
+                      className="px-4 py-3 bg-slate-100 text-slate-700 rounded-lg font-medium hover:bg-slate-200 disabled:opacity-50 flex items-center justify-center gap-2 border border-slate-200">
+                      <History className="w-5 h-5" />
+                    </button>
+                  </div>
+                </div>
               )}
+            </div>
+          </div>
+        )}
+
+        {/* ===================== TRAINING HISTORY MODAL ===================== */}
+        {showHistory && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-2 sm:p-4">
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-5xl max-h-[90vh] sm:max-h-[85vh] overflow-hidden flex flex-col">
+              {/* Header */}
+              <div className="flex items-center justify-between p-3 sm:p-4 border-b border-slate-200 bg-gradient-to-r from-blue-50 to-slate-50">
+                <div>
+                  <h2 className="text-lg sm:text-xl font-bold text-slate-900 flex items-center gap-2">
+                    <History className="w-5 h-5 text-blue-500" /> Training History
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-0.5">{trainingHistory.length} training runs</p>
+                </div>
+                <button onClick={() => setShowHistory(false)} className="p-2 hover:bg-white rounded-lg transition-colors">
+                  <X className="w-5 h-5 text-slate-500" />
+                </button>
+              </div>
+              
+              {/* Content */}
+              <div className="flex-1 overflow-y-auto p-3 sm:p-4">
+                {isLoadingHistory ? (
+                  <div className="flex items-center justify-center py-12">
+                    <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
+                  </div>
+                ) : trainingHistory.length === 0 ? (
+                  <div className="text-center py-12 text-slate-500">
+                    <History className="w-12 h-12 mx-auto mb-3 opacity-30" />
+                    <p className="font-medium">No training history found</p>
+                    <p className="text-sm mt-1">Complete a training run to see it here</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {trainingHistory.map((item) => (
+                      <div key={item.job_id} className={`border rounded-xl overflow-hidden transition-all hover:shadow-md ${
+                        item.status === 'completed' ? 'border-green-200 bg-gradient-to-r from-green-50/80 to-white' :
+                        item.status === 'failed' ? 'border-red-200 bg-gradient-to-r from-red-50/80 to-white' :
+                        item.status === 'running' ? 'border-blue-200 bg-gradient-to-r from-blue-50/80 to-white' :
+                        'border-slate-200 bg-gradient-to-r from-slate-50/80 to-white'
+                      }`}>
+                        {/* Training Info Header */}
+                        <div className="p-3 sm:p-4">
+                          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 sm:gap-4">
+                            <div className="flex-1 min-w-0">
+                              {/* Name and Status */}
+                              <div className="flex flex-wrap items-center gap-2 mb-2">
+                                <span className="font-semibold text-slate-900 truncate">{item.job_name}</span>
+                                <span className={`text-[10px] sm:text-xs px-2 py-0.5 rounded-full font-medium whitespace-nowrap ${
+                                  item.status === 'completed' ? 'bg-green-100 text-green-700' :
+                                  item.status === 'failed' ? 'bg-red-100 text-red-700' :
+                                  item.status === 'running' ? 'bg-blue-100 text-blue-700 animate-pulse' :
+                                  'bg-slate-100 text-slate-600'
+                                }`}>
+                                  {item.status === 'running' && <span className="inline-block w-1.5 h-1.5 bg-blue-500 rounded-full mr-1 animate-pulse" />}
+                                  {item.status.toUpperCase()}
+                                </span>
+                                {item.config && (
+                                  <span className="text-[10px] sm:text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 font-medium whitespace-nowrap">
+                                    {item.config.training_method.toUpperCase()} • {item.config.train_type.toUpperCase()}
+                                  </span>
+                                )}
+                              </div>
+                              
+                              {/* Date and Config Details */}
+                              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
+                                {item.created_at && (
+                                  <span className="flex items-center gap-1">
+                                    <Clock className="w-3 h-3" />
+                                    {new Date(item.created_at).toLocaleDateString()} {new Date(item.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                  </span>
+                                )}
+                                {item.config && (
+                                  <>
+                                    <span>LR: {item.config.learning_rate}</span>
+                                    <span>Batch: {item.config.batch_size}</span>
+                                    <span>Epochs: {item.config.num_epochs}</span>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                            
+                            {/* Status Icons - Right Side */}
+                            <div className="flex sm:flex-col items-center sm:items-end gap-2 sm:gap-1 text-xs">
+                              {item.has_adapter && (
+                                <div className="flex items-center gap-1 text-green-600 bg-green-50 px-2 py-1 rounded-full">
+                                  <CheckCircle className="w-3 h-3" /> 
+                                  <span className="hidden sm:inline">Adapter</span>
+                                </div>
+                              )}
+                              {item.checkpoint_count > 0 && (
+                                <div className="flex items-center gap-1 text-blue-600 bg-blue-50 px-2 py-1 rounded-full">
+                                  <Layers className="w-3 h-3" />
+                                  <span>{item.checkpoint_count} ckpt</span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        
+                        {/* Metrics and Output - Footer */}
+                        {(item.final_metrics || item.output_exists) && (
+                          <div className="px-3 sm:px-4 py-2 bg-slate-50/50 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                            {/* Final Metrics */}
+                            {item.final_metrics && item.final_metrics.loss !== null && (
+                              <div className="flex flex-wrap items-center gap-3 text-xs">
+                                <div className="flex items-center gap-1">
+                                  <span className="text-slate-400">Final Loss:</span>
+                                  <span className="font-mono font-semibold text-slate-700">{item.final_metrics.loss.toFixed(4)}</span>
+                                </div>
+                                {item.final_metrics.epoch !== null && (
+                                  <div className="flex items-center gap-1">
+                                    <span className="text-slate-400">Epochs:</span>
+                                    <span className="font-mono font-semibold text-slate-700">{item.final_metrics.epoch}</span>
+                                  </div>
+                                )}
+                                {item.final_metrics.step !== null && (
+                                  <div className="flex items-center gap-1">
+                                    <span className="text-slate-400">Steps:</span>
+                                    <span className="font-mono font-semibold text-slate-700">{item.final_metrics.step}</span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            
+                            {/* Output Path */}
+                            {item.output_exists && (
+                              <div className="flex items-center gap-1 text-xs">
+                                <FolderOpen className="w-3 h-3 text-slate-400 flex-shrink-0" />
+                                <code className="text-[10px] text-slate-500 truncate max-w-[250px] sm:max-w-[300px] bg-white px-2 py-0.5 rounded border border-slate-200" title={item.output_path}>
+                                  {item.output_path}
+                                </code>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        
+                        {/* Adapter Path - if available */}
+                        {item.adapter_path && (
+                          <div className="px-3 sm:px-4 py-2 bg-green-50/50 border-t border-green-100 flex items-center gap-2 text-xs">
+                            <Sparkles className="w-3 h-3 text-green-500 flex-shrink-0" />
+                            <span className="text-green-600 font-medium">Adapter:</span>
+                            <code className="text-[10px] text-green-700 truncate flex-1 bg-white px-2 py-0.5 rounded border border-green-200" title={item.adapter_path}>
+                              {item.adapter_path}
+                            </code>
+                          </div>
+                        )}
+                        
+                        {/* Action Buttons for completed jobs */}
+                        {item.status === 'completed' && item.has_adapter && (
+                          <div className="px-3 sm:px-4 py-3 bg-slate-50 border-t border-slate-200">
+                            <button
+                              onClick={() => {
+                                setShowHistory(false)
+                                loadModelForInference(config.model_path, item.adapter_path)
+                              }}
+                              disabled={isModelLoading || isCleaningMemory}
+                              className="w-full py-2.5 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-lg text-sm font-medium hover:from-blue-600 hover:to-indigo-700 disabled:opacity-50 flex items-center justify-center gap-2 shadow-md transition-all"
+                            >
+                              {isModelLoading ? (
+                                <>
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                  {loadingMessage || 'Loading...'}
+                                </>
+                              ) : (
+                                <>
+                                  <MessageSquare className="w-4 h-4" />
+                                  Load for Inference
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              
+              {/* Footer */}
+              <div className="p-3 sm:p-4 border-t border-slate-200 bg-slate-50 flex gap-2">
+                <button onClick={() => fetchTrainingHistory()}
+                  className="px-4 py-2 bg-white text-slate-600 rounded-lg font-medium hover:bg-slate-100 border border-slate-200 flex items-center gap-2">
+                  <RefreshCw className="w-4 h-4" /> Refresh
+                </button>
+                <button onClick={() => setShowHistory(false)}
+                  className="flex-1 py-2 bg-slate-700 text-white rounded-lg font-medium hover:bg-slate-800">
+                  Close
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -1601,6 +2938,17 @@ export default function Home() {
           <>
             {currentStep <= 4 && (
               <div className="mb-6">
+                {/* Training History Quick Access */}
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-semibold text-slate-800">New Training</h2>
+                  <button 
+                    onClick={() => { setShowHistory(true); fetchTrainingHistory(); }}
+                    className="flex items-center gap-2 px-3 py-1.5 text-sm text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors border border-slate-200"
+                  >
+                    <History className="w-4 h-4" />
+                    <span className="hidden sm:inline">Training History</span>
+                  </button>
+                </div>
                 <div className="flex items-center justify-between overflow-x-auto pb-2">
                   {TRAIN_STEPS.map((step, idx) => (
                     <div key={step.id} className="flex items-center flex-shrink-0">
@@ -1627,152 +2975,219 @@ export default function Home() {
 
             <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-4 sm:p-6">
               
-              {/* Step 1: Model */}
-              {currentStep === 1 && (
+              {/* Step 1: Model Selection (Only shown if multiple models available) */}
+              {currentStep === 1 && !IS_SINGLE_MODEL && (
                 <div className="space-y-5">
                   <div>
                     <h2 className="text-xl font-bold text-slate-900 mb-1">Select Model</h2>
                     <p className="text-slate-600 text-sm">Choose the base model for fine-tuning</p>
                   </div>
                   
-                  {/* System Capability Notice - Only show when specific model path is locked */}
-                  {systemCapabilities.has_model_restriction && systemCapabilities.supported_model && (
-                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                      <div className="flex items-start gap-3">
-                        <Lock className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
-                        <div>
-                          <p className="font-medium text-blue-800">Supported Model</p>
-                          <p className="text-sm text-blue-700 mt-1">
-                            This system only supports the model shown below. Please use the supported model for fine-tuning.
-                          </p>
+                  {/* Locked Models Selection */}
+                  {IS_MODEL_LOCKED && lockedModels.length > 1 && (
+                    <div className="space-y-3">
+                      <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
+                        <div className="flex items-start gap-3">
+                          <Lock className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+                          <div>
+                            <p className="font-medium text-blue-800">Available Models</p>
+                            <p className="text-sm text-blue-700 mt-1">
+                              Select one of the supported models below for fine-tuning.
+                            </p>
+                          </div>
                         </div>
+                      </div>
+                      
+                      <div className="grid gap-3">
+                        {lockedModels.map((model: LockedModel, idx: number) => (
+                          <button
+                            key={idx}
+                            onClick={() => setConfig(prev => ({
+                              ...prev,
+                              model_path: model.path,
+                              model_source: model.source,
+                              modality: model.modality
+                            }))}
+                            className={`p-4 rounded-lg border-2 text-left transition-all ${
+                              config.model_path === model.path 
+                                ? 'border-blue-500 bg-blue-50' 
+                                : 'border-slate-200 hover:border-slate-300 bg-white'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <div>
+                                <p className="font-semibold text-slate-900">{model.name}</p>
+                                {model.description && (
+                                  <p className="text-sm text-slate-500 mt-1">{model.description}</p>
+                                )}
+                                <div className="flex gap-2 mt-2">
+                                  <span className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded capitalize">
+                                    {model.modality}
+                                  </span>
+                                </div>
+                              </div>
+                              {config.model_path === model.path && (
+                                <CheckCircle className="w-6 h-6 text-blue-500" />
+                              )}
+                            </div>
+                          </button>
+                        ))}
                       </div>
                     </div>
                   )}
                   
-                  <div className="grid gap-4">
-                    {(() => {
-                      const supportedSources = (systemCapabilities.supported_model_sources || systemCapabilities.supported_sources || ['local']);
-                      const hasMultipleSources = supportedSources.length > 1;
-                      const isLocked = !!(systemCapabilities.has_model_restriction && systemCapabilities.supported_model);
-                      
-                      // Dynamic labels based on selected source
-                      const getLabel = () => {
-                        if (config.model_source === 'local') return 'Local Model Path';
-                        if (config.model_source === 'huggingface') return 'HuggingFace Model ID';
-                        if (config.model_source === 'modelscope') return 'ModelScope Model ID';
-                        return 'Model Path';
-                      };
-                      
-                      const getPlaceholder = () => {
-                        if (config.model_source === 'local') return '/path/to/model';
-                        if (config.model_source === 'huggingface') return 'organization/model-name';
-                        if (config.model_source === 'modelscope') return 'organization/model-name';
-                        return 'Enter model path or ID';
-                      };
-                      
-                      const getHelpText = () => {
-                        if (config.model_source === 'local') return 'Enter the full path to your model directory on the server';
-                        if (config.model_source === 'huggingface') return 'Enter the HuggingFace model ID';
-                        if (config.model_source === 'modelscope') return 'Enter the ModelScope model ID';
-                        return '';
-                      };
-                      
-                      return (
-                        <>
-                          {/* Model Source Selector - Only show if multiple sources supported */}
-                          {hasMultipleSources && (
-                            <div>
-                              <label className="block text-sm font-medium text-slate-700 mb-2">
-                                Model Source
-                                {isLocked && <Lock className="w-3 h-3 inline ml-1 text-slate-400" />}
-                              </label>
-                              <div className={`grid gap-2`} style={{ gridTemplateColumns: `repeat(${supportedSources.length}, 1fr)` }}>
-                                {supportedSources.map((source) => (
-                                  <button key={source} 
-                                    onClick={() => !isLocked && setConfig({ ...config, model_source: source as any })}
-                                    disabled={isLocked}
-                                    className={`p-3 rounded-lg border-2 text-center transition-all ${
-                                      config.model_source === source ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-600 hover:border-slate-300'
-                                    } ${isLocked ? 'opacity-60 cursor-not-allowed' : ''}`}>
-                                    <span className="capitalize font-medium text-sm">{source}</span>
-                                  </button>
-                                ))}
+                  {/* Unlocked Model Input (fallback if no locked models) */}
+                  {!IS_MODEL_LOCKED && (
+                    <div className="grid gap-4">
+                      {(() => {
+                        const supportedSources = (systemCapabilities.supported_model_sources || systemCapabilities.supported_sources || ['local']);
+                        const hasMultipleSources = supportedSources.length > 1;
+                        
+                        const getLabel = () => {
+                          if (config.model_source === 'local') return 'Local Model Path';
+                          if (config.model_source === 'huggingface') return 'HuggingFace Model ID';
+                          if (config.model_source === 'modelscope') return 'ModelScope Model ID';
+                          return 'Model Path';
+                        };
+                        
+                        const getPlaceholder = () => {
+                          if (config.model_source === 'local') return '/path/to/model';
+                          if (config.model_source === 'huggingface') return 'organization/model-name';
+                          if (config.model_source === 'modelscope') return 'organization/model-name';
+                          return 'Enter model path or ID';
+                        };
+                        
+                        return (
+                          <>
+                            {hasMultipleSources && (
+                              <div>
+                                <label className="block text-sm font-medium text-slate-700 mb-2">Model Source</label>
+                                <div className={`grid gap-2`} style={{ gridTemplateColumns: `repeat(${supportedSources.length}, 1fr)` }}>
+                                  {supportedSources.map((source) => (
+                                    <button key={source} 
+                                      onClick={() => setConfig({ ...config, model_source: source as any })}
+                                      className={`p-3 rounded-lg border-2 text-center transition-all ${
+                                        config.model_source === source ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-600 hover:border-slate-300'
+                                      }`}>
+                                      <span className="capitalize font-medium text-sm">{source}</span>
+                                    </button>
+                                  ))}
+                                </div>
                               </div>
-                            </div>
-                          )}
-                          
-                          {/* Model Path/ID Input */}
-                          <div>
-                            <label className="block text-sm font-medium text-slate-700 mb-2">
-                              {getLabel()}
-                              {isLocked && <Lock className="w-3 h-3 inline ml-1 text-slate-400" />}
-                            </label>
-                            <input type="text" value={config.model_path}
-                              onChange={(e) => !isLocked && setConfig({ ...config, model_path: e.target.value })}
-                              disabled={isLocked}
-                              placeholder={getPlaceholder()}
-                              className={`w-full px-4 py-3 border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${
-                                isLocked ? 'bg-slate-100 cursor-not-allowed' : ''
-                              }`}
-                            />
-                            {!isLocked && (
-                              <p className="text-xs text-slate-500 mt-1">{getHelpText()}</p>
                             )}
-                            {isLocked && (
-                              <p className="text-xs text-slate-500 mt-1">
-                                Supported model: {systemCapabilities.supported_model}
-                              </p>
-                            )}
-                          </div>
-                          
-                          {/* Info box for local models */}
-                          {!isLocked && config.model_source === 'local' && (
-                            <div className="bg-slate-50 rounded-lg p-4 border border-slate-200">
-                              <p className="text-sm text-slate-700">
-                                <strong>Local Model:</strong> Enter the path to your model directory on the server. 
-                                This should be a directory containing the model files (config.json, model weights, etc.).
-                              </p>
-                              <p className="text-xs text-slate-500 mt-2">Example paths:</p>
-                              <ul className="text-xs text-slate-500 mt-1 space-y-1">
-                                <li>• <code className="bg-slate-200 px-1 rounded">/root/models/my-model</code></li>
-                                <li>• <code className="bg-slate-200 px-1 rounded">/mnt/storage/models/my-model</code></li>
-                              </ul>
+                            
+                            <div>
+                              <label className="block text-sm font-medium text-slate-700 mb-2">{getLabel()}</label>
+                              <input type="text" value={config.model_path}
+                                onChange={(e) => setConfig({ ...config, model_path: e.target.value })}
+                                placeholder={getPlaceholder()}
+                                className="w-full px-4 py-3 border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                              />
                             </div>
-                          )}
-                        </>
-                      );
-                    })()}
-                  </div>
+                          </>
+                        );
+                      })()}
+                    </div>
+                  )}
                 </div>
               )}
 
-              {/* Step 2: Dataset */}
-              {currentStep === 2 && (
-                <DatasetConfig 
-                  selectedPaths={config.dataset_paths}
-                  onSelectionChange={(paths) => setConfig(prev => ({ ...prev, dataset_paths: paths }))}
-                />
+              {/* Dataset Configuration Step */}
+              {/* Step 1 if single model locked, Step 2 otherwise */}
+              {((IS_SINGLE_MODEL && currentStep === 1) || (!IS_SINGLE_MODEL && currentStep === 2)) && (
+                <div className="space-y-5">
+                  {/* Show selected model banner when in locked single model mode */}
+                  {IS_SINGLE_MODEL && DEFAULT_MODEL && (
+                    <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-4 mb-4">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center">
+                          <Cpu className="w-5 h-5 text-blue-600" />
+                        </div>
+                        <div>
+                          <p className="text-xs text-blue-600 font-medium uppercase tracking-wide">Selected Model</p>
+                          <p className="font-semibold text-slate-900">{DEFAULT_MODEL.name}</p>
+                        </div>
+                        <Lock className="w-4 h-4 text-blue-400 ml-auto" />
+                      </div>
+                    </div>
+                  )}
+                  <DatasetConfig 
+                    selectedPaths={config.dataset_paths}
+                    onSelectionChange={(paths) => setConfig(prev => ({ ...prev, dataset_paths: paths }))}
+                  />
+                </div>
               )}
 
-              {/* Step 3: Training Settings */}
-              {currentStep === 3 && (
-                <TrainingSettingsStep 
-                  config={config} 
-                  setConfig={(fn) => setConfig(prev => ({ ...prev, ...fn(prev) }))} 
-                />
+              {/* Training Settings Step */}
+              {/* Step 2 if single model locked, Step 3 otherwise */}
+              {((IS_SINGLE_MODEL && currentStep === 2) || (!IS_SINGLE_MODEL && currentStep === 3)) && (
+                <div className="space-y-5">
+                  {/* Show selected model banner */}
+                  {IS_MODEL_LOCKED && (
+                    <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-4 mb-4">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center">
+                          <Cpu className="w-5 h-5 text-blue-600" />
+                        </div>
+                        <div>
+                          <p className="text-xs text-blue-600 font-medium uppercase tracking-wide">Training Model</p>
+                          <p className="font-semibold text-slate-900">{getModelDisplayName(config.model_path)}</p>
+                        </div>
+                        <Lock className="w-4 h-4 text-blue-400 ml-auto" />
+                      </div>
+                    </div>
+                  )}
+                  <TrainingSettingsStep 
+                    config={config} 
+                    setConfig={(fn) => setConfig(prev => ({ ...prev, ...fn(prev) }))}
+                    availableGpus={availableGpus}
+                  />
+                </div>
               )}
 
-              {/* Step 4: Review */}
-              {currentStep === 4 && (
+              {/* Review & Start Step */}
+              {/* Step 3 if single model locked, Step 4 otherwise */}
+              {((IS_SINGLE_MODEL && currentStep === 3) || (!IS_SINGLE_MODEL && currentStep === 4)) && (
                 <div className="space-y-5">
                   <div>
                     <h2 className="text-xl font-bold text-slate-900 mb-1">Review & Start</h2>
                     <p className="text-slate-600 text-sm">Review your configuration before training</p>
                   </div>
                   
-                  {/* Output Path Configuration - Only show if external storage is attached */}
-                  {systemCapabilities.has_external_storage ? (
+                  {/* Output Path Configuration - Hidden when locked */}
+                  {outputPathConfig.is_locked ? (
+                    /* Locked mode - show info only, no input */
+                    <div className="bg-emerald-50 rounded-lg p-4 border border-emerald-200">
+                      <div className="flex items-center gap-2">
+                        <FolderOpen className="w-5 h-5 text-emerald-600" />
+                        <span className="text-sm font-medium text-emerald-900">Output Directory</span>
+                        <Lock className="w-4 h-4 text-emerald-500" />
+                      </div>
+                      <p className="text-sm text-emerald-700 mt-2">
+                        Training outputs will be saved to <code className="bg-emerald-100 px-2 py-0.5 rounded font-mono text-xs">{outputPathConfig.base_path}/{'<training-id>'}</code>
+                      </p>
+                      <p className="text-xs text-emerald-600 mt-1">Output path is managed automatically for each training job</p>
+                    </div>
+                  ) : outputPathConfig.user_can_add_path ? (
+                    /* Base locked mode - user can add intermediate path */
+                    <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
+                      <div className="flex items-center gap-2 mb-3">
+                        <FolderOpen className="w-5 h-5 text-blue-600" />
+                        <label className="text-sm font-medium text-slate-900">Output Subdirectory</label>
+                        <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">Optional</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm text-slate-500 font-mono">{outputPathConfig.base_path}/</span>
+                        <input type="text" value={config.output_dir}
+                          onChange={(e) => setConfig({ ...config, output_dir: e.target.value })}
+                          placeholder="my-project"
+                          className="flex-1 px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 text-sm" />
+                        <span className="text-sm text-slate-500 font-mono">/{'<training-id>'}</span>
+                      </div>
+                      <p className="text-xs text-slate-500 mt-2">Add an optional subdirectory to organize your outputs</p>
+                    </div>
+                  ) : systemCapabilities.has_external_storage ? (
+                    /* Free mode with external storage */
                     <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
                       <div className="flex items-center gap-2 mb-3">
                         <FolderOpen className="w-5 h-5 text-blue-600" />
@@ -1789,6 +3204,7 @@ export default function Home() {
                       </p>
                     </div>
                   ) : (
+                    /* Free mode without external storage */
                     <div className="bg-slate-50 rounded-lg p-4 border border-slate-200">
                       <div className="flex items-center gap-2">
                         <FolderOpen className="w-5 h-5 text-slate-500" />
@@ -1801,7 +3217,11 @@ export default function Home() {
                   <div className="bg-slate-50 rounded-lg p-4 space-y-3 text-sm border border-slate-200">
                     <h4 className="font-medium text-slate-900 mb-2">Configuration Summary</h4>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <div><span className="text-slate-500">Model:</span> <span className="font-medium text-slate-900 break-all">{config.model_path}</span></div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-slate-500">Model:</span> 
+                        <span className="font-medium text-slate-900">{getModelDisplayName(config.model_path)}</span>
+                        {IS_MODEL_LOCKED && <Lock className="w-3 h-3 text-slate-400" />}
+                      </div>
                       <div><span className="text-slate-500">Training Type:</span> <span className="font-medium text-blue-600 uppercase">{config.train_type}</span></div>
                       <div><span className="text-slate-500">Epochs:</span> <span className="font-medium text-slate-900">{config.num_train_epochs}</span></div>
                       <div><span className="text-slate-500">Learning Rate:</span> <span className="font-medium text-slate-900">{config.learning_rate.toExponential(0)}</span></div>
@@ -1866,16 +3286,16 @@ export default function Home() {
                 </div>
               )}
 
-              {/* Navigation */}
-              {currentStep <= 4 && (
+              {/* Navigation - Dynamic based on TOTAL_STEPS */}
+              {currentStep <= TOTAL_STEPS && (
                 <div className="flex justify-between mt-6 pt-4 border-t border-slate-200">
                   <button onClick={() => setCurrentStep(Math.max(1, currentStep - 1))} disabled={currentStep === 1}
-                    className="flex items-center gap-2 px-4 py-2 text-slate-600 font-medium disabled:opacity-50 hover:text-slate-900">
+                    className="flex items-center gap-2 px-4 py-2 text-slate-600 font-medium disabled:opacity-50 hover:text-slate-900 transition-colors">
                     <ChevronLeft className="w-5 h-5" /> Back
                   </button>
-                  {currentStep < 4 && (
+                  {currentStep < TOTAL_STEPS && (
                     <button onClick={() => setCurrentStep(currentStep + 1)} disabled={!canProceed()}
-                      className="flex items-center gap-2 px-4 py-2 bg-blue-500 text-white rounded-lg font-medium disabled:opacity-50 hover:bg-blue-600">
+                      className="flex items-center gap-2 px-4 py-2 bg-blue-500 text-white rounded-lg font-medium disabled:opacity-50 hover:bg-blue-600 transition-colors">
                       Next <ChevronRight className="w-5 h-5" />
                     </button>
                   )}
@@ -1911,7 +3331,7 @@ export default function Home() {
               
               {/* Adapter Management */}
               <div className="border-t border-slate-200 pt-4 space-y-2">
-                <label className="block text-sm font-medium text-slate-700 flex items-center gap-2">
+                <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
                   <Layers className="w-4 h-4 text-blue-500" /> LoRA Adapters
                 </label>
                 <div className="flex gap-2">

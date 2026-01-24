@@ -1,44 +1,65 @@
 # Copyright (c) US Inc. All rights reserved.
 """
 Inference endpoints for model testing
-- Test models before fine-tuning
-- Test intermediate checkpoints during fine-tuning  
-- Test final fine-tuned models
+Supports multiple backends: Transformers, SGLang, vLLM
+
+Features:
+- Multiple inference backends with streaming
+- Multimodal support (text, image, audio, video)
+- OpenAI-compatible API format
+- Memory management for training/inference switching
 """
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ...services.inference_service import (
     inference_service, 
     InferenceRequest, 
     InferenceResponse,
-    ModelInfo
+    InferenceBackend,
+    ModelInfo,
+    ModelCapabilities
 )
 from ...services.sanitized_log_service import sanitized_log_service
 
 router = APIRouter()
 
 
+class ContentItem(BaseModel):
+    """Multimodal content item (OpenAI format)"""
+    type: str = Field(..., description="Content type: text, image_url, audio, video")
+    text: Optional[str] = None
+    image_url: Optional[Dict[str, str]] = None
+    audio: Optional[Dict[str, str]] = None
+    video: Optional[Dict[str, str]] = None
+
+
 class ChatMessage(BaseModel):
-    """Chat message format"""
+    """Chat message with multimodal support (OpenAI format)"""
     role: str = Field(..., description="Role: system, user, or assistant")
-    content: str = Field(..., description="Message content")
+    content: Union[str, List[ContentItem]] = Field(..., description="Message content (text or multimodal)")
 
 
 class ChatRequest(BaseModel):
-    """Chat inference request"""
-    model_path: str = Field(..., description="Model path (local path or checkpoint)")
-    messages: List[ChatMessage] = Field(..., description="Chat messages")
-    adapter_path: Optional[str] = Field(default=None, description="LoRA adapter path (for fine-tuned models)")
-    max_new_tokens: int = Field(default=512, ge=1, le=4096)
+    """Chat inference request with backend selection"""
+    model_path: str = Field(..., description="Model path (local path or HuggingFace ID)")
+    messages: List[ChatMessage] = Field(..., description="Chat messages (OpenAI format)")
+    adapter_path: Optional[str] = Field(default=None, description="LoRA adapter path")
+    # Backend selection
+    backend: str = Field(default="transformers", description="Backend: transformers, sglang, vllm")
+    # Generation parameters
+    max_new_tokens: int = Field(default=512, ge=1, le=8192)
     temperature: float = Field(default=0.7, ge=0, le=2)
     top_p: float = Field(default=0.9, ge=0, le=1)
     top_k: int = Field(default=50, ge=0)
     repetition_penalty: float = Field(default=1.0, ge=1, le=2)
     do_sample: bool = Field(default=True)
+    # Streaming
+    stream: bool = Field(default=False, description="Enable streaming response")
 
 
 class ChatResponse(BaseModel):
@@ -48,6 +69,7 @@ class ChatResponse(BaseModel):
     tokens_generated: int = 0
     inference_time_ms: int = 0
     model_loaded: str = ""
+    backend_used: str = "transformers"
     error: Optional[str] = None
 
 
@@ -56,6 +78,8 @@ class MemoryStatus(BaseModel):
     success: bool
     memory_freed_gb: float = 0.0
     memory_used_gb: float = 0.0
+    total_memory_gb: float = 0.0
+    cleanup_type: str = "standard"
     error: Optional[str] = None
 
 
@@ -63,34 +87,82 @@ class LoadModelRequest(BaseModel):
     """Request to pre-load a model"""
     model_path: str
     adapter_path: Optional[str] = None
+    backend: str = Field(default="transformers", description="Backend: transformers, sglang, vllm")
 
 
-@router.post("/chat", response_model=ChatResponse)
+@router.post("/chat")
 async def chat_inference(request: ChatRequest):
     """
     Run inference on a model with chat messages.
     
-    Use cases:
-    - Test a base model before fine-tuning
-    - Test intermediate checkpoints during fine-tuning
-    - Test the final fine-tuned model with LoRA adapter
+    Supports:
+    - Multiple backends: transformers (default), sglang, vllm
+    - Streaming responses (for sglang/vllm)
+    - Multimodal inputs (text, image, audio, video)
+    - OpenAI-compatible message format
     """
     try:
-        # Convert to internal format
-        messages = [{"role": m.role, "content": m.content} for m in request.messages]
+        # Convert backend string to enum
+        backend_map = {
+            "transformers": InferenceBackend.TRANSFORMERS,
+            "sglang": InferenceBackend.SGLANG,
+            "vllm": InferenceBackend.VLLM
+        }
+        backend = backend_map.get(request.backend.lower(), InferenceBackend.TRANSFORMERS)
+        
+        # Convert messages to internal format (handles multimodal content)
+        messages = []
+        for m in request.messages:
+            if isinstance(m.content, str):
+                messages.append({"role": m.role, "content": m.content})
+            else:
+                # Handle multimodal content (list of ContentItems)
+                content_list = []
+                for item in m.content:
+                    content_item = {"type": item.type}
+                    if item.text:
+                        content_item["text"] = item.text
+                    if item.image_url:
+                        content_item["image_url"] = item.image_url
+                    if item.audio:
+                        content_item["audio"] = item.audio
+                    if item.video:
+                        content_item["video"] = item.video
+                    content_list.append(content_item)
+                messages.append({"role": m.role, "content": content_list})
         
         inference_request = InferenceRequest(
             model_path=request.model_path,
             messages=messages,
             adapter_path=request.adapter_path,
+            backend=backend,
             max_new_tokens=request.max_new_tokens,
             temperature=request.temperature,
             top_p=request.top_p,
             top_k=request.top_k,
             repetition_penalty=request.repetition_penalty,
-            do_sample=request.do_sample
+            do_sample=request.do_sample,
+            stream=request.stream
         )
         
+        # Handle streaming response
+        if request.stream:
+            async def generate_stream():
+                async for chunk in inference_service.generate_stream(inference_request):
+                    # SSE format
+                    yield f"data: {chunk}\n\n"
+                yield "data: [DONE]\n\n"
+            
+            return StreamingResponse(
+                generate_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                }
+            )
+        
+        # Non-streaming response
         result = await inference_service.generate(inference_request)
         
         return ChatResponse(
@@ -99,6 +171,7 @@ async def chat_inference(request: ChatRequest):
             tokens_generated=result.tokens_generated,
             inference_time_ms=result.inference_time_ms,
             model_loaded=result.model_loaded,
+            backend_used=result.backend_used,
             error=result.error
         )
     
@@ -113,15 +186,25 @@ async def chat_inference(request: ChatRequest):
 @router.post("/load", response_model=dict)
 async def load_model(request: LoadModelRequest):
     """
-    Pre-load a model into GPU memory.
+    Pre-load a model into GPU memory with selected backend.
     
-    This is useful to warm up the model before running inference,
-    reducing the latency of the first inference request.
+    Backends:
+    - transformers: Default, uses USF BIOS TransformersEngine
+    - sglang: High-performance serving with SGLang
+    - vllm: Optimized serving with vLLM
     """
     try:
+        backend_map = {
+            "transformers": InferenceBackend.TRANSFORMERS,
+            "sglang": InferenceBackend.SGLANG,
+            "vllm": InferenceBackend.VLLM
+        }
+        backend = backend_map.get(request.backend.lower(), InferenceBackend.TRANSFORMERS)
+        
         result = await inference_service.load_model(
             request.model_path, 
-            request.adapter_path
+            request.adapter_path,
+            backend
         )
         return result
     
@@ -160,33 +243,90 @@ async def get_inference_status():
     """
     Get the current inference service status.
     
-    Returns information about the currently loaded model (if any)
-    and GPU memory usage.
+    Returns:
+    - Currently loaded model info
+    - Backend being used
+    - Model capabilities (multimodal support)
+    - GPU memory usage
+    - Available backends
     """
     try:
         model_info = await inference_service.get_model_info()
+        available_backends = inference_service.get_available_backends()
         
         if model_info is None:
             return {
                 "model_loaded": False,
                 "model_path": None,
                 "adapter_path": None,
-                "memory_used_gb": 0.0
+                "backend": None,
+                "capabilities": None,
+                "memory_used_gb": 0.0,
+                "available_backends": available_backends
             }
         
         return {
             "model_loaded": True,
             "model_path": model_info.model_path,
             "adapter_path": model_info.adapter_path,
+            "backend": model_info.backend,
             "loaded_at": model_info.loaded_at.isoformat(),
-            "memory_used_gb": model_info.memory_used_gb
+            "memory_used_gb": model_info.memory_used_gb,
+            "capabilities": model_info.capabilities.model_dump() if model_info.capabilities else None,
+            "loaded_adapters": model_info.loaded_adapters,
+            "available_backends": available_backends
         }
     
     except Exception as e:
         return {
             "model_loaded": False,
-            "error": "Failed to get model status"
+            "error": "Failed to get model status",
+            "available_backends": {"transformers": False, "sglang": False, "vllm": False}
         }
+
+
+@router.get("/backends")
+async def get_available_backends():
+    """
+    Get available inference backends and their status.
+    
+    Returns which backends are installed and available:
+    - transformers: USF BIOS TransformersEngine
+    - sglang: SGLang high-performance serving
+    - vllm: vLLM optimized serving
+    """
+    backends = inference_service.get_available_backends()
+    return {
+        "backends": backends,
+        "default": "transformers",
+        "recommended_for_streaming": "vllm" if backends.get("vllm") else "sglang" if backends.get("sglang") else "transformers"
+    }
+
+
+@router.post("/deep-clear-memory", response_model=MemoryStatus)
+async def deep_clear_memory():
+    """
+    Aggressive memory cleanup - use before training.
+    
+    This performs a thorough cleanup including:
+    - Clearing all model instances
+    - Multiple garbage collection passes
+    - CUDA cache clearing on all GPUs
+    - Memory stats reset
+    
+    Use this before starting a new training job to ensure
+    maximum GPU memory is available.
+    """
+    try:
+        result = await inference_service.deep_clear_memory()
+        return MemoryStatus(**result)
+    
+    except Exception as e:
+        sanitized = sanitized_log_service.sanitize_error(str(e))
+        return MemoryStatus(
+            success=False,
+            error=sanitized['user_message']
+        )
 
 
 @router.get("/checkpoints/{job_id}")

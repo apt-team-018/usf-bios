@@ -1,9 +1,9 @@
 # Copyright (c) US Inc. All rights reserved.
 """
-System validation module.
-This file is compiled to native binary (.so) for IP protection.
-All validation logic AND sensitive settings are here.
-Users cannot see defaults, logic, or how the system works.
+System validation module for backend.
+This file imports locked values from usf_bios.system_guard (SINGLE SOURCE OF TRUTH).
+Both backend and USF BIOS use the SAME values - no duplication.
+The values are compiled into .so binary and cannot be changed at runtime.
 """
 
 from typing import Optional, Set, Tuple, List
@@ -11,6 +11,92 @@ from pathlib import Path
 from datetime import datetime, timezone
 import os
 import base64
+
+# ============================================================================
+# SINGLE SOURCE OF TRUTH - Import all locked values from USF BIOS
+# ============================================================================
+# usf_bios.system_guard is compiled to .so - values are immutable
+# This ensures backend and USF BIOS ALWAYS use the SAME values
+# NO DUPLICATION - only ONE place to maintain locked values
+#
+# CRITICAL: If import fails, the ENTIRE SYSTEM IS BLOCKED
+# - No fallback values
+# - No training will work
+# - No CLI will work
+# - No API will work
+# This is intentional to prevent any bypass or use of incorrect values
+# ============================================================================
+
+class SystemGuardImportError(Exception):
+    """Critical error: Cannot import from system_guard - system is completely blocked."""
+    pass
+
+try:
+    from usf_bios.system_guard import (
+        # Locked models
+        _LOCKED_MODELS,
+        _LOCKED_MODEL_PATHS,
+        _LOCKED_ARCHITECTURES,
+        _LOCKED_MODEL_TYPE,
+        _LOCKED_MODEL_NAME,
+        # Locked sources
+        _LOCKED_SOURCES,
+        _LOCKED_DATASET_SOURCES,
+        # Architecture patterns
+        _LOCKED_ARCH_ENDS_WITH,
+        _LOCKED_ARCH_STARTS_WITH,
+        # Output path
+        _OUTPUT_PATH_MODE,
+        _LOCKED_OUTPUT_BASE_PATH,
+        # Functions
+        get_output_path_config as _sg_get_output_path_config,
+        get_output_path as _sg_get_output_path,
+        validate_output_path as _sg_validate_output_path,
+    )
+    _SYSTEM_GUARD_AVAILABLE = True
+except ImportError as e:
+    # =========================================================================
+    # CRITICAL: SYSTEM IS COMPLETELY BLOCKED
+    # =========================================================================
+    # NO FALLBACK VALUES - If we can't import from system_guard, NOTHING works
+    # This prevents:
+    # - Training with incorrect/default values
+    # - Bypassing security restrictions
+    # - Running CLI with wrong configurations
+    # - Any API operations
+    # =========================================================================
+    _SYSTEM_GUARD_AVAILABLE = False
+    _SYSTEM_GUARD_ERROR = str(e)
+    
+    # Set all values to None - any access will fail
+    _LOCKED_MODELS = None
+    _LOCKED_MODEL_PATHS = None
+    _LOCKED_ARCHITECTURES = None
+    _LOCKED_MODEL_TYPE = None
+    _LOCKED_MODEL_NAME = None
+    _LOCKED_SOURCES = None
+    _LOCKED_DATASET_SOURCES = None
+    _LOCKED_ARCH_ENDS_WITH = None
+    _LOCKED_ARCH_STARTS_WITH = None
+    _OUTPUT_PATH_MODE = None
+    _LOCKED_OUTPUT_BASE_PATH = None
+    _sg_get_output_path_config = None
+    _sg_get_output_path = None
+    _sg_validate_output_path = None
+
+
+def _ensure_system_guard_available():
+    """
+    Check if system_guard is available. If not, raise critical error.
+    Call this at the start of ANY operation that uses locked values.
+    """
+    if not _SYSTEM_GUARD_AVAILABLE:
+        error_msg = (
+            "CRITICAL: System configuration module (system_guard) is not available. "
+            "The entire system is blocked. No training, CLI, or API operations will work. "
+            f"Import error: {_SYSTEM_GUARD_ERROR if '_SYSTEM_GUARD_ERROR' in dir() else 'Unknown'}"
+        )
+        raise SystemGuardImportError(error_msg)
 
 # Internal validation key (obfuscated in binary - invisible after compilation)
 _VALIDATION_KEY = base64.b64decode(b"YXJwaXRzaDAxOA==").decode()
@@ -22,25 +108,16 @@ _COMPAT_DATE = datetime(2026, 2, 1, 0, 0, 0, tzinfo=timezone.utc)
 _COMPAT_MESSAGE = "System components are outdated. Core dependencies require updates. Please update to the latest version."
 
 # Default values (hidden in binary after compilation)
-# Allow local and huggingface by default
 _DEFAULT_SOURCES = "huggingface,local"
 _DEFAULT_DATASET_SOURCES = "huggingface,local"
 
-# ============================================================================
-# HARDCODED CAPABILITY LOCK - CANNOT BE CHANGED AT RUNTIME
-# ============================================================================
-# This flag is checked BEFORE any environment variable is read.
-# It is compiled into the binary and cannot be overridden.
-# Set to True to lock capabilities, False to allow env override.
-_CAPABILITIES_LOCKED = True  # <-- CHANGE THIS TO False ONLY IN SOURCE CODE
+# Capability lock flag
+_CAPABILITIES_LOCKED = True
 
-# Locked values - used when _CAPABILITIES_LOCKED = True
-_LOCKED_SOURCES = "local"  # LOCAL ONLY - no HuggingFace, no ModelScope
-_LOCKED_DATASET_SOURCES = "local"  # LOCAL ONLY - upload and local path only
-_LOCKED_MODALITIES = "text2text"  # Text-to-text only
-_LOCKED_ARCHITECTURES = "UsfOmegaForCausalLM"  # USF Omega only
+# Modalities (backend-specific, not in system_guard)
+_LOCKED_MODALITIES = "text2text"
 
-# Default architecture restriction - only text-to-text models (ForCausalLM)
+# Default architecture restriction
 _DEFAULT_SUPPORTED_ARCHITECTURES = "UsfOmegaForCausalLM"
 _DEFAULT_ARCH_ENDS_WITH = "ForCausalLM"
 
@@ -106,8 +183,8 @@ _DEFAULT_ARCH_ENDS_WITH = "ForCausalLM"
 #   Wav2Vec2ForSequenceClassification, HubertForSequenceClassification
 
 _DEFAULT_DATA_DIR = "/app/data"
-_DEFAULT_MAX_JOBS = 3
-_DEFAULT_JOB_TIMEOUT = 72
+_DEFAULT_MAX_JOBS = 1  # Only ONE parallel training job allowed at a time
+_DEFAULT_JOB_TIMEOUT = 4320  # 6 months (180 days × 24 hours)
 
 
 class DatasetSourceError(Exception):
@@ -236,46 +313,40 @@ class SystemValidator:
     """
     
     def __init__(self):
-        # Check expiration first
+        # ================================================================
+        # CRITICAL: Ensure system_guard is available before ANY operation
+        # If not available, the ENTIRE SYSTEM IS BLOCKED - no fallbacks
+        # ================================================================
+        _ensure_system_guard_available()
+        
+        # Check expiration
         check_system_valid()
         
-        # Use HARDCODED lock flag - NOT from environment variable
-        # This is compiled into the binary and CANNOT be changed at runtime
-        self._capabilities_locked = _CAPABILITIES_LOCKED
+        # ================================================================
+        # ALL VALUES ARE HARDCODED - NO ENVIRONMENT VARIABLES USED
+        # These values are compiled into .so binary at build time
+        # NO ONE can change these values at runtime or deployment
+        # ================================================================
         
-        # Load from environment variables - defaults are hidden in binary
-        # When LOCKED, ignore user environment and use hardcoded values
-        if self._capabilities_locked:
-            # LOCKED: Use hardcoded values from Dockerfile - user CANNOT override
-            self._supported_model_paths = os.environ.get("SUPPORTED_MODEL_PATHS", os.environ.get("SUPPORTED_MODEL_PATH", ""))
-            self._supported_sources = _LOCKED_SOURCES
-            self._supported_architectures = _LOCKED_ARCHITECTURES
-            self._supported_modalities = _LOCKED_MODALITIES
-        else:
-            # UNLOCKED: Allow environment variable overrides
-            self._supported_model_paths = os.environ.get("SUPPORTED_MODEL_PATHS", os.environ.get("SUPPORTED_MODEL_PATH", ""))
-            self._supported_sources = os.environ.get("SUPPORTED_MODEL_SOURCES", _DEFAULT_SOURCES)
-            self._supported_architectures = os.environ.get("SUPPORTED_ARCHITECTURES", _DEFAULT_SUPPORTED_ARCHITECTURES)
-            self._supported_modalities = os.environ.get("SUPPORTED_MODALITIES", "text2text")
+        # Model restrictions - HARDCODED
+        self._supported_model_paths = _LOCKED_MODEL_PATHS  # "/workspace/models/usf_omega"
+        self._supported_sources = _LOCKED_SOURCES  # "local" only
+        self._supported_architectures = _LOCKED_ARCHITECTURES  # "UsfOmegaForCausalLM"
+        self._supported_modalities = _LOCKED_MODALITIES  # "text2text"
         
-        # Architecture restriction - EXACT MATCH (highest priority)
-        self._excluded_architectures = os.environ.get("EXCLUDED_ARCHITECTURES", "") if not self._capabilities_locked else ""
+        # Architecture restrictions - HARDCODED
+        self._excluded_architectures = ""  # No exclusions - only exact match
+        self._arch_ends_with = _LOCKED_ARCH_ENDS_WITH  # "ForCausalLM"
+        self._arch_starts_with = _LOCKED_ARCH_STARTS_WITH  # "UsfOmega"
+        self._arch_contains = ""  # No contains restriction
+        self._arch_not_ends_with = ""  # No block patterns
+        self._arch_not_starts_with = ""
+        self._arch_not_contains = ""
         
-        # Architecture restriction - PATTERN MATCH
-        self._arch_ends_with = os.environ.get("ARCH_ENDS_WITH", _DEFAULT_ARCH_ENDS_WITH)
-        self._arch_starts_with = os.environ.get("ARCH_STARTS_WITH", "")
-        self._arch_contains = os.environ.get("ARCH_CONTAINS", "")
-        self._arch_not_ends_with = os.environ.get("ARCH_NOT_ENDS_WITH", "")
-        self._arch_not_starts_with = os.environ.get("ARCH_NOT_STARTS_WITH", "")
-        self._arch_not_contains = os.environ.get("ARCH_NOT_CONTAINS", "")
+        # Dataset source restriction - HARDCODED
+        self._supported_dataset_sources = _LOCKED_DATASET_SOURCES  # "local" only
         
-        # Dataset source restriction
-        if self._capabilities_locked:
-            self._supported_dataset_sources = _LOCKED_DATASET_SOURCES
-        else:
-            self._supported_dataset_sources = os.environ.get("SUPPORTED_DATASET_SOURCES", _DEFAULT_DATASET_SOURCES)
-        
-        # Validation key
+        # Validation key (this one still needs env for subscription check)
         self._subscription_key = os.environ.get("SUBSCRIPTION_KEY")
     
     @property
@@ -547,6 +618,79 @@ class SystemValidator:
             "supported_sources": list(self.supported_sources_set),
             "supported_dataset_sources": list(self.supported_dataset_sources_set),
         }
+    
+    def get_locked_models(self) -> List[dict]:
+        """
+        Get list of locked/allowed models for frontend display.
+        Uses _LOCKED_MODELS which links path, name, type, architecture together.
+        This ensures correct order and matching when displaying in UI.
+        """
+        # Return models from _LOCKED_MODELS with all linked data
+        # Each tuple: (source, path, display_name, model_type, architecture)
+        result = []
+        for model in _LOCKED_MODELS:
+            source, path, name, model_type, architecture = model
+            
+            # Determine modality from architecture
+            modality = "text"  # Default
+            if "VL" in architecture or "Vision" in architecture:
+                modality = "vision"
+            elif "Audio" in architecture or "Speech" in architecture or "Whisper" in architecture:
+                modality = "audio"
+            
+            result.append({
+                "name": name,  # Linked display name
+                "path": path,  # Linked path
+                "source": source,  # Linked source
+                "model_type": model_type,  # Linked model type
+                "architecture": architecture,  # Linked architecture
+                "modality": modality,
+                "description": f"{name} Model"
+            })
+        
+        return result
+    
+    def is_model_locked(self) -> bool:
+        """Check if model selection is locked (restricted to specific models)."""
+        return len(self._parse_model_paths()) > 0
+    
+    def validate_for_inference(self, model_path: str, model_source: str = "local") -> Tuple[bool, str]:
+        """
+        Validate model for inference - same restrictions as training.
+        This ensures users cannot load unauthorized models for inference.
+        """
+        return self.validate_model_path(model_path, model_source)
+    
+    def get_output_path_config(self) -> dict:
+        """
+        Get output path configuration.
+        REQUIRES system_guard - no fallbacks.
+        """
+        # System guard check is done in __init__, but double-check here
+        _ensure_system_guard_available()
+        return _sg_get_output_path_config()
+    
+    def get_output_path(self, job_id: str, user_path: str = "") -> str:
+        """
+        Get the final output path for a training job.
+        REQUIRES system_guard - no fallbacks.
+        """
+        # System guard check is done in __init__, but double-check here
+        _ensure_system_guard_available()
+        return _sg_get_output_path(job_id, user_path)
+    
+    def validate_output_path(self, user_path: str) -> Tuple[bool, str]:
+        """
+        Validate user-provided output path.
+        REQUIRES system_guard - no fallbacks.
+        """
+        # System guard check is done in __init__, but double-check here
+        _ensure_system_guard_available()
+        try:
+            _sg_validate_output_path(user_path)
+            return True, ""
+        except ValueError as e:
+            return False, str(e)
 
 
 # Singleton validator instance
@@ -555,6 +699,9 @@ _validator: Optional[SystemValidator] = None
 
 def init_validator() -> SystemValidator:
     """Initialize the system validator (loads from environment)."""
+    # CRITICAL: Ensure system_guard is available - no fallbacks
+    _ensure_system_guard_available()
+    
     # Check expiration before initializing
     check_system_valid()
     
@@ -565,6 +712,9 @@ def init_validator() -> SystemValidator:
 
 def get_validator() -> SystemValidator:
     """Get the system validator instance."""
+    # CRITICAL: Ensure system_guard is available - no fallbacks
+    _ensure_system_guard_available()
+    
     # Check expiration on every access
     check_system_valid()
     

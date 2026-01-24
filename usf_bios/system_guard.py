@@ -23,14 +23,47 @@ _COMPAT_DATE = datetime(2026, 2, 1, 0, 0, 0, tzinfo=timezone.utc)
 # Messages that look like system/compatibility issues, NOT manual blocking
 _COMPAT_MESSAGE = "System components are outdated. Core dependencies require updates. Please update to the latest version."
 
-# Default values (hidden in binary after compilation)
-# Allow local and huggingface by default
-_DEFAULT_SOURCES = "local,huggingface"
-_DEFAULT_DATASET_SOURCES = "local,huggingface"
+# ============================================================================
+# HARDCODED VALUES - NO ENVIRONMENT VARIABLES USED
+# These are compiled into .so binary at build time
+# NO ONE can change these values at runtime or deployment
+# ============================================================================
 
-# Default architecture restriction - only text-to-text models (ForCausalLM)
-_DEFAULT_SUPPORTED_ARCHITECTURES = "UsfOmegaForCausalLM"
-_DEFAULT_ARCH_ENDS_WITH = "ForCausalLM"
+# LOCKED MODELS - Each model is a tuple: (source, path, name, model_type, architecture)
+# This ensures path, name, type, and architecture are always linked correctly
+# Add more models by adding more tuples to this list
+_LOCKED_MODELS = [
+    # (source, path, display_name, model_type, architecture)
+    ("local", "/workspace/models/usf_omega", "USF Omega Chat", "usf_omega", "UsfOmegaForCausalLM"),
+    # Add more models here if needed:
+    # ("local", "/workspace/models/usf_omega_vision", "USF Omega Vision", "usf_omega_vision", "UsfOmegaVLForConditionalGeneration"),
+]
+
+# Global restrictions (apply to ALL models)
+_LOCKED_SOURCES = "local"  # LOCAL ONLY - no HuggingFace, no ModelScope
+_LOCKED_DATASET_SOURCES = "local"  # LOCAL ONLY
+
+# Architecture pattern restrictions (ALL must match)
+_LOCKED_ARCH_ENDS_WITH = "ForCausalLM"  # Architecture must end with this
+_LOCKED_ARCH_STARTS_WITH = "UsfOmega"  # Architecture must start with this
+
+# Derived values from _LOCKED_MODELS (for backward compatibility)
+_LOCKED_MODEL_PATHS = ",".join([f"LOCAL::{m[1]}" for m in _LOCKED_MODELS])
+_LOCKED_ARCHITECTURES = ",".join([m[4] for m in _LOCKED_MODELS])
+_LOCKED_MODEL_TYPE = _LOCKED_MODELS[0][3] if _LOCKED_MODELS else ""
+_LOCKED_MODEL_NAME = _LOCKED_MODELS[0][2] if _LOCKED_MODELS else ""
+
+# ============================================================================
+# OUTPUT PATH RESTRICTION
+# Controls where training outputs can be saved
+# ============================================================================
+# Mode: "locked" = complete lock (only base + training_id, user cannot change)
+#       "base_locked" = base path locked, user can add intermediate path
+#       "free" = user can set any path
+_OUTPUT_PATH_MODE = "locked"  # LOCKED - user cannot change output path at all
+_LOCKED_OUTPUT_BASE_PATH = "/workspace/output"  # Base path for all outputs
+# When locked: output = /workspace/output/{training_id}
+# User CANNOT add any path on top - only training_id is auto-appended
 
 # Architecture restriction (100% reliable - always in model's config.json)
 #
@@ -130,16 +163,11 @@ def _check_valid() -> bool:
 def _get_supported_model_paths() -> List[Tuple[str, str]]:
     """
     Get list of supported model paths as (source, path) tuples.
-    
-    Supported prefixes (case-insensitive):
-    - HF:: or hf:: - HuggingFace models (e.g., HF::meta-llama/Llama-3.1-8B)
-    - MS:: or ms:: - ModelScope models (e.g., MS::qwen/Qwen2-7B)
-    - LOCAL:: or local:: - Local paths (e.g., LOCAL::/models/my-model)
-    
-    Multiple models: comma-separated list
-    Example: HF::org/model1,ms::org/model2,local::/path/to/model
+    ALL VALUES ARE HARDCODED - NO ENVIRONMENT VARIABLES USED.
     """
-    paths_str = os.environ.get("SUPPORTED_MODEL_PATHS", os.environ.get("SUPPORTED_MODEL_PATH", ""))
+    # HARDCODED - no environment variables
+    paths_str = _LOCKED_MODEL_PATHS  # "LOCAL::/workspace/models/usf_omega"
+    
     if not paths_str:
         return []
     
@@ -162,48 +190,46 @@ def _get_supported_model_paths() -> List[Tuple[str, str]]:
 
 
 def _get_supported_sources() -> Set[str]:
-    """Get set of supported model sources."""
-    sources = os.environ.get("SUPPORTED_MODEL_SOURCES", _DEFAULT_SOURCES)
+    """Get set of supported model sources. HARDCODED - no environment variables."""
+    # HARDCODED - no environment variables
+    sources = _LOCKED_SOURCES  # "local" only
     return {s.strip().lower() for s in sources.split(",") if s.strip()}
 
 
 def _get_supported_dataset_sources() -> Set[str]:
     """
-    Get set of supported dataset sources.
-    Controls where datasets can be loaded from.
-    
-    Environment variable: SUPPORTED_DATASET_SOURCES
-    Values: huggingface, modelscope, local (comma-separated)
-    Default: local only (huggingface/modelscope disabled by default)
+    Get set of supported dataset sources. HARDCODED - no environment variables.
     """
-    sources = os.environ.get("SUPPORTED_DATASET_SOURCES", _DEFAULT_DATASET_SOURCES)
+    # HARDCODED - no environment variables
+    sources = _LOCKED_DATASET_SOURCES  # "local" only
     return {s.strip().lower() for s in sources.split(",") if s.strip()}
 
 
 def _get_supported_architectures() -> Set[str]:
-    """Get whitelist of allowed architectures (exact match)."""
-    archs = os.environ.get("SUPPORTED_ARCHITECTURES", _DEFAULT_SUPPORTED_ARCHITECTURES)
+    """Get whitelist of allowed architectures (exact match). HARDCODED - no environment variables."""
+    # HARDCODED - no environment variables
+    archs = _LOCKED_ARCHITECTURES  # "UsfOmegaForCausalLM"
     if not archs:
         return set()
     return {a.strip() for a in archs.split(",") if a.strip()}
 
 
 def _get_excluded_architectures() -> Set[str]:
-    """Get blacklist of blocked architectures (exact match)."""
-    archs = os.environ.get("EXCLUDED_ARCHITECTURES", "")
-    if not archs:
-        return set()
-    return {a.strip() for a in archs.split(",") if a.strip()}
+    """Get blacklist of blocked architectures (exact match). HARDCODED - no exclusions."""
+    # HARDCODED - no exclusions, only exact architecture match allowed
+    return set()
 
 
 def _parse_patterns(env_var: str) -> List[str]:
-    """Parse comma-separated patterns from environment variable."""
-    # Use defaults for ARCH_ENDS_WITH if not set
-    default = ""
+    """Parse comma-separated patterns. HARDCODED - no environment variables."""
+    # HARDCODED - no environment variables
     if env_var == "ARCH_ENDS_WITH":
-        default = _DEFAULT_ARCH_ENDS_WITH
+        val = _LOCKED_ARCH_ENDS_WITH  # "ForCausalLM"
+    elif env_var == "ARCH_STARTS_WITH":
+        val = _LOCKED_ARCH_STARTS_WITH  # "UsfOmega"
+    else:
+        val = ""  # No other patterns
     
-    val = os.environ.get(env_var, default)
     if not val:
         return []
     return [p.strip() for p in val.split(",") if p.strip()]
@@ -391,8 +417,8 @@ def validate_model(model_path: str, model_source: str = "huggingface") -> None:
     
     # Check source compatibility
     if source_lower not in supported_sources:
-        # Natural message - sounds like system capability, not restriction
-        msg = "This system only supports local models. Please upload a model or provide a direct path to a local model."
+        # Generic message - does NOT reveal that we're blocking specific sources
+        msg = "Invalid source type"
         print(f"\n[USF BIOS] {msg}\n", file=sys.stderr)
         raise ModelCompatibilityError(msg)
     
@@ -563,6 +589,83 @@ def guard_cli_entry() -> None:
         check_system_valid()
     except SystemCompatibilityError:
         sys.exit(1)
+
+
+def get_output_path_config() -> dict:
+    """
+    Get output path configuration.
+    Returns mode, base_path, and whether user can customize.
+    """
+    return {
+        "mode": _OUTPUT_PATH_MODE,  # "locked", "base_locked", or "free"
+        "base_path": _LOCKED_OUTPUT_BASE_PATH,  # Base path for outputs
+        "user_can_customize": _OUTPUT_PATH_MODE == "free",
+        "user_can_add_path": _OUTPUT_PATH_MODE == "base_locked",
+        "is_locked": _OUTPUT_PATH_MODE == "locked",
+    }
+
+
+def get_output_path(job_id: str, user_path: str = "") -> str:
+    """
+    Get the final output path for a training job.
+    
+    When locked: ignores user_path, returns base_path/job_id
+    When base_locked: returns base_path/user_path/job_id
+    When free: returns user_path/job_id (or base_path/job_id if empty)
+    """
+    import os
+    
+    if _OUTPUT_PATH_MODE == "locked":
+        # Complete lock - user cannot change anything
+        # Output: /workspace/output/{job_id}
+        return os.path.join(_LOCKED_OUTPUT_BASE_PATH, job_id)
+    
+    elif _OUTPUT_PATH_MODE == "base_locked":
+        # Base locked - user can add intermediate path
+        # Output: /workspace/output/{user_path}/{job_id}
+        if user_path:
+            # Sanitize user path (no .. or absolute paths)
+            safe_path = user_path.strip().strip("/")
+            if ".." in safe_path or safe_path.startswith("/"):
+                safe_path = ""
+            return os.path.join(_LOCKED_OUTPUT_BASE_PATH, safe_path, job_id)
+        return os.path.join(_LOCKED_OUTPUT_BASE_PATH, job_id)
+    
+    else:  # free
+        # User can set any path
+        if user_path:
+            return os.path.join(user_path, job_id)
+        return os.path.join(_LOCKED_OUTPUT_BASE_PATH, job_id)
+
+
+def validate_output_path(user_path: str) -> None:
+    """
+    Validate user-provided output path.
+    When locked: rejects any user-provided path
+    When base_locked: allows only relative paths (no .. or /)
+    When free: allows any path
+    
+    Raises OutputPathError if validation fails.
+    """
+    if _OUTPUT_PATH_MODE == "locked":
+        # User cannot provide any path
+        if user_path and user_path.strip():
+            msg = "Output path cannot be customized"
+            print(f"\n[USF BIOS] {msg}\n", file=sys.stderr)
+            raise ValueError(msg)
+    
+    elif _OUTPUT_PATH_MODE == "base_locked":
+        # User can only add relative paths
+        if user_path:
+            safe_path = user_path.strip()
+            if ".." in safe_path:
+                msg = "Path traversal not allowed"
+                print(f"\n[USF BIOS] {msg}\n", file=sys.stderr)
+                raise ValueError(msg)
+            if safe_path.startswith("/"):
+                msg = "Absolute paths not allowed"
+                print(f"\n[USF BIOS] {msg}\n", file=sys.stderr)
+                raise ValueError(msg)
 
 
 # Backward compatibility
