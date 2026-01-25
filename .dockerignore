@@ -47,6 +47,12 @@ yarn-error.log
 .npm
 .yarn
 
+# Next.js build cache (CRITICAL - must rebuild in Docker)
+.next/
+**/.next/
+out/
+**/out/
+
 # IDE
 .idea/
 .vscode/
@@ -77,6 +83,17 @@ LICENSE
 # Logs
 logs/
 *.log
+run_logs/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Backend runtime directories (created at runtime, not build time)
+web/backend/outputs/
+web/backend/uploads/
+web/backend/models/
 
 # Temporary files
 tmp/

@@ -3773,7 +3773,7 @@ export default function Home() {
       </main>
 
       <footer className="mt-6 py-4 text-center text-xs text-slate-500 border-t border-slate-200">
-        USF BIOS v1.0.0 - Copyright 2024-2026 US Inc. All rights reserved.
+        USF BIOS v2.0.12 - Copyright 2024-2026 US Inc. All rights reserved.
       </footer>
       
       {/* Custom Alert Modal - replaces browser alert() */}
