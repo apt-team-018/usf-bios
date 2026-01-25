@@ -720,6 +720,12 @@ RUN echo "" && \
 # ============================================================================
 # REPLACE usf_bios with compiled .so binaries (code protection)
 # ============================================================================
+# CRITICAL: Remove original source directories FIRST to ensure clean replacement
+# Docker COPY does NOT delete existing files - it only overwrites/adds
+# Without this step, original .py files would remain alongside compiled .so files
+RUN rm -rf /app/usf_bios /app/web/backend && \
+    echo "✓ Removed original source directories for clean compiled replacement"
+
 COPY --from=python-compiler /compile/usf_bios/ /app/usf_bios/
 COPY --from=python-compiler /compile/web/backend/ /app/web/backend/
 

@@ -39,7 +39,7 @@ git pull origin main
 Required for installing the custom USF Transformers fork:
 
 ```bash
-export GITHUB_TOKEN=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
+export GITHUB_TOKEN=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
 ```
 
 ### Step 3: Build Docker Image
