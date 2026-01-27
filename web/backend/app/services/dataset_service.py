@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.models.db_models import Dataset, DatasetStatus, DatasetSource, TrainingJob
 from app.core.config import settings
+from app.services.system_encrypted_log_service import system_encrypted_log
 
 
 class DatasetService:
@@ -81,10 +82,33 @@ class DatasetService:
             dataset.num_columns = stats.get("num_columns")
             dataset.column_info = stats.get("column_info")
             dataset.status = DatasetStatus.READY.value
+            
+            # Log successful dataset upload (encrypted only)
+            system_encrypted_log.log_dataset_upload(
+                filename=file_name,
+                file_size=file_size,
+                success=True,
+                dataset_id=dataset.id
+            )
+            system_encrypted_log.log_dataset_validation(
+                dataset_path=file_path,
+                success=True,
+                row_count=stats.get("num_samples", 0),
+                format_type=file_ext
+            )
         except Exception as e:
             dataset.status = DatasetStatus.ERROR.value
             # Don't expose internal error details
             dataset.error_message = "Failed to process dataset. Please check the file format."
+            
+            # Log failed dataset processing (encrypted only)
+            system_encrypted_log.log_dataset_upload(
+                filename=file_name,
+                file_size=file_size,
+                success=False,
+                dataset_id=dataset.id,
+                error=str(e)
+            )
         
         self.db.commit()
         return dataset
@@ -160,6 +184,13 @@ class DatasetService:
             result["message"] = "Dataset marked as deleted (soft delete)"
         
         self.db.commit()
+        
+        # Log dataset deletion (encrypted only)
+        system_encrypted_log.log_dataset_delete(
+            dataset_path=dataset.file_path or dataset_id,
+            success=True
+        )
+        
         return result
     
     def get_dataset_preview(self, dataset_id: str, num_rows: int = 10) -> Dict[str, Any]:

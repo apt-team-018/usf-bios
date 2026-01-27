@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { HelpCircle, Plus, Minus, ChevronDown, AlertCircle, Edit3, Sparkles, Loader2, Check, Info } from 'lucide-react'
+import { HelpCircle, Plus, Minus, ChevronDown, AlertCircle, Edit3, Sparkles, Loader2, Check, Info, Lock } from 'lucide-react'
 
 // Type definitions
 interface SelectConfig<T> {
@@ -249,6 +249,10 @@ interface TrainingConfig {
   ms_token: string | null
   // Model source for conditional token display
   model_source?: 'huggingface' | 'modelscope' | 'local'
+  // Dataset streaming for large datasets (billions of samples)
+  streaming: boolean
+  max_steps: number | null
+  shuffle_buffer_size: number
 }
 
 // Training method configuration
@@ -391,12 +395,37 @@ interface FeatureFlags {
   rm: boolean
 }
 
+// Dataset type info from detection
+interface DatasetTypeInfo {
+  dataset_type: string  // sft, rlhf, pt, kto, unknown
+  confidence: number
+  detected_fields: string[]
+  sample_count: number
+  compatible_training_methods: string[]  // ['sft'], ['rlhf'], ['pt'], or all
+  incompatible_training_methods: string[]
+  message: string
+}
+
+// Model type info from detection
+interface ModelTypeInfo {
+  model_type: string  // full, lora, qlora, unknown
+  is_adapter: boolean
+  base_model_path: string | null
+  can_do_lora: boolean
+  can_do_qlora: boolean
+  can_do_full: boolean
+  can_do_rlhf: boolean
+  warnings: string[]
+}
+
 interface Props {
   config: TrainingConfig
   setConfig: (fn: (prev: TrainingConfig) => TrainingConfig) => void
   availableGpus?: GPUInfo[]
   modelContextLength?: number  // Dynamic context length from selected model
   featureFlags?: FeatureFlags  // Feature flags from system_guard (compiled, cannot bypass)
+  datasetTypeInfo?: DatasetTypeInfo | null  // Dataset type detection result
+  modelTypeInfo?: ModelTypeInfo | null  // Model type detection result
 }
 
 // Generate dynamic max_length options based on model context length
@@ -697,12 +726,81 @@ const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
   grpo: true, ppo: true, gkd: true, dpo: true, orpo: true, simpo: true, kto: true, cpo: true, rm: true
 }
 
-export default function TrainingSettingsStep({ config, setConfig, availableGpus = [], modelContextLength = 4096, featureFlags = DEFAULT_FEATURE_FLAGS }: Props) {
+export default function TrainingSettingsStep({ config, setConfig, availableGpus = [], modelContextLength = 4096, featureFlags = DEFAULT_FEATURE_FLAGS, datasetTypeInfo, modelTypeInfo }: Props) {
   const typeConfig = PARAM_CONFIG[config.train_type] || {}
   const commonConfig = PARAM_CONFIG.common
   
   // Merge provided feature flags with defaults
   const flags = { ...DEFAULT_FEATURE_FLAGS, ...featureFlags }
+  
+  // Compute which training methods are disabled based on dataset type
+  const getMethodDisabledState = (method: 'sft' | 'pt' | 'rlhf'): { disabled: boolean; reason: string } => {
+    // Check feature flags first (system-level restriction)
+    if (method === 'sft' && !flags.sft) {
+      return { disabled: true, reason: 'SFT is not enabled on this system.' }
+    }
+    if (method === 'pt' && !flags.pretraining) {
+      return { disabled: true, reason: 'Pre-training is not enabled on this system.' }
+    }
+    if (method === 'rlhf' && !flags.rlhf) {
+      return { disabled: true, reason: 'RLHF is not enabled on this system.' }
+    }
+    
+    // Check dataset type compatibility
+    if (datasetTypeInfo && datasetTypeInfo.dataset_type !== 'unknown') {
+      const incompatible = datasetTypeInfo.incompatible_training_methods || []
+      if (incompatible.includes(method)) {
+        const datasetTypeName = {
+          'sft': 'SFT (instruction-response)',
+          'rlhf': 'RLHF (preference data)',
+          'pt': 'Pre-training (raw text)',
+          'kto': 'KTO (binary feedback)'
+        }[datasetTypeInfo.dataset_type] || datasetTypeInfo.dataset_type
+        
+        const methodName = {
+          'sft': 'SFT',
+          'pt': 'Pre-Training',
+          'rlhf': 'RLHF'
+        }[method]
+        
+        return {
+          disabled: true,
+          reason: `Your dataset is ${datasetTypeName} format. ${methodName} requires a different dataset format. Please configure a ${methodName}-compatible dataset.`
+        }
+      }
+    }
+    
+    return { disabled: false, reason: '' }
+  }
+  
+  // Compute which train types are disabled based on model type
+  const getTrainTypeDisabledState = (trainType: 'lora' | 'qlora' | 'adalora' | 'full'): { disabled: boolean; reason: string } => {
+    // Check feature flags first
+    if (trainType === 'lora' && !flags.lora) {
+      return { disabled: true, reason: 'LoRA is not enabled on this system.' }
+    }
+    if (trainType === 'qlora' && !flags.qlora) {
+      return { disabled: true, reason: 'QLoRA is not enabled on this system.' }
+    }
+    if (trainType === 'adalora' && !flags.adalora) {
+      return { disabled: true, reason: 'AdaLoRA is not enabled on this system.' }
+    }
+    if (trainType === 'full' && !flags.full) {
+      return { disabled: true, reason: 'Full fine-tuning is not enabled on this system.' }
+    }
+    
+    // Check model type compatibility
+    if (modelTypeInfo && modelTypeInfo.is_adapter) {
+      if (trainType === 'full') {
+        return {
+          disabled: true,
+          reason: `The selected model is a LoRA adapter. Full fine-tuning requires a base model, not an adapter. Please select a full base model or use LoRA/QLoRA.`
+        }
+      }
+    }
+    
+    return { disabled: false, reason: '' }
+  }
   
   // State for custom target modules input
   const [isCustomModules, setIsCustomModules] = useState(false)
@@ -1042,30 +1140,73 @@ export default function TrainingSettingsStep({ config, setConfig, availableGpus 
         <div className="flex items-center gap-1 mb-3">
           <label className="text-sm font-medium text-slate-700">Training Method</label>
           <Tooltip text="SFT: Standard supervised fine-tuning. PT: Continue pre-training. RLHF: Reinforcement learning for alignment." />
+          {datasetTypeInfo && datasetTypeInfo.dataset_type !== 'unknown' && (
+            <span className="ml-2 text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">
+              Dataset: {datasetTypeInfo.dataset_type.toUpperCase()}
+            </span>
+          )}
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          {Object.entries(TRAINING_METHOD_CONFIG)
-            .filter(([id]) => {
-              // Filter based on feature flags
-              if (id === 'sft') return flags.sft
-              if (id === 'pt') return flags.pretraining
-              if (id === 'rlhf') return flags.rlhf
-              return true
-            })
-            .map(([id, cfg]) => (
-            <button key={id} 
-              onClick={() => setConfig(p => ({ 
-                ...p, 
-                training_method: id as any, 
-                rlhf_type: id === 'rlhf' ? (flags.dpo ? 'dpo' : (flags.orpo ? 'orpo' : null)) : null,
-                // PT (Pre-Training) requires Full parameter training - auto-set train_type
-                train_type: id === 'pt' ? 'full' : p.train_type
-              }))}
-              className={`p-4 rounded-lg border-2 text-left transition-all ${config.training_method === id ? 'border-blue-500 bg-white shadow-sm' : 'border-slate-200 bg-white/50 hover:border-slate-300'}`}>
-              <span className="font-semibold text-sm block text-slate-900">{cfg.label}</span>
-              <span className="text-xs text-slate-500 mt-1 block">{cfg.desc}</span>
-            </button>
-          ))}
+          {Object.entries(TRAINING_METHOD_CONFIG).map(([id, cfg]) => {
+            const methodState = getMethodDisabledState(id as 'sft' | 'pt' | 'rlhf')
+            const isDisabled = methodState.disabled
+            const isSelected = config.training_method === id
+            
+            return (
+              <div key={id} className="relative">
+                <button
+                  onClick={() => {
+                    if (isDisabled) return
+                    setConfig(p => ({ 
+                      ...p, 
+                      training_method: id as any, 
+                      rlhf_type: id === 'rlhf' ? (flags.dpo ? 'dpo' : (flags.orpo ? 'orpo' : null)) : null,
+                      // PT (Pre-Training) requires Full parameter training - auto-set train_type
+                      train_type: id === 'pt' ? 'full' : p.train_type
+                    }))
+                  }}
+                  disabled={isDisabled}
+                  className={`w-full p-4 rounded-lg border-2 text-left transition-all ${
+                    isDisabled 
+                      ? 'border-slate-200 bg-slate-100 cursor-not-allowed opacity-60' 
+                      : isSelected 
+                        ? 'border-blue-500 bg-white shadow-sm' 
+                        : 'border-slate-200 bg-white/50 hover:border-slate-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className={`font-semibold text-sm block ${isDisabled ? 'text-slate-500' : 'text-slate-900'}`}>
+                      {cfg.label}
+                    </span>
+                    {isDisabled && (
+                      <div className="flex items-center gap-1">
+                        <Lock className="w-4 h-4 text-slate-400" />
+                      </div>
+                    )}
+                  </div>
+                  <span className={`text-xs mt-1 block ${isDisabled ? 'text-slate-400' : 'text-slate-500'}`}>
+                    {cfg.desc}
+                  </span>
+                </button>
+                {/* Tooltip for disabled reason */}
+                {isDisabled && (
+                  <div className="absolute top-2 right-2 group">
+                    <div className="p-1 rounded-full bg-amber-100 text-amber-600 cursor-help">
+                      <Info className="w-3 h-3" />
+                    </div>
+                    <div className="absolute right-0 top-full mt-1 w-64 p-3 bg-slate-900 text-white text-xs rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+                      <div className="font-medium mb-1 flex items-center gap-1">
+                        <AlertCircle className="w-3 h-3" />
+                        Not Available
+                      </div>
+                      {methodState.reason}
+                      <div className="absolute -top-1 right-3 w-2 h-2 bg-slate-900 rotate-45" />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </div>
       </div>
 
@@ -1701,6 +1842,49 @@ export default function TrainingSettingsStep({ config, setConfig, availableGpus 
             {/* Show message if no advanced optimizations available */}
             {!capabilities.liger_kernel_available && !capabilities.attention_implementations.some(a => a.value === 'flash_attention_2' || a.value === 'flash_attention_3') && (
               <p className="text-sm text-slate-500 italic">No advanced optimizations available. Install Flash Attention or Liger Kernel for additional options.</p>
+            )}
+          </div>
+        </div>
+
+        {/* Dataset Streaming - For large datasets */}
+        <div className="mt-4 pt-4 border-t border-emerald-200">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="font-medium text-sm text-slate-700">Dataset Streaming</span>
+            <Tooltip text="Enable streaming for large datasets that don't fit in memory (billions of samples). Requires setting max_steps." />
+          </div>
+          <div className="space-y-3">
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input type="checkbox" 
+                checked={config.streaming}
+                onChange={(e) => setConfig(p => ({ ...p, streaming: e.target.checked }))}
+                className="w-5 h-5 text-emerald-600 rounded focus:ring-emerald-500" />
+              <div>
+                <span className="font-medium text-sm text-slate-700">Enable Streaming Mode</span>
+                <p className="text-xs text-slate-500">Read dataset on-the-fly without loading into memory. For JSONL, CSV, TXT files with billions of samples.</p>
+              </div>
+            </label>
+            
+            {config.streaming && (
+              <div className="ml-8 space-y-3 p-3 bg-amber-50 rounded-lg border border-amber-200">
+                <p className="text-xs text-amber-700 font-medium">⚠️ Streaming mode requires max_steps (dataset length is unknown)</p>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Max Steps *</label>
+                  <input type="number" 
+                    value={config.max_steps || ''} 
+                    onChange={(e) => setConfig(p => ({ ...p, max_steps: e.target.value ? parseInt(e.target.value) : null }))}
+                    placeholder="e.g., 100000"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm" />
+                  <p className="text-xs text-slate-500 mt-1">Total training steps. Required for streaming datasets.</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Shuffle Buffer Size</label>
+                  <input type="number" 
+                    value={config.shuffle_buffer_size} 
+                    onChange={(e) => setConfig(p => ({ ...p, shuffle_buffer_size: parseInt(e.target.value) || 1000 }))}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm" />
+                  <p className="text-xs text-slate-500 mt-1">Buffer size for shuffling. Larger = better randomization but more memory (default: 1000).</p>
+                </div>
+              </div>
             )}
           </div>
         </div>

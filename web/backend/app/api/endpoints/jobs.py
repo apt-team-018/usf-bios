@@ -33,9 +33,22 @@ class JobNameUpdate(BaseModel):
 
 @router.post("/create", response_model=JobInfo)
 async def create_job(config: TrainingConfig):
-    """Create a new training job"""
+    """Create a new training job
+    
+    BLOCKED if another training is already in progress.
+    """
     _debug_log(f"create_job called with config: {config}")
     try:
+        # CRITICAL: Check if training is already active - block new job creation
+        from ...services.training_status_service import training_status_service
+        can_create, reason = await training_status_service.can_create_job()
+        if not can_create:
+            _debug_log(f"Job creation blocked: {reason}", level="WARNING")
+            raise HTTPException(
+                status_code=409,  # Conflict
+                detail=reason
+            )
+        
         # Check system expiration first
         expired, exp_msg = is_system_expired()
         if expired:
@@ -88,6 +101,24 @@ async def create_job(config: TrainingConfig):
 async def start_job(job_id: str):
     """Start a training job"""
     _debug_log(f"start_job called for job_id: {job_id}", job_id)
+    
+    # CRITICAL: Check if ANY training is already running (prevents parallel training)
+    jobs = await job_manager.get_all_jobs()
+    for existing_job in jobs:
+        if existing_job.job_id != job_id and existing_job.status in [JobStatus.RUNNING, JobStatus.INITIALIZING]:
+            _debug_log(f"Cannot start {job_id}: another training ({existing_job.job_id}) is already running", job_id, "WARNING")
+            raise HTTPException(
+                status_code=409,  # Conflict
+                detail=f"Another training is already in progress ('{existing_job.name}'). Please wait for it to complete or stop it first."
+            )
+    
+    # Also check at OS level (fallback in case in-memory state is lost)
+    if job_manager.is_training_process_running():
+        _debug_log(f"Cannot start {job_id}: training process detected at OS level", job_id, "WARNING")
+        raise HTTPException(
+            status_code=409,
+            detail="A training process is already running on the system. Please wait for it to complete or stop it first."
+        )
     
     job = await job_manager.get_job(job_id)
     if not job:

@@ -83,31 +83,43 @@ class USFPipeline(ABC, ProcessorMixin):
             output_config = get_output_path_config()
             if output_config.get('is_locked'):
                 # In locked mode, CLI must use the locked base path
-                # Generate a unique job ID for CLI runs
-                import uuid
-                job_id = f"cli_{uuid.uuid4().hex[:12]}"
-                locked_path = get_output_path(job_id, "")
+                base = output_config.get('base_path', '/workspace/output')
                 
-                # Check if user tried to use a different base path
-                if not output_dir.startswith(output_config.get('base_path', '/workspace/output')):
-                    # Override with locked path - user cannot change base
-                    logger.warning(f"[USF BIOS] Output path locked. Using: {locked_path}")
-                    args.output_dir = locked_path
-                else:
-                    # User used correct base, just ensure single folder structure
-                    # Extract any subfolder they tried to add
-                    base = output_config.get('base_path', '/workspace/output')
+                # Check if user provided path starts with correct base
+                if output_dir.startswith(base):
+                    # User used correct base, extract job_id from path
                     user_subpath = output_dir[len(base):].strip('/')
                     if '/' in user_subpath:
-                        # Multiple folders not allowed in locked mode
-                        logger.warning(f"[USF BIOS] Only single folder allowed in locked mode. Using: {locked_path}")
-                        args.output_dir = locked_path
+                        # Multiple folders not allowed - extract first folder as job_id
+                        job_id = user_subpath.split('/')[0]
+                        final_path = get_output_path(job_id, "")
+                        logger.warning(f"[USF BIOS] Only single folder allowed in locked mode. Using: {final_path}")
+                        args.output_dir = final_path
                     elif user_subpath:
-                        # Single folder provided - use it as job_id
+                        # Single folder provided - use it as job_id (this is the expected case)
                         args.output_dir = get_output_path(user_subpath, "")
                     else:
                         # No subfolder - generate one
-                        args.output_dir = locked_path
+                        import uuid
+                        job_id = f"cli_{uuid.uuid4().hex[:12]}"
+                        args.output_dir = get_output_path(job_id, "")
+                else:
+                    # Path doesn't start with locked base - try to extract job_id from end of path
+                    # This handles cases where backend sent a different base path
+                    import os
+                    potential_job_id = os.path.basename(output_dir.rstrip('/'))
+                    if potential_job_id and not potential_job_id.startswith('.'):
+                        # Use extracted job_id with correct base path
+                        final_path = get_output_path(potential_job_id, "")
+                        logger.warning(f"[USF BIOS] Output path locked. Using: {final_path}")
+                        args.output_dir = final_path
+                    else:
+                        # Generate new job_id as fallback
+                        import uuid
+                        job_id = f"cli_{uuid.uuid4().hex[:12]}"
+                        final_path = get_output_path(job_id, "")
+                        logger.warning(f"[USF BIOS] Output path locked. Using: {final_path}")
+                        args.output_dir = final_path
             else:
                 # Validate user path (for base_locked mode)
                 validate_output_path(output_dir)

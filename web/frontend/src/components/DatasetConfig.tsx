@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from 'react'
 import { 
   Upload, X, FileText, Check, Trash2, RefreshCw, 
   Database, Cloud, FolderOpen, Loader2, AlertCircle,
-  Plus, ExternalLink
+  Plus, ExternalLink, Info
 } from 'lucide-react'
 
 type DatasetSource = 'upload' | 'huggingface' | 'modelscope' | 'local_path'
@@ -22,6 +22,35 @@ interface Dataset {
   created_at: number
   selected: boolean
   max_samples?: number | null // null or 0 = all
+  dataset_type?: string | null // sft, rlhf_offline, rlhf_online, pt, kto, unknown
+  dataset_type_display?: string | null // Human-readable type name
+  compatible_training_methods?: string[] | null
+}
+
+// Dataset type detection result
+interface DatasetTypeInfo {
+  dataset_type: string
+  confidence: number
+  detected_fields: string[]
+  sample_count: number
+  compatible_training_methods: string[]
+  incompatible_training_methods: string[]
+  compatible_rlhf_types: string[]
+  display_name: string
+  message: string
+  file_size_bytes?: number
+  is_large_file?: boolean
+  format_warning?: string | null
+}
+
+// Dataset type display configuration
+const DATASET_TYPE_CONFIG: Record<string, { label: string; color: string; bgColor: string; borderColor: string }> = {
+  sft: { label: 'SFT', color: 'text-blue-700', bgColor: 'bg-blue-100', borderColor: 'border-blue-200' },
+  rlhf_offline: { label: 'RLHF Offline', color: 'text-purple-700', bgColor: 'bg-purple-100', borderColor: 'border-purple-200' },
+  rlhf_online: { label: 'RLHF Online', color: 'text-orange-700', bgColor: 'bg-orange-100', borderColor: 'border-orange-200' },
+  pt: { label: 'Pre-Training', color: 'text-green-700', bgColor: 'bg-green-100', borderColor: 'border-green-200' },
+  kto: { label: 'KTO', color: 'text-amber-700', bgColor: 'bg-amber-100', borderColor: 'border-amber-200' },
+  unknown: { label: 'Unknown', color: 'text-slate-600', bgColor: 'bg-slate-100', borderColor: 'border-slate-200' },
 }
 
 interface DatasetInfo {
@@ -40,6 +69,7 @@ interface Props {
   selectedPaths: string[]
   onSelectionChange: (paths: string[]) => void
   onShowAlert?: (message: string, type: 'error' | 'warning' | 'info' | 'success', title?: string) => void
+  onDatasetTypeChange?: (typeInfo: DatasetTypeInfo | null) => void
 }
 
 const ALL_SOURCE_TABS: { id: DatasetSource; label: string; icon: any; desc: string; sourceKey: string }[] = [
@@ -50,7 +80,7 @@ const ALL_SOURCE_TABS: { id: DatasetSource; label: string; icon: any; desc: stri
 ]
 
 
-export default function DatasetConfig({ selectedPaths, onSelectionChange, onShowAlert }: Props) {
+export default function DatasetConfig({ selectedPaths, onSelectionChange, onShowAlert, onDatasetTypeChange }: Props) {
   const [activeTab, setActiveTab] = useState<DatasetSource>('upload')
   const [datasets, setDatasets] = useState<Dataset[]>([])
   const [isLoading, setIsLoading] = useState(false)
@@ -86,6 +116,13 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
   const [deleteTarget, setDeleteTarget] = useState<Dataset | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState('')
   const [isDeleting, setIsDeleting] = useState(false)
+  
+  // Dataset type detection
+  const [detectedTypeInfo, setDetectedTypeInfo] = useState<DatasetTypeInfo | null>(null)
+  const [isDetectingType, setIsDetectingType] = useState(false)
+  
+  // Dataset type filter
+  const [typeFilter, setTypeFilter] = useState<string>('all')
 
   // Fetch system capabilities and datasets on mount
   useEffect(() => {
@@ -146,6 +183,51 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
       }
     }
   }, [datasets])
+
+  // Detect dataset type when selection changes
+  useEffect(() => {
+    const selectedDatasets = datasets.filter(d => d.selected)
+    if (selectedDatasets.length > 0) {
+      detectDatasetTypes(selectedDatasets.map(d => d.path))
+    } else {
+      setDetectedTypeInfo(null)
+      if (onDatasetTypeChange) {
+        onDatasetTypeChange(null)
+      }
+    }
+  }, [datasets.filter(d => d.selected).map(d => d.path).join(',')])
+
+  // Detect dataset types from selected paths
+  const detectDatasetTypes = async (paths: string[]) => {
+    if (paths.length === 0) return
+    
+    setIsDetectingType(true)
+    try {
+      const res = await fetch(`/api/datasets/detect-type-bulk?paths=${encodeURIComponent(paths.join(','))}`)
+      if (res.ok) {
+        const data = await res.json()
+        const typeInfo: DatasetTypeInfo = {
+          dataset_type: data.detected_type || 'unknown',
+          confidence: data.datasets?.[0]?.confidence || 0,
+          detected_fields: data.datasets?.[0]?.detected_fields || [],
+          sample_count: data.datasets?.[0]?.sample_count || 0,
+          compatible_training_methods: data.combined_compatible_methods || ['sft', 'pt', 'rlhf'],
+          incompatible_training_methods: data.combined_incompatible_methods || [],
+          compatible_rlhf_types: data.datasets?.[0]?.compatible_rlhf_types || [],
+          display_name: data.datasets?.[0]?.display_name || DATASET_TYPE_CONFIG[data.detected_type || 'unknown']?.label || 'Unknown',
+          message: data.message || ''
+        }
+        setDetectedTypeInfo(typeInfo)
+        if (onDatasetTypeChange) {
+          onDatasetTypeChange(typeInfo)
+        }
+      }
+    } catch (e) {
+      console.error('Failed to detect dataset type:', e)
+    } finally {
+      setIsDetectingType(false)
+    }
+  }
 
   // Fetch HuggingFace dataset info when path changes
   useEffect(() => {
@@ -228,7 +310,7 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
     const file = e.target.files?.[0]
     if (file) {
       setUploadFile(file)
-      if (!uploadName) setUploadName(file.name.replace(/\.(jsonl|json|csv)$/i, ''))
+      if (!uploadName) setUploadName(file.name.replace(/\.(jsonl|json|csv|txt)$/i, ''))
     }
   }
 
@@ -343,7 +425,18 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
     }
   }
 
-  const toggleSelection = (dataset: Dataset) => {
+  const toggleSelection = (dataset: Dataset, forceAllow: boolean = false) => {
+    // If trying to select (not deselect), check if allowed
+    if (!dataset.selected && !forceAllow) {
+      const { allowed, reason } = canSelectDataset(dataset)
+      if (!allowed) {
+        if (onShowAlert) {
+          onShowAlert(reason, 'warning', 'Incompatible Dataset Type')
+        }
+        return // Block selection
+      }
+    }
+    
     const updated = datasets.map(d => 
       d.id === dataset.id ? { ...d, selected: !d.selected } : d
     )
@@ -408,6 +501,51 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
       case 'modelscope': return 'ModelScope'
       case 'local_path': return 'Local'
     }
+  }
+
+  const getDatasetTypeLabel = (type: string) => {
+    return DATASET_TYPE_CONFIG[type]?.label || 'Unknown'
+  }
+
+  const getDatasetTypeColor = (type: string) => {
+    const config = DATASET_TYPE_CONFIG[type] || DATASET_TYPE_CONFIG['unknown']
+    return `${config.bgColor} ${config.color} ${config.borderColor}`
+  }
+
+  // Get the type of the first selected dataset (for enforcing same-type selection)
+  const getSelectedDatasetType = (): string | null => {
+    const selectedDatasets = datasets.filter(d => d.selected)
+    if (selectedDatasets.length === 0) return null
+    return selectedDatasets[0].dataset_type || null
+  }
+
+  // Check if a dataset can be selected (must match existing selection type)
+  const canSelectDataset = (dataset: Dataset): { allowed: boolean; reason: string } => {
+    const selectedType = getSelectedDatasetType()
+    
+    // If no datasets selected yet, or this dataset is already selected, allow
+    if (!selectedType || dataset.selected) {
+      return { allowed: true, reason: '' }
+    }
+    
+    const datasetType = dataset.dataset_type || 'unknown'
+    
+    // Unknown types are always allowed
+    if (selectedType === 'unknown' || datasetType === 'unknown') {
+      return { allowed: true, reason: '' }
+    }
+    
+    // Check if types match
+    if (datasetType !== selectedType) {
+      const selectedLabel = DATASET_TYPE_CONFIG[selectedType]?.label || selectedType
+      const datasetLabel = DATASET_TYPE_CONFIG[datasetType]?.label || datasetType
+      return {
+        allowed: false,
+        reason: `Cannot select this ${datasetLabel} dataset. You already have ${selectedLabel} datasets selected. All datasets must be the same type for training.`
+      }
+    }
+    
+    return { allowed: true, reason: '' }
   }
 
   return (
@@ -485,9 +623,15 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
                 className="w-full px-3 py-2 border border-slate-300 rounded-lg" />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">File (.jsonl, .json, .csv) *</label>
-              <input ref={fileInputRef} type="file" accept=".jsonl,.json,.csv" onChange={handleFileSelect}
+              <label className="block text-sm font-medium text-slate-700 mb-1">Dataset File *</label>
+              <input ref={fileInputRef} type="file" accept=".jsonl,.json,.csv,.txt" onChange={handleFileSelect}
                 className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white file:mr-3 file:px-3 file:py-1 file:border-0 file:bg-blue-100 file:text-blue-700 file:rounded file:font-medium file:text-sm" />
+              <p className="text-xs text-slate-500 mt-1">
+                <strong>Supported:</strong> .jsonl (recommended), .csv, .txt (unlimited size) | .json (max 2GB)
+              </p>
+              <p className="text-xs text-slate-400 mt-0.5">
+                TSV, Parquet, Excel files are not supported. Use JSONL for large datasets.
+              </p>
             </div>
             {uploadFile && <p className="text-sm text-slate-600">Selected: <strong>{uploadFile.name}</strong></p>}
             {uploadError && <p className="text-sm text-red-600 flex items-center gap-1"><AlertCircle className="w-4 h-4" />{uploadError}</p>}
@@ -614,15 +758,30 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
 
       {/* Dataset List */}
       <div>
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
           <h4 className="font-medium text-slate-900">
             Registered Datasets
             {selectedCount > 0 && <span className="text-blue-600 ml-2">({selectedCount} selected for training)</span>}
           </h4>
-          <button onClick={fetchDatasets} disabled={isLoading}
-            className="text-sm text-slate-500 hover:text-slate-700 flex items-center gap-1">
-            <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} /> Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            {/* Type Filter */}
+            <select
+              value={typeFilter}
+              onChange={(e) => setTypeFilter(e.target.value)}
+              className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            >
+              <option value="all">All Types</option>
+              <option value="sft">SFT</option>
+              <option value="rlhf_offline">RLHF Offline</option>
+              <option value="rlhf_online">RLHF Online</option>
+              <option value="pt">Pre-Training</option>
+              <option value="kto">KTO</option>
+            </select>
+            <button onClick={fetchDatasets} disabled={isLoading}
+              className="text-sm text-slate-500 hover:text-slate-700 flex items-center gap-1">
+              <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} /> Refresh
+            </button>
+          </div>
         </div>
 
         {isLoading ? (
@@ -637,43 +796,76 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
           </div>
         ) : (
           <div className="space-y-2 max-h-72 overflow-y-auto">
-            {datasets.map(dataset => (
-              <div key={dataset.id} onClick={() => toggleSelection(dataset)}
-                className={`flex items-center gap-3 p-3 rounded-lg border transition-all cursor-pointer ${
-                  dataset.selected ? 'border-blue-500 bg-blue-50' : 'border-slate-200 hover:border-slate-300 bg-white'
-                }`}>
-                <div className={`w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 ${
-                  dataset.selected ? 'bg-blue-600 border-blue-600' : 'border-slate-300'
-                }`}>
-                  {dataset.selected && <Check className="w-3 h-3 text-white" />}
+            {datasets
+              .filter(dataset => typeFilter === 'all' || dataset.dataset_type === typeFilter || (typeFilter === 'unknown' && !dataset.dataset_type))
+              .map(dataset => {
+              const selectability = canSelectDataset(dataset)
+              const isDisabled = !selectability.allowed && !dataset.selected
+              const datasetType = dataset.dataset_type || 'unknown'
+              const typeConfig = DATASET_TYPE_CONFIG[datasetType] || DATASET_TYPE_CONFIG['unknown']
+              
+              return (
+                <div key={dataset.id} 
+                  onClick={() => !isDisabled && toggleSelection(dataset)}
+                  title={isDisabled ? selectability.reason : undefined}
+                  className={`flex items-center gap-3 p-3 rounded-lg border transition-all ${
+                    isDisabled 
+                      ? 'border-slate-200 bg-slate-50 cursor-not-allowed opacity-60' 
+                      : dataset.selected 
+                        ? 'border-blue-500 bg-blue-50 cursor-pointer' 
+                        : 'border-slate-200 hover:border-slate-300 bg-white cursor-pointer'
+                  }`}>
+                  <div className={`w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 ${
+                    isDisabled 
+                      ? 'border-slate-300 bg-slate-200' 
+                      : dataset.selected 
+                        ? 'bg-blue-600 border-blue-600' 
+                        : 'border-slate-300'
+                  }`}>
+                    {dataset.selected && <Check className="w-3 h-3 text-white" />}
+                    {isDisabled && <X className="w-3 h-3 text-slate-400" />}
+                  </div>
+                  
+                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${getSourceColor(dataset.source)}`}>
+                    {getSourceIcon(dataset.source)}
+                  </div>
+                  
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className={`font-medium truncate ${isDisabled ? 'text-slate-500' : 'text-slate-900'}`}>{dataset.name}</p>
+                      {/* Dataset Type Badge */}
+                      <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${typeConfig.bgColor} ${typeConfig.color} border ${typeConfig.borderColor}`}>
+                        {typeConfig.label}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 truncate">
+                      {dataset.path}
+                      {dataset.subset && ` (${dataset.subset})`}
+                      {dataset.split && ` [${dataset.split}]`}
+                    </p>
+                  </div>
+                  
+                  <div className="text-right flex-shrink-0 hidden sm:block">
+                    <p className={`text-xs font-medium px-2 py-0.5 rounded-full inline-block ${getSourceColor(dataset.source)}`}>
+                      {getSourceLabel(dataset.source)}
+                    </p>
+                    <p className="text-xs text-slate-400 mt-1">{dataset.size_human} • {dataset.format}</p>
+                  </div>
+                  
+                  {/* Info icon for disabled datasets */}
+                  {isDisabled && (
+                    <div className="p-2 text-amber-500 flex-shrink-0" title={selectability.reason}>
+                      <Info className="w-4 h-4" />
+                    </div>
+                  )}
+                  
+                  <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(dataset) }}
+                    className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg flex-shrink-0">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
                 </div>
-                
-                <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${getSourceColor(dataset.source)}`}>
-                  {getSourceIcon(dataset.source)}
-                </div>
-                
-                <div className="flex-1 min-w-0">
-                  <p className="font-medium text-slate-900 truncate">{dataset.name}</p>
-                  <p className="text-xs text-slate-500 truncate">
-                    {dataset.path}
-                    {dataset.subset && ` (${dataset.subset})`}
-                    {dataset.split && ` [${dataset.split}]`}
-                  </p>
-                </div>
-                
-                <div className="text-right flex-shrink-0 hidden sm:block">
-                  <p className={`text-xs font-medium px-2 py-0.5 rounded-full inline-block ${getSourceColor(dataset.source)}`}>
-                    {getSourceLabel(dataset.source)}
-                  </p>
-                  <p className="text-xs text-slate-400 mt-1">{dataset.size_human} • {dataset.format}</p>
-                </div>
-                
-                <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(dataset) }}
-                  className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg flex-shrink-0">
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
-            ))}
+              )
+            })}
           </div>
         )}
 
@@ -681,6 +873,32 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
           <p className="text-sm text-amber-600 mt-2 flex items-center gap-1">
             <AlertCircle className="w-4 h-4" /> Please select at least one dataset for training
           </p>
+        )}
+
+        {/* Dataset Type Detection Info */}
+        {selectedCount > 0 && detectedTypeInfo && detectedTypeInfo.dataset_type !== 'unknown' && (
+          <div className={`mt-3 p-3 rounded-lg border ${getDatasetTypeColor(detectedTypeInfo.dataset_type)}`}>
+            <div className="flex items-center gap-2">
+              <Info className="w-4 h-4 flex-shrink-0" />
+              <div>
+                <p className="text-sm font-medium">
+                  Dataset Format: {getDatasetTypeLabel(detectedTypeInfo.dataset_type)}
+                </p>
+                <p className="text-xs mt-0.5 opacity-80">
+                  {detectedTypeInfo.message}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isDetectingType && (
+          <div className="mt-3 p-3 rounded-lg border border-slate-200 bg-slate-50">
+            <div className="flex items-center gap-2 text-slate-600">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span className="text-sm">Detecting dataset format...</span>
+            </div>
+          </div>
         )}
       </div>
     </div>

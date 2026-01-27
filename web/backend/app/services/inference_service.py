@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from .sanitized_log_service import sanitized_log_service
 from .gpu_cleanup_service import gpu_cleanup_service
+from .system_encrypted_log_service import system_encrypted_log
 
 # Add the project root to path for usf_bios imports
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.parent.parent
@@ -80,15 +81,57 @@ class InferenceBackend(str, Enum):
 
 
 class ModelCapabilities(BaseModel):
-    """Model capabilities for dynamic UI"""
-    supports_text: bool = True
-    supports_image: bool = False
-    supports_audio: bool = False
-    supports_video: bool = False
+    """
+    Model capabilities for dynamic UI.
+    
+    Defines what inputs and outputs a model supports, and which backends can run it.
+    
+    Model Types:
+    - llm: Text-to-text (LLaMA, Qwen, Mistral, etc.)
+    - vlm: Vision-Language (Qwen2-VL, LLaVA, etc.) - image+text input, text output
+    - mllm: Multimodal LLM (Qwen2.5-Omni) - any input, any output
+    - asr: Audio-to-text (Whisper, Qwen2-Audio)
+    - tts: Text-to-audio (SpeechT5, XTTS, Bark)
+    - t2i: Text-to-image (Stable Diffusion, SDXL, Flux)
+    - i2i: Image-to-image (Stable Diffusion img2img)
+    - t2v: Text-to-video (CogVideoX, etc.)
+    """
+    # Input capabilities
+    supports_text_input: bool = True
+    supports_image_input: bool = False
+    supports_audio_input: bool = False
+    supports_video_input: bool = False
+    
+    # Output capabilities  
+    supports_text_output: bool = True
+    supports_image_output: bool = False
+    supports_audio_output: bool = False
+    supports_video_output: bool = False
+    
+    # Backend compatibility
+    supported_backends: List[str] = ["transformers"]  # Which backends can run this model
+    
+    # Other capabilities
     supports_streaming: bool = True
     supports_system_prompt: bool = True
+    supports_tool_calls: bool = False
     max_context_length: int = 4096
-    model_type: str = "llm"  # llm, vlm, mllm, asr, tts
+    
+    # Model classification
+    model_type: str = "llm"  # llm, vlm, mllm, asr, tts, t2i, i2i, t2v
+    
+    # Legacy compatibility aliases
+    @property
+    def supports_image(self) -> bool:
+        return self.supports_image_input
+    
+    @property
+    def supports_audio(self) -> bool:
+        return self.supports_audio_input
+    
+    @property
+    def supports_video(self) -> bool:
+        return self.supports_video_input
 
 
 class ContentItem(BaseModel):
@@ -125,13 +168,27 @@ class InferenceRequest(BaseModel):
 
 
 class InferenceResponse(BaseModel):
-    """Inference response model"""
+    """
+    Inference response model with multimodal output support.
+    
+    Supports:
+    - Text output (response field)
+    - Image output (images field - list of base64 encoded images)
+    - Audio output (audio field - base64 encoded audio with format)
+    - Video output (video field - base64 encoded video or URL)
+    """
     success: bool
     response: Optional[str] = None
+    # Multimodal outputs
+    images: Optional[List[Dict[str, str]]] = None  # [{"data": "base64...", "format": "png"}]
+    audio: Optional[Dict[str, str]] = None  # {"data": "base64...", "format": "wav"}
+    video: Optional[Dict[str, str]] = None  # {"data": "base64...", "format": "mp4"} or {"url": "..."}
+    # Metadata
     tokens_generated: int = 0
     inference_time_ms: int = 0
     model_loaded: str = ""
     backend_used: str = "transformers"
+    output_type: str = "text"  # text, image, audio, video, multimodal
     error: Optional[str] = None
 
 
@@ -221,54 +278,250 @@ class InferenceService:
         return 0.0
     
     def _detect_model_capabilities(self, model_path: str) -> ModelCapabilities:
-        """Detect model capabilities based on model architecture"""
+        """
+        Detect model capabilities based on model architecture and config.json.
+        
+        Returns detailed input/output capabilities and supported backends.
+        
+        Model Types Detected:
+        - llm: Text-to-text (all backends)
+        - vlm: Image+text to text (transformers, some vllm)
+        - mllm: Any modality (transformers only)
+        - asr: Audio to text (transformers only)
+        - tts: Text to audio (transformers only)
+        - t2i: Text to image (transformers only - diffusers)
+        - i2i: Image to image (transformers only - diffusers)
+        - t2v: Text to video (transformers only)
+        """
+        import json
+        
         model_path_lower = model_path.lower()
         
-        # Vision-Language Models
-        if any(x in model_path_lower for x in ['qwen2-vl', 'qwen-vl', 'llava', 'cogvlm', 'internvl', 'minicpm-v']):
+        # Pattern definitions for each model type
+        vlm_patterns = ['qwen2-vl', 'qwen-vl', 'qwen2_vl', 'llava', 'cogvlm', 'internvl', 
+                        'minicpm-v', 'minicpmv', 'phi3v', 'phi-3-vision', 'idefics', 
+                        'paligemma', 'pixtral', 'molmo', 'mllama', 'llama3.2-vision',
+                        'florence', 'blip', 'git-base', 'kosmos']
+        
+        asr_patterns = ['whisper', 'qwen2-audio', 'qwen2_audio', 'seamless', 'mms', 
+                        'wav2vec', 'hubert', 'speech2text', 'canary']
+        
+        tts_patterns = ['speecht5', 'xtts', 'bark', 'vall-e', 'voicecraft', 
+                        'parler', 'tortoise', 'coqui', 'styletts']
+        
+        mllm_patterns = ['qwen2.5-omni', 'qwen2_5_omni', 'gemini', 'gpt-4o', 'any-to-any']
+        
+        t2i_patterns = ['stable-diffusion', 'sdxl', 'flux', 'dalle', 'midjourney',
+                        'kandinsky', 'deepfloyd', 'playground', 'pixart', 'hunyuan']
+        
+        i2i_patterns = ['controlnet', 'ip-adapter', 'instruct-pix2pix', 'img2img']
+        
+        t2v_patterns = ['cogvideo', 'text2video', 'modelscope-video', 'zeroscope',
+                        'animatediff', 'videocrafter', 'lavie', 'show-1']
+        
+        # Try to read config.json for more accurate detection
+        config = {}
+        config_path = Path(model_path) / "config.json" if Path(model_path).is_dir() else None
+        if config_path and config_path.exists():
+            try:
+                with open(config_path) as f:
+                    config = json.load(f)
+            except Exception:
+                pass
+        
+        # Build detection string from config and path
+        model_type_cfg = config.get("model_type", "").lower()
+        architectures = [a.lower() for a in config.get("architectures", [])]
+        arch_str = " ".join(architectures) + " " + model_type_cfg + " " + model_path_lower
+        
+        # Get context length from config
+        context_length = 8192
+        for key in ["max_position_embeddings", "max_seq_length", "seq_length", 
+                    "n_positions", "sliding_window", "max_sequence_length"]:
+            if key in config and isinstance(config[key], int) and config[key] > 0:
+                context_length = config[key]
+                break
+        
+        # Check for tool call support
+        tool_patterns = ['qwen2', 'qwen2.5', 'llama3', 'mistral', 'deepseek', 'yi', 'glm4']
+        supports_tools = any(tc in arch_str for tc in tool_patterns)
+        
+        # ============================================================
+        # TEXT-TO-IMAGE MODELS (Diffusion models)
+        # ============================================================
+        if any(x in arch_str for x in t2i_patterns):
             return ModelCapabilities(
-                supports_text=True,
-                supports_image=True,
-                supports_video='video' in model_path_lower or 'qwen2-vl' in model_path_lower,
-                supports_audio=False,
-                supports_streaming=True,
-                model_type="vlm",
-                max_context_length=32768
+                supports_text_input=True,
+                supports_image_input=False,
+                supports_audio_input=False,
+                supports_video_input=False,
+                supports_text_output=False,
+                supports_image_output=True,
+                supports_audio_output=False,
+                supports_video_output=False,
+                supported_backends=["transformers"],  # Diffusers only
+                supports_streaming=False,
+                supports_system_prompt=False,
+                model_type="t2i",
+                max_context_length=77  # CLIP token limit
             )
         
-        # Audio/Speech Models
-        if any(x in model_path_lower for x in ['whisper', 'qwen2-audio', 'seamless', 'mms']):
+        # ============================================================
+        # IMAGE-TO-IMAGE MODELS
+        # ============================================================
+        if any(x in arch_str for x in i2i_patterns):
             return ModelCapabilities(
-                supports_text=True,
-                supports_image=False,
-                supports_audio=True,
-                supports_video=False,
+                supports_text_input=True,
+                supports_image_input=True,
+                supports_audio_input=False,
+                supports_video_input=False,
+                supports_text_output=False,
+                supports_image_output=True,
+                supports_audio_output=False,
+                supports_video_output=False,
+                supported_backends=["transformers"],
+                supports_streaming=False,
+                supports_system_prompt=False,
+                model_type="i2i",
+                max_context_length=77
+            )
+        
+        # ============================================================
+        # TEXT-TO-VIDEO MODELS
+        # ============================================================
+        if any(x in arch_str for x in t2v_patterns):
+            return ModelCapabilities(
+                supports_text_input=True,
+                supports_image_input='img' in arch_str,  # Some support image conditioning
+                supports_audio_input=False,
+                supports_video_input=False,
+                supports_text_output=False,
+                supports_image_output=False,
+                supports_audio_output=False,
+                supports_video_output=True,
+                supported_backends=["transformers"],
+                supports_streaming=False,
+                supports_system_prompt=False,
+                model_type="t2v",
+                max_context_length=256
+            )
+        
+        # ============================================================
+        # TTS MODELS (Text-to-Speech)
+        # ============================================================
+        if any(x in arch_str for x in tts_patterns):
+            return ModelCapabilities(
+                supports_text_input=True,
+                supports_image_input=False,
+                supports_audio_input='voice' in arch_str or 'clone' in arch_str,  # Voice cloning
+                supports_video_input=False,
+                supports_text_output=False,
+                supports_image_output=False,
+                supports_audio_output=True,
+                supports_video_output=False,
+                supported_backends=["transformers"],
                 supports_streaming=True,
+                supports_system_prompt=False,
+                model_type="tts",
+                max_context_length=4096
+            )
+        
+        # ============================================================
+        # ASR MODELS (Speech-to-Text)
+        # ============================================================
+        if any(x in arch_str for x in asr_patterns):
+            return ModelCapabilities(
+                supports_text_input=False,
+                supports_image_input=False,
+                supports_audio_input=True,
+                supports_video_input=False,
+                supports_text_output=True,
+                supports_image_output=False,
+                supports_audio_output=False,
+                supports_video_output=False,
+                supported_backends=["transformers"],
+                supports_streaming=True,
+                supports_system_prompt=False,
                 model_type="asr",
                 max_context_length=4096
             )
         
-        # Multimodal LLMs (text + image + audio)
-        if any(x in model_path_lower for x in ['qwen2.5-omni', 'gemini', 'gpt-4o']):
+        # ============================================================
+        # MULTIMODAL LLMs (Omni models - any input, any output)
+        # ============================================================
+        if any(x in arch_str for x in mllm_patterns):
             return ModelCapabilities(
-                supports_text=True,
-                supports_image=True,
-                supports_audio=True,
-                supports_video=True,
+                supports_text_input=True,
+                supports_image_input=True,
+                supports_audio_input=True,
+                supports_video_input=True,
+                supports_text_output=True,
+                supports_image_output=True,
+                supports_audio_output=True,
+                supports_video_output=True,
+                supported_backends=["transformers"],  # Only transformers for full omni
                 supports_streaming=True,
+                supports_system_prompt=True,
+                supports_tool_calls=True,
                 model_type="mllm",
                 max_context_length=128000
             )
         
-        # Default: Text-only LLM
+        # ============================================================
+        # VISION-LANGUAGE MODELS (Image+text input, text output)
+        # ============================================================
+        if any(x in arch_str for x in vlm_patterns):
+            # VLMs: vLLM supports some (Qwen2-VL, LLaVA), SGLang supports some
+            vlm_vllm_supported = any(v in arch_str for v in ['qwen2-vl', 'qwen2_vl', 'llava', 'pixtral'])
+            vlm_sglang_supported = any(v in arch_str for v in ['qwen2-vl', 'qwen2_vl', 'llava'])
+            
+            backends = ["transformers"]
+            if vlm_vllm_supported and VLLM_AVAILABLE:
+                backends.append("vllm")
+            if vlm_sglang_supported and SGLANG_AVAILABLE:
+                backends.append("sglang")
+            
+            return ModelCapabilities(
+                supports_text_input=True,
+                supports_image_input=True,
+                supports_audio_input=False,
+                supports_video_input='video' in arch_str or 'qwen2_vl' in arch_str or 'qwen2-vl' in arch_str,
+                supports_text_output=True,
+                supports_image_output=False,
+                supports_audio_output=False,
+                supports_video_output=False,
+                supported_backends=backends,
+                supports_streaming=True,
+                supports_system_prompt=True,
+                supports_tool_calls=supports_tools,
+                model_type="vlm",
+                max_context_length=max(context_length, 32768)
+            )
+        
+        # ============================================================
+        # DEFAULT: Text-only LLM (all backends supported)
+        # ============================================================
+        backends = ["transformers"]
+        if VLLM_AVAILABLE:
+            backends.append("vllm")
+        if SGLANG_AVAILABLE:
+            backends.append("sglang")
+        
         return ModelCapabilities(
-            supports_text=True,
-            supports_image=False,
-            supports_audio=False,
-            supports_video=False,
+            supports_text_input=True,
+            supports_image_input=False,
+            supports_audio_input=False,
+            supports_video_input=False,
+            supports_text_output=True,
+            supports_image_output=False,
+            supports_audio_output=False,
+            supports_video_output=False,
+            supported_backends=backends,
             supports_streaming=True,
+            supports_system_prompt=True,
+            supports_tool_calls=supports_tools,
             model_type="llm",
-            max_context_length=8192
+            max_context_length=context_length
         )
     
     def get_available_backends(self) -> Dict[str, bool]:
@@ -370,6 +623,14 @@ class InferenceService:
                 memory_after = self._get_gpu_memory_used()
                 memory_freed = memory_before - memory_after
                 
+                # Log successful memory cleanup (encrypted only)
+                system_encrypted_log.log_inference_memory_cleanup(
+                    cleanup_type="deep",
+                    success=True,
+                    memory_freed_gb=round(max(0, memory_freed), 2),
+                    engines_cleared=engines_cleared
+                )
+                
                 return {
                     "success": True,
                     "memory_freed_gb": round(max(0, memory_freed), 2),
@@ -382,6 +643,13 @@ class InferenceService:
                 }
             
             except Exception as e:
+                # Log failed memory cleanup (encrypted only)
+                system_encrypted_log.log_inference_memory_cleanup(
+                    cleanup_type="deep",
+                    success=False,
+                    error=str(e)
+                )
+                
                 sanitized = sanitized_log_service.sanitize_error(str(e))
                 return {
                     "success": False,
@@ -535,18 +803,38 @@ class InferenceService:
                 self._current_backend = backend
                 self._loaded_at = datetime.now()
                 
+                memory_used = self._get_gpu_memory_used()
+                
+                # Log successful model load (encrypted only)
+                system_encrypted_log.log_inference_model_load(
+                    model_path=model_path,
+                    adapter_path=adapter_path,
+                    backend=backend.value,
+                    success=True,
+                    memory_used_gb=memory_used
+                )
+                
                 return {
                     "success": True,
                     "model_path": model_path,
                     "adapter_path": adapter_path,
                     "backend": backend.value,
-                    "memory_used_gb": self._get_gpu_memory_used(),
+                    "memory_used_gb": memory_used,
                     "capabilities": self._model_capabilities.model_dump() if self._model_capabilities else None
                 }
             
             except Exception as e:
                 # Clean up on failure
                 await self._clear_all_engines()
+                
+                # Log failed model load (encrypted only)
+                system_encrypted_log.log_inference_model_load(
+                    model_path=model_path,
+                    adapter_path=adapter_path,
+                    backend=backend.value,
+                    success=False,
+                    error=str(e)
+                )
                 
                 # Sanitize error for user
                 sanitized = sanitized_log_service.sanitize_error(str(e))
@@ -647,8 +935,21 @@ class InferenceService:
             
             if result.get("success"):
                 logging.info(f"Adapter loaded successfully: {adapter_path}")
+                # Log successful adapter load (encrypted only)
+                system_encrypted_log.log_inference_adapter_load(
+                    adapter_path=adapter_path,
+                    base_model=self._current_model_path or "",
+                    success=True
+                )
             else:
                 logging.warning(f"Adapter load returned failure: {result.get('error')}")
+                # Log failed adapter load (encrypted only)
+                system_encrypted_log.log_inference_adapter_load(
+                    adapter_path=adapter_path,
+                    base_model=self._current_model_path or "",
+                    success=False,
+                    error=result.get('error')
+                )
             
             return result
             
@@ -657,6 +958,14 @@ class InferenceService:
             tb = traceback.format_exc()
             logging.error(f"Adapter loading error: {error_msg}")
             logging.error(f"Traceback: {tb}")
+            
+            # Log adapter load exception (encrypted only)
+            system_encrypted_log.log_inference_adapter_load(
+                adapter_path=adapter_path,
+                base_model=self._current_model_path or "",
+                success=False,
+                error=f"{error_msg}\n{tb}"
+            )
             
             # Provide more specific error messages for common adapter issues
             error_lower = error_msg.lower()
@@ -839,17 +1148,58 @@ class InferenceService:
             end_time = datetime.now()
             inference_time_ms = int((end_time - start_time).total_seconds() * 1000)
             
+            # Log successful chat/generation (encrypted only)
+            system_encrypted_log.log_inference_chat(
+                model_path=self._current_model_path or "",
+                backend=self._current_backend.value,
+                message_count=len(request.messages) if hasattr(request, 'messages') else 0,
+                success=True,
+                tokens_generated=tokens_generated,
+                inference_time_ms=inference_time_ms
+            )
+            
+            # Determine output type based on model capabilities
+            output_type = "text"
+            images = None
+            audio = None
+            video = None
+            
+            if self._model_capabilities:
+                if self._model_capabilities.supports_image_output:
+                    output_type = "image"
+                elif self._model_capabilities.supports_audio_output:
+                    output_type = "audio"
+                elif self._model_capabilities.supports_video_output:
+                    output_type = "video"
+                
+                # For multimodal models, check if response contains special markers
+                if self._model_capabilities.model_type == "mllm":
+                    output_type = "multimodal"
+            
             return InferenceResponse(
                 success=True,
                 response=response_text,
+                images=images,
+                audio=audio,
+                video=video,
                 tokens_generated=tokens_generated,
                 inference_time_ms=inference_time_ms,
                 model_loaded=self._current_model_path or "",
-                backend_used=self._current_backend.value
+                backend_used=self._current_backend.value,
+                output_type=output_type
             )
         
         except Exception as e:
             full_error = str(e)
+            
+            # Log failed chat/generation (encrypted only)
+            system_encrypted_log.log_inference_chat(
+                model_path=self._current_model_path or "",
+                backend=self._current_backend.value if self._current_backend else "unknown",
+                message_count=len(request.messages) if hasattr(request, 'messages') else 0,
+                success=False,
+                error=full_error
+            )
             
             # Handle OOM gracefully
             if "OutOfMemoryError" in full_error or "CUDA out of memory" in full_error:
@@ -897,12 +1247,42 @@ class InferenceService:
         return response_text, tokens_generated
     
     async def _generate_vllm(self, request: InferenceRequest) -> tuple:
-        """Generate using vLLM backend with streaming support"""
+        """
+        Generate using vLLM backend.
+        
+        Supports multimodal input for VLM models (Qwen2-VL, LLaVA, etc.)
+        by passing images via multi_modal_data parameter.
+        """
         if not VLLM_AVAILABLE or self._vllm_engine is None:
             raise RuntimeError("vLLM not available")
         
         # Build prompt from messages
         prompt = self._messages_to_prompt(request.messages)
+        
+        # Extract multimodal data for VLM models
+        multimodal_data = None
+        if self._model_capabilities and self._model_capabilities.supports_image_input:
+            mm_data = self._extract_multimodal_data(request.messages)
+            if mm_data["images"]:
+                # vLLM expects images in multi_modal_data format
+                # Process base64 images if needed
+                processed_images = []
+                for img in mm_data["images"]:
+                    if img.startswith("data:"):
+                        # Extract base64 data
+                        import base64
+                        try:
+                            # Format: data:image/png;base64,<data>
+                            header, b64_data = img.split(",", 1)
+                            img_bytes = base64.b64decode(b64_data)
+                            processed_images.append(img_bytes)
+                        except Exception:
+                            processed_images.append(img)
+                    else:
+                        processed_images.append(img)
+                
+                if processed_images:
+                    multimodal_data = {"image": processed_images[0] if len(processed_images) == 1 else processed_images}
         
         sampling_params = SamplingParams(
             max_tokens=request.max_new_tokens,
@@ -912,7 +1292,14 @@ class InferenceService:
             repetition_penalty=request.repetition_penalty,
         )
         
-        outputs = self._vllm_engine.generate([prompt], sampling_params)
+        # Generate with or without multimodal data
+        if multimodal_data:
+            outputs = self._vllm_engine.generate(
+                [{"prompt": prompt, "multi_modal_data": multimodal_data}],
+                sampling_params
+            )
+        else:
+            outputs = self._vllm_engine.generate([prompt], sampling_params)
         
         response_text = outputs[0].outputs[0].text if outputs else ""
         tokens_generated = len(outputs[0].outputs[0].token_ids) if outputs else 0
@@ -944,13 +1331,20 @@ class InferenceService:
         return response_text, tokens_generated
     
     def _messages_to_prompt(self, messages: List[Dict[str, Any]]) -> str:
-        """Convert OpenAI-format messages to a single prompt string"""
+        """
+        Convert OpenAI-format messages to a single prompt string.
+        
+        NOTE: This is used by vLLM and SGLang backends.
+        For multimodal content (images/audio/video), only text is extracted here.
+        Multimodal content for these backends requires special handling at the
+        engine level (e.g., vLLM's multi_modal_data parameter).
+        """
         prompt_parts = []
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             
-            # Handle multimodal content
+            # Handle multimodal content - extract text only for prompt
             if isinstance(content, list):
                 text_parts = []
                 for item in content:
@@ -967,6 +1361,51 @@ class InferenceService:
         
         prompt_parts.append("Assistant:")
         return "\n".join(prompt_parts)
+    
+    def _extract_multimodal_data(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Extract multimodal data (images, audio, video) from messages.
+        
+        Returns a dict with:
+        - images: list of image data (base64 or URLs)
+        - audio: list of audio data
+        - video: list of video data
+        
+        Used by backends that support multimodal input.
+        """
+        multimodal_data = {
+            "images": [],
+            "audio": [],
+            "video": []
+        }
+        
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    
+                    item_type = item.get("type", "")
+                    
+                    if item_type == "image_url":
+                        image_url = item.get("image_url", {})
+                        if isinstance(image_url, dict) and image_url.get("url"):
+                            multimodal_data["images"].append(image_url["url"])
+                        elif isinstance(image_url, str):
+                            multimodal_data["images"].append(image_url)
+                    
+                    elif item_type == "audio":
+                        audio_data = item.get("audio", {})
+                        if audio_data:
+                            multimodal_data["audio"].append(audio_data)
+                    
+                    elif item_type == "video":
+                        video_data = item.get("video", {})
+                        if video_data:
+                            multimodal_data["video"].append(video_data)
+        
+        return multimodal_data
     
     async def generate_stream(self, request: InferenceRequest) -> AsyncGenerator[str, None]:
         """

@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from ...core.config import settings
 from ...core.capabilities import get_system_settings, get_validator
 from ...models.schemas import DatasetValidation
+from ...services.dataset_type_service import dataset_type_service, DatasetType, ModelType, FileFormatConfig
 
 router = APIRouter()
 
@@ -45,6 +46,9 @@ class RegisteredDataset(BaseModel):
     created_at: float
     selected: bool = True
     max_samples: Optional[int] = None  # None or 0 = use all samples
+    dataset_type: Optional[str] = None  # sft, rlhf_offline, rlhf_online, pt, kto, unknown
+    dataset_type_display: Optional[str] = None  # Human-readable type name
+    compatible_training_methods: Optional[List[str]] = None
 
 
 @router.post("/validate", response_model=DatasetValidation)
@@ -257,15 +261,46 @@ async def upload_dataset(
     file: UploadFile = File(...),
     dataset_name: str = Query(..., description="Name for the dataset")
 ):
-    """Upload a dataset file with a custom name"""
+    """
+    Upload a dataset file with a custom name.
+    
+    Validates:
+    1. File format is supported by USF BIOS (jsonl, json, csv, txt)
+    2. File size is within limits for the format
+    3. Dataset type is allowed by system feature flags
+    
+    Supported formats:
+    - JSONL: Unlimited size, recommended for large datasets
+    - JSON: Max 2GB (must fit in memory)
+    - CSV: Unlimited size, streaming supported
+    - TXT: Unlimited size, for pre-training only
+    
+    NOT supported (will be rejected):
+    - TSV, Parquet, Excel, Arrow
+    """
     try:
-        # Validate file extension
+        # === VALIDATION 1: Filename provided ===
         if not file.filename:
             raise HTTPException(status_code=400, detail="No filename provided")
         
         suffix = Path(file.filename).suffix.lower()
-        if suffix not in [".jsonl", ".json", ".csv"]:
-            raise HTTPException(status_code=400, detail=f"Unsupported format: {suffix}. Supported: .jsonl, .json, .csv")
+        
+        # === VALIDATION 2: Check for explicitly unsupported formats ===
+        if FileFormatConfig.is_unsupported(suffix):
+            error_msg = FileFormatConfig.get_unsupported_error(suffix)
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Format not supported: {error_msg}"
+            )
+        
+        # === VALIDATION 3: Check if format is supported by USF BIOS ===
+        file_format = FileFormatConfig.get_format_by_extension(suffix)
+        if not file_format:
+            supported = ", ".join(FileFormatConfig.get_all_extensions())
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Unsupported format: {suffix}. USF BIOS only supports: {supported}"
+            )
         
         # Sanitize dataset name (remove special characters)
         safe_name = "".join(c for c in dataset_name if c.isalnum() or c in "._- ")
@@ -292,6 +327,30 @@ async def upload_dataset(
         # Validate the uploaded file
         validation = await validate_dataset(str(upload_path))
         
+        # Detect dataset type
+        type_info = dataset_type_service.detect_dataset_type(str(upload_path))
+        
+        # Get feature flags and validate if dataset type is allowed
+        try:
+            from ...core.capabilities import get_validator
+            validator = get_validator()
+            feature_flags = validator.get_feature_flags() if hasattr(validator, 'get_feature_flags') else {}
+        except Exception:
+            feature_flags = {}
+        
+        # Validate dataset type against feature flags
+        is_valid, error_msg, _ = dataset_type_service.validate_dataset_for_upload(
+            str(upload_path), feature_flags
+        )
+        
+        if not is_valid:
+            # Delete the uploaded file since it's not allowed
+            try:
+                upload_path.unlink()
+            except Exception:
+                pass
+            raise HTTPException(status_code=403, detail=error_msg)
+        
         return {
             "success": True,
             "id": final_filename,
@@ -302,7 +361,12 @@ async def upload_dataset(
             "format": suffix[1:],  # Remove the dot
             "valid": validation.valid,
             "total_samples": validation.total_samples,
-            "errors": validation.errors
+            "errors": validation.errors,
+            "dataset_type": type_info.dataset_type.value,
+            "dataset_type_display": type_info.display_name,
+            "compatible_training_methods": type_info.compatible_training_methods,
+            "compatible_rlhf_types": type_info.compatible_rlhf_types,
+            "format_warning": type_info.format_warning,
         }
     
     except HTTPException:
@@ -319,26 +383,32 @@ async def list_datasets():
         get_system_settings().UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         
         datasets = []
+        # Get all supported extensions from FileFormatConfig
+        supported_extensions = FileFormatConfig.get_all_extensions()
         for f in get_system_settings().UPLOAD_DIR.glob("*"):
-            if f.suffix.lower() in [".jsonl", ".json", ".csv"]:
+            if f.suffix.lower() in supported_extensions:
                 # Get basic info
                 stat = f.stat()
                 
-                # Try to get sample count
+                # Try to get sample count based on format
                 total_samples = 0
                 try:
-                    if f.suffix.lower() == ".jsonl":
+                    ext = f.suffix.lower()
+                    if ext == ".jsonl":
                         with open(f, 'r', encoding='utf-8') as fp:
                             total_samples = sum(1 for _ in fp)
-                    elif f.suffix.lower() == ".json":
+                    elif ext == ".json":
                         import json
                         with open(f, 'r', encoding='utf-8') as fp:
                             data = json.load(fp)
                             if isinstance(data, list):
                                 total_samples = len(data)
-                    elif f.suffix.lower() == ".csv":
+                    elif ext == ".csv":
                         with open(f, 'r', encoding='utf-8') as fp:
                             total_samples = sum(1 for _ in fp) - 1  # Minus header
+                    elif ext == ".txt":
+                        with open(f, 'r', encoding='utf-8') as fp:
+                            total_samples = sum(1 for _ in fp)  # Line count for text
                 except Exception:
                     pass
                 
@@ -524,7 +594,7 @@ async def register_dataset(registration: DatasetRegistration):
 
 @router.get("/list-all")
 async def list_all_datasets():
-    """List all datasets (uploaded + registered)"""
+    """List all datasets (uploaded + registered) with dataset type labels"""
     try:
         get_system_settings().UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         
@@ -535,20 +605,33 @@ async def list_all_datasets():
             if f.suffix.lower() in [".jsonl", ".json", ".csv"]:
                 stat = f.stat()
                 total_samples = 0
+                
+                # Detect dataset type
                 try:
-                    if f.suffix.lower() == ".jsonl":
-                        with open(f, 'r', encoding='utf-8') as fp:
-                            total_samples = sum(1 for _ in fp)
-                    elif f.suffix.lower() == ".json":
-                        with open(f, 'r', encoding='utf-8') as fp:
-                            data = json.load(fp)
-                            if isinstance(data, list):
-                                total_samples = len(data)
-                    elif f.suffix.lower() == ".csv":
-                        with open(f, 'r', encoding='utf-8') as fp:
-                            total_samples = sum(1 for _ in fp) - 1
+                    type_info = dataset_type_service.detect_dataset_type(str(f))
+                    dataset_type = type_info.dataset_type.value
+                    dataset_type_display = type_info.display_name
+                    compatible_methods = type_info.compatible_training_methods
+                    total_samples = type_info.sample_count
                 except Exception:
-                    pass
+                    dataset_type = "unknown"
+                    dataset_type_display = "Unknown"
+                    compatible_methods = ["sft", "pt", "rlhf"]
+                    # Fallback sample counting
+                    try:
+                        if f.suffix.lower() == ".jsonl":
+                            with open(f, 'r', encoding='utf-8') as fp:
+                                total_samples = sum(1 for _ in fp)
+                        elif f.suffix.lower() == ".json":
+                            with open(f, 'r', encoding='utf-8') as fp:
+                                data = json.load(fp)
+                                if isinstance(data, list):
+                                    total_samples = len(data)
+                        elif f.suffix.lower() == ".csv":
+                            with open(f, 'r', encoding='utf-8') as fp:
+                                total_samples = sum(1 for _ in fp) - 1
+                    except Exception:
+                        pass
                 
                 all_datasets.append({
                     "id": f"upload_{f.name}",
@@ -561,11 +644,25 @@ async def list_all_datasets():
                     "size_human": _format_size(stat.st_size),
                     "format": f.suffix[1:].lower(),
                     "created_at": stat.st_ctime,
-                    "selected": True
+                    "selected": True,
+                    "dataset_type": dataset_type,
+                    "dataset_type_display": dataset_type_display,
+                    "compatible_training_methods": compatible_methods,
                 })
         
         # 2. Get registered datasets
         for ds in _dataset_registry.values():
+            # Add dataset type if not already present
+            if "dataset_type" not in ds:
+                try:
+                    type_info = dataset_type_service.detect_dataset_type(ds.get("path", ""))
+                    ds["dataset_type"] = type_info.dataset_type.value
+                    ds["dataset_type_display"] = type_info.display_name
+                    ds["compatible_training_methods"] = type_info.compatible_training_methods
+                except Exception:
+                    ds["dataset_type"] = "unknown"
+                    ds["dataset_type_display"] = "Unknown"
+                    ds["compatible_training_methods"] = ["sft", "pt", "rlhf"]
             all_datasets.append(ds)
         
         # Sort by creation time (newest first)
@@ -617,3 +714,295 @@ async def unregister_dataset(dataset_id: str, confirm: str = Query(..., descript
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to unregister dataset")
+
+
+# ============================================================================
+# Dataset Type Detection Endpoints
+# ============================================================================
+
+class DatasetTypeResponse(BaseModel):
+    """Response model for dataset type detection"""
+    dataset_type: str
+    confidence: float
+    detected_fields: List[str]
+    sample_count: int
+    compatible_training_methods: List[str]
+    incompatible_training_methods: List[str]
+    compatible_rlhf_types: List[str] = []
+    display_name: str = ""
+    message: str
+    file_size_bytes: int = 0
+    is_large_file: bool = False
+    format_warning: Optional[str] = None
+    file_format: Optional[str] = None
+    supports_streaming: bool = False
+    estimated_samples: bool = False
+    validation_errors: List[str] = []
+    validation_warnings: List[str] = []
+
+
+class ModelTypeResponse(BaseModel):
+    """Response model for model type detection"""
+    model_type: str
+    is_adapter: bool
+    base_model_path: Optional[str]
+    can_do_lora: bool
+    can_do_qlora: bool
+    can_do_full: bool
+    can_do_rlhf: bool
+    warnings: List[str]
+
+
+class TrainingValidationRequest(BaseModel):
+    """Request for validating training configuration"""
+    dataset_path: str
+    training_method: str  # sft, pt, rlhf
+    train_type: str  # lora, qlora, full, adalora
+    model_path: Optional[str] = None
+    rlhf_type: Optional[str] = None  # dpo, orpo, etc.
+
+
+class TrainingValidationResponse(BaseModel):
+    """Response for training configuration validation"""
+    valid: bool
+    message: str
+    dataset_type: str
+    model_type: Optional[str] = None
+    compatible_methods: List[str]
+    incompatible_methods: List[str]
+    warnings: List[str]
+
+
+@router.get("/detect-type", response_model=DatasetTypeResponse)
+async def detect_dataset_type(dataset_path: str = Query(..., description="Path to dataset file")):
+    """
+    Detect the type of dataset (SFT, RLHF-Offline, RLHF-Online, PT).
+    
+    This is used by the frontend to:
+    1. Restrict available training methods based on dataset type
+    2. Auto-reset training method when dataset type changes
+    3. Show appropriate warnings/info to users
+    4. Label datasets with their type (SFT, RLHF-Online, RLHF-Offline, PT)
+    """
+    try:
+        result = dataset_type_service.detect_dataset_type(dataset_path)
+        return DatasetTypeResponse(
+            dataset_type=result.dataset_type.value,
+            confidence=result.confidence,
+            detected_fields=result.detected_fields,
+            sample_count=result.sample_count,
+            compatible_training_methods=result.compatible_training_methods,
+            incompatible_training_methods=result.incompatible_training_methods,
+            compatible_rlhf_types=result.compatible_rlhf_types,
+            display_name=result.display_name,
+            message=result.message,
+            file_size_bytes=result.file_size_bytes,
+            is_large_file=result.is_large_file,
+            format_warning=result.format_warning,
+            file_format=result.file_format,
+            supports_streaming=result.supports_streaming,
+            estimated_samples=result.estimated_samples,
+            validation_errors=result.validation_errors,
+            validation_warnings=result.validation_warnings,
+        )
+    except Exception as e:
+        return DatasetTypeResponse(
+            dataset_type="unknown",
+            confidence=0.0,
+            detected_fields=[],
+            sample_count=0,
+            compatible_training_methods=["sft", "pt", "rlhf"],
+            incompatible_training_methods=[],
+            compatible_rlhf_types=[],
+            display_name="Unknown",
+            message=f"Error detecting dataset type: {str(e)}",
+            validation_errors=[str(e)],
+        )
+
+
+@router.get("/detect-model-type", response_model=ModelTypeResponse)
+async def detect_model_type(model_path: str = Query(..., description="Path to model directory")):
+    """
+    Detect if a model is a full model or LoRA adapter.
+    
+    This is used to:
+    1. Warn users if they try to do full fine-tuning on a LoRA adapter
+    2. Ensure proper base model is available for LoRA adapter training
+    3. Validate RLHF compatibility
+    """
+    try:
+        result = dataset_type_service.detect_model_type(model_path)
+        return ModelTypeResponse(
+            model_type=result.model_type.value,
+            is_adapter=result.is_adapter,
+            base_model_path=result.base_model_path,
+            can_do_lora=result.can_do_lora,
+            can_do_qlora=result.can_do_qlora,
+            can_do_full=result.can_do_full,
+            can_do_rlhf=result.can_do_rlhf,
+            warnings=result.warnings,
+        )
+    except Exception as e:
+        return ModelTypeResponse(
+            model_type="unknown",
+            is_adapter=False,
+            base_model_path=None,
+            can_do_lora=True,
+            can_do_qlora=True,
+            can_do_full=True,
+            can_do_rlhf=True,
+            warnings=[f"Error detecting model type: {str(e)}"],
+        )
+
+
+@router.post("/validate-training-config", response_model=TrainingValidationResponse)
+async def validate_training_config(request: TrainingValidationRequest):
+    """
+    Validate if the training configuration is compatible with the dataset and model.
+    
+    This provides a final validation before training starts, ensuring:
+    1. Dataset type matches training method
+    2. Model type supports the selected train type
+    3. All compatibility requirements are met
+    """
+    try:
+        # Detect dataset type
+        dataset_result = dataset_type_service.detect_dataset_type(request.dataset_path)
+        
+        # Detect model type if path provided
+        model_result = None
+        model_type_str = None
+        warnings = []
+        
+        if request.model_path:
+            model_result = dataset_type_service.detect_model_type(request.model_path)
+            model_type_str = model_result.model_type.value
+            warnings.extend(model_result.warnings)
+        
+        # Validate configuration
+        is_valid, message = dataset_type_service.validate_training_config(
+            dataset_type=dataset_result.dataset_type,
+            training_method=request.training_method,
+            train_type=request.train_type,
+            model_type=model_result.model_type if model_result else ModelType.FULL,
+            rlhf_type=request.rlhf_type
+        )
+        
+        return TrainingValidationResponse(
+            valid=is_valid,
+            message=message,
+            dataset_type=dataset_result.dataset_type.value,
+            model_type=model_type_str,
+            compatible_methods=dataset_result.compatible_training_methods,
+            incompatible_methods=dataset_result.incompatible_training_methods,
+            warnings=warnings,
+        )
+    
+    except Exception as e:
+        return TrainingValidationResponse(
+            valid=False,
+            message=f"Validation error: {str(e)}",
+            dataset_type="unknown",
+            model_type=None,
+            compatible_methods=["sft", "pt", "rlhf"],
+            incompatible_methods=[],
+            warnings=[],
+        )
+
+
+@router.get("/detect-type-bulk")
+async def detect_dataset_types_bulk(
+    paths: str = Query(..., description="Comma-separated list of dataset paths")
+):
+    """
+    Detect types for multiple datasets at once.
+    
+    Returns the combined compatible training methods (intersection of all datasets).
+    This is useful when multiple datasets are selected for training.
+    """
+    try:
+        path_list = [p.strip() for p in paths.split(",") if p.strip()]
+        
+        if not path_list:
+            return {
+                "datasets": [],
+                "combined_compatible_methods": ["sft", "pt", "rlhf"],
+                "combined_incompatible_methods": [],
+                "all_same_type": True,
+                "detected_type": "unknown",
+                "message": "No datasets provided"
+            }
+        
+        results = []
+        types_found = set()
+        compatible_sets = []
+        
+        for path in path_list:
+            result = dataset_type_service.detect_dataset_type(path)
+            results.append({
+                "path": path,
+                "type": result.dataset_type.value,
+                "confidence": result.confidence,
+                "compatible_methods": result.compatible_training_methods,
+            })
+            types_found.add(result.dataset_type.value)
+            compatible_sets.append(set(result.compatible_training_methods))
+        
+        # Find intersection of compatible methods
+        if compatible_sets:
+            combined_compatible = set.intersection(*compatible_sets)
+        else:
+            combined_compatible = {"sft", "pt", "rlhf"}
+        
+        # Find union of incompatible methods
+        all_incompatible = set()
+        for result in results:
+            ds_result = dataset_type_service.detect_dataset_type(result["path"])
+            all_incompatible.update(ds_result.incompatible_training_methods)
+        
+        all_same_type = len(types_found) == 1
+        detected_type = list(types_found)[0] if all_same_type else "mixed"
+        
+        message = ""
+        if not all_same_type:
+            message = f"Mixed dataset types detected: {', '.join(types_found)}. Only methods compatible with all datasets are available."
+        elif detected_type != "unknown":
+            type_display = {"sft": "SFT", "rlhf": "RLHF preference", "pt": "Pre-training", "kto": "KTO"}.get(detected_type, detected_type)
+            message = f"All datasets are {type_display} format."
+        
+        return {
+            "datasets": results,
+            "combined_compatible_methods": list(combined_compatible),
+            "combined_incompatible_methods": list(all_incompatible),
+            "all_same_type": all_same_type,
+            "detected_type": detected_type,
+            "message": message
+        }
+    
+    except Exception as e:
+        return {
+            "datasets": [],
+            "combined_compatible_methods": ["sft", "pt", "rlhf"],
+            "combined_incompatible_methods": [],
+            "all_same_type": True,
+            "detected_type": "unknown",
+            "message": f"Error: {str(e)}"
+        }
+
+
+@router.get("/supported-formats")
+async def get_supported_formats():
+    """
+    Get information about supported dataset file formats.
+    
+    Returns format limits, streaming support, and recommendations.
+    This endpoint helps the frontend display format requirements to users.
+    
+    Format Summary:
+    - JSONL: UNLIMITED size, streaming, recommended for large datasets
+    - JSON: 2GB max, no streaming, for smaller datasets only
+    - CSV/TSV: UNLIMITED size, streaming, good for tabular data
+    - TXT: UNLIMITED size, streaming, for pre-training text
+    - Parquet: UNLIMITED size, chunked reading, efficient columnar format
+    """
+    return dataset_type_service.get_supported_formats()

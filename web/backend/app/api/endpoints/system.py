@@ -8,6 +8,7 @@ import subprocess
 from ...core.config import settings
 from ...core.capabilities import get_validator, is_system_expired, SystemExpiredError
 from ...services.gpu_cleanup_service import gpu_cleanup_service
+from ...services.system_encrypted_log_service import system_encrypted_log
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -490,6 +491,16 @@ async def get_system_status():
     else:
         status = "error"
         message = "Unknown system state"
+    
+    # Log system health check (encrypted only)
+    system_encrypted_log.log_system_health({
+        "status": status,
+        "gpu_available": gpu_ok,
+        "gpu_name": gpu_name,
+        "cuda_available": cuda_ok,
+        "bios_installed": bios_ok,
+        "backend_ready": backend_ready
+    })
     
     return SystemStatus(
         status=status,
@@ -2232,3 +2243,86 @@ async def check_gpu_resources_for_colocate(request: GPUResourceCheckRequest):
             details=details,
             recommendations=["Check GPU drivers and CUDA installation"]
         )
+
+
+# =============================================================================
+# TRAINING STATUS ENDPOINT - Real-time training state management
+# =============================================================================
+
+@router.get("/training-status")
+async def get_training_status():
+    """
+    Get comprehensive training status for the entire system.
+    
+    This is the SINGLE SOURCE OF TRUTH for training state. Frontend should:
+    1. Call this on page load to detect active training
+    2. Poll this during training for real-time updates
+    3. Use can_create_job/can_load_inference to control UI
+    
+    Response:
+    {
+        "is_training_active": true/false,
+        "phase": "idle" | "initializing" | "running" | "completing" | "completed" | "failed" | "stopped",
+        "job_id": "abc123" | null,
+        "job_name": "swift-phoenix-42" | null,
+        "model_name": "llama-3-8b" | null,
+        "started_at": "2024-01-15T10:30:00Z" | null,
+        "progress": {
+            "current_step": 100,
+            "total_steps": 1000,
+            "current_epoch": 1.5,
+            "total_epochs": 3,
+            "current_loss": 0.5,
+            "learning_rate": 0.0001,
+            "samples_per_second": 2.5,
+            "eta_seconds": 3600,
+            "progress_percent": 10.0
+        },
+        "error_message": null | "Out of memory",
+        "can_create_job": true/false,
+        "can_load_inference": true/false,
+        "can_start_training": true/false,
+        "process_running": true/false,
+        "process_pid": 12345 | null,
+        "last_updated": "2024-01-15T10:35:00Z",
+        "status_message": "Training in progress: 10.0% (100/1000)",
+        "status_color": "blue"
+    }
+    """
+    from ...services.training_status_service import training_status_service
+    
+    return await training_status_service.get_status_dict()
+
+
+@router.get("/training-status/can-create-job")
+async def can_create_job():
+    """
+    Check if a new training job can be created.
+    
+    Returns:
+    {
+        "allowed": true/false,
+        "reason": "Ready to create job" | "Training is in progress..."
+    }
+    """
+    from ...services.training_status_service import training_status_service
+    
+    can_create, reason = await training_status_service.can_create_job()
+    return {"allowed": can_create, "reason": reason}
+
+
+@router.get("/training-status/can-load-inference")
+async def can_load_inference():
+    """
+    Check if inference model can be loaded.
+    
+    Returns:
+    {
+        "allowed": true/false,
+        "reason": "Ready to load inference model" | "Cannot load while training..."
+    }
+    """
+    from ...services.training_status_service import training_status_service
+    
+    can_load, reason = await training_status_service.can_load_inference()
+    return {"allowed": can_load, "reason": reason}

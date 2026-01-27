@@ -10,3 +10,12 @@ from .model_registry_service import ModelRegistryService
 from .job_service import JobService, JobServiceError
 from .encrypted_log_service import EncryptedLogService, encrypted_log_service
 from .sanitized_log_service import SanitizedLogService, sanitized_log_service, CrashReason, ErrorSeverity
+from .system_encrypted_log_service import (
+    SystemEncryptedLogService, 
+    system_encrypted_log,
+    log_inference,
+    log_dataset,
+    log_model,
+    log_system,
+    log_error
+)

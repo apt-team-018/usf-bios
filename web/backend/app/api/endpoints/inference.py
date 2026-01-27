@@ -63,13 +63,28 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    """Chat inference response"""
+    """
+    Chat inference response with multimodal output support.
+    
+    Supports different output types based on model:
+    - LLM/VLM: text response
+    - T2I: images list
+    - TTS: audio
+    - T2V: video
+    - MLLM: any combination
+    """
     success: bool
     response: Optional[str] = None
+    # Multimodal outputs
+    images: Optional[List[Dict[str, str]]] = None  # [{"data": "base64...", "format": "png"}]
+    audio: Optional[Dict[str, str]] = None  # {"data": "base64...", "format": "wav"}
+    video: Optional[Dict[str, str]] = None  # {"data": "base64...", "format": "mp4"}
+    # Metadata
     tokens_generated: int = 0
     inference_time_ms: int = 0
     model_loaded: str = ""
     backend_used: str = "transformers"
+    output_type: str = "text"  # text, image, audio, video, multimodal
     error: Optional[str] = None
 
 
@@ -100,7 +115,18 @@ async def chat_inference(request: ChatRequest):
     - Streaming responses (for sglang/vllm)
     - Multimodal inputs (text, image, audio, video)
     - OpenAI-compatible message format
+    
+    BLOCKED during training to prevent GPU memory conflicts.
     """
+    # CRITICAL: Check if training is active - block inference during training
+    from ...services.training_status_service import training_status_service
+    can_load, reason = await training_status_service.can_load_inference()
+    if not can_load:
+        return ChatResponse(
+            success=False,
+            error=f"Inference blocked: {reason}"
+        )
+    
     try:
         # Convert backend string to enum
         backend_map = {
@@ -168,6 +194,12 @@ async def chat_inference(request: ChatRequest):
         return ChatResponse(
             success=result.success,
             response=result.response,
+            # Include multimodal outputs
+            images=result.images,
+            audio=result.audio,
+            video=result.video,
+            output_type=result.output_type,
+            # Metadata
             tokens_generated=result.tokens_generated,
             inference_time_ms=result.inference_time_ms,
             model_loaded=result.model_loaded,
@@ -192,7 +224,19 @@ async def load_model(request: LoadModelRequest):
     - transformers: Default, uses USF BIOS TransformersEngine
     - sglang: High-performance serving with SGLang
     - vllm: Optimized serving with vLLM
+    
+    BLOCKED during training to prevent GPU memory conflicts.
     """
+    # CRITICAL: Check if training is active - block inference loading during training
+    from ...services.training_status_service import training_status_service
+    can_load, reason = await training_status_service.can_load_inference()
+    if not can_load:
+        return {
+            "success": False,
+            "error": reason,
+            "blocked_by_training": True
+        }
+    
     try:
         backend_map = {
             "transformers": InferenceBackend.TRANSFORMERS,

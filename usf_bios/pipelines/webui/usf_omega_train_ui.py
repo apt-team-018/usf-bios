@@ -21,7 +21,7 @@ USF_OMEGA_MODEL = "arpitsh018/usf-omega-40b-base"
 USF_OMEGA_HIDDEN_SIZE = 5120
 USF_OMEGA_MAX_POSITION = 262144
 
-# LoRA Best Practice Defaults (Based on https://thinkingmachines.ai/blog/lora/)
+# LoRA Best Practice Defaults
 # Key findings:
 # 1. LoRA LR should be ~10x FullFT LR
 # 2. Alpha = 32 is standard practice

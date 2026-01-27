@@ -15,6 +15,14 @@ import TrainingSettingsStep from '@/components/TrainingSettings'
 import DatasetConfig from '@/components/DatasetConfig'
 import AlertModal, { AlertType, ConfirmModal } from '@/components/AlertModal'
 import TrainingHistory from '@/components/TrainingHistory'
+import ConflictResolutionModal, { 
+  ConflictType, 
+  ConflictContext, 
+  ConflictState, 
+  initialConflictState,
+  ModelType 
+} from '@/components/ConflictResolutionModal'
+import InferencePanel from '@/components/InferencePanel'
 
 // ============================================================
 // LOCKED MODEL CONFIGURATION
@@ -124,6 +132,10 @@ interface TrainingConfig {
   // API Tokens for private models/datasets (optional)
   hf_token: string | null  // HuggingFace token for private models/datasets
   ms_token: string | null  // ModelScope token for private models/datasets
+  // Dataset streaming for large datasets (billions of samples)
+  streaming: boolean  // Enable streaming mode for datasets that don't fit in memory
+  max_steps: number | null  // Required when streaming=true (dataset length unknown)
+  shuffle_buffer_size: number  // Buffer size for shuffling in streaming mode
 }
 
 interface JobStatus {
@@ -178,6 +190,36 @@ interface SystemCapabilities {
   has_external_storage: boolean
   storage_path: string | null
   storage_writable: boolean
+}
+
+// Global training status - single source of truth from backend
+interface GlobalTrainingStatus {
+  is_training_active: boolean
+  phase: 'idle' | 'initializing' | 'running' | 'completing' | 'completed' | 'failed' | 'stopped'
+  job_id: string | null
+  job_name: string | null
+  model_name: string | null
+  started_at: string | null
+  progress: {
+    current_step: number
+    total_steps: number
+    current_epoch: number
+    total_epochs: number
+    current_loss: number | null
+    learning_rate: number | null
+    samples_per_second: number | null
+    eta_seconds: number | null
+    progress_percent: number
+  }
+  error_message: string | null
+  can_create_job: boolean
+  can_load_inference: boolean
+  can_start_training: boolean
+  process_running: boolean
+  process_pid: number | null
+  last_updated: string
+  status_message: string
+  status_color: string
 }
 
 interface TrainingMetric {
@@ -246,8 +288,12 @@ export default function Home() {
   const [currentStep, setCurrentStep] = useState(1)
   const [isTraining, setIsTraining] = useState(false)
   const [isStartingTraining, setIsStartingTraining] = useState(false)
+  const [isCheckingActiveTraining, setIsCheckingActiveTraining] = useState(true) // Start true - check on load
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null)
   const [trainingLogs, setTrainingLogs] = useState<string[]>([])
+  
+  // Global training status - single source of truth from backend
+  const [globalTrainingStatus, setGlobalTrainingStatus] = useState<GlobalTrainingStatus | null>(null)
   
   // Initialize config - will be updated when locked models are fetched
   const [config, setConfig] = useState<TrainingConfig>({
@@ -314,6 +360,10 @@ export default function Home() {
     // API Tokens for private models/datasets (optional)
     hf_token: null,
     ms_token: null,
+    // Dataset streaming for large datasets (billions of samples)
+    streaming: false,  // Enable for datasets that don't fit in memory
+    max_steps: null,   // Required when streaming=true
+    shuffle_buffer_size: 1000,  // Buffer size for shuffling in streaming mode
   })
 
   // Dataset state
@@ -329,6 +379,30 @@ export default function Home() {
   const [deleteTarget, setDeleteTarget] = useState<UploadedDataset | null>(null)
   const [deleteConfirmText, setDeleteConfirmText] = useState('')
   const [isDeleting, setIsDeleting] = useState(false)
+  
+  // Dataset type detection state
+  const [datasetTypeInfo, setDatasetTypeInfo] = useState<{
+    dataset_type: string
+    confidence: number
+    detected_fields: string[]
+    sample_count: number
+    compatible_training_methods: string[]
+    incompatible_training_methods: string[]
+    message: string
+  } | null>(null)
+  const [previousDatasetType, setPreviousDatasetType] = useState<string | null>(null)
+  
+  // Model type detection state
+  const [modelTypeInfo, setModelTypeInfo] = useState<{
+    model_type: string
+    is_adapter: boolean
+    base_model_path: string | null
+    can_do_lora: boolean
+    can_do_qlora: boolean
+    can_do_full: boolean
+    can_do_rlhf: boolean
+    warnings: string[]
+  } | null>(null)
   
   // Custom alert modal state (replaces browser alert)
   const [alertModal, setAlertModal] = useState<{
@@ -424,6 +498,29 @@ export default function Home() {
     vllm: boolean
     sglang: boolean
   }>({ transformers: true, vllm: false, sglang: false })
+  
+  // Conflict Resolution Modal state - handles training/inference conflicts
+  const [conflictState, setConflictState] = useState<ConflictState>(initialConflictState)
+  const [conflictLoading, setConflictLoading] = useState(false)
+  
+  // Enhanced inference status with model type info
+  const [detailedInferenceStatus, setDetailedInferenceStatus] = useState<{
+    model_loaded: boolean
+    model_path: string | null
+    adapter_path: string | null
+    model_type: ModelType
+    backend: string | null
+    memory_used_gb: number
+    loaded_adapters: string[]
+  }>({
+    model_loaded: false,
+    model_path: null,
+    adapter_path: null,
+    model_type: 'full',
+    backend: null,
+    memory_used_gb: 0,
+    loaded_adapters: []
+  })
   
   // System metrics state - null means data not available
   const [systemMetrics, setSystemMetrics] = useState<SystemMetrics>({
@@ -591,6 +688,7 @@ export default function Home() {
   
   const chatEndRef = useRef<HTMLDivElement>(null)
   const logsEndRef = useRef<HTMLDivElement>(null)
+  const terminalContainerRef = useRef<HTMLDivElement>(null) // Container ref for terminal scroll
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Fetch datasets on mount and when on step 2
@@ -833,6 +931,98 @@ export default function Home() {
     }
   }, [])
 
+  // Handle dataset type change - auto-reset training method when dataset type changes
+  const handleDatasetTypeChange = useCallback((typeInfo: typeof datasetTypeInfo) => {
+    setDatasetTypeInfo(typeInfo)
+    
+    if (!typeInfo || typeInfo.dataset_type === 'unknown') {
+      setPreviousDatasetType(null)
+      return
+    }
+    
+    // Check if dataset type changed and requires resetting training method
+    if (previousDatasetType && previousDatasetType !== typeInfo.dataset_type) {
+      // Dataset type changed - need to reset training method
+      const compatible = typeInfo.compatible_training_methods || []
+      const currentMethod = config.training_method
+      
+      // If current method is not compatible, auto-switch to first compatible method
+      if (!compatible.includes(currentMethod)) {
+        const newMethod = compatible[0] as 'sft' | 'pt' | 'rlhf'
+        
+        setConfig(prev => ({
+          ...prev,
+          training_method: newMethod,
+          // Reset RLHF type when switching to/from RLHF
+          rlhf_type: newMethod === 'rlhf' ? 'dpo' : null,
+          // PT requires full training
+          train_type: newMethod === 'pt' ? 'full' : prev.train_type
+        }))
+        
+        // Show info message to user
+        const methodNames: Record<string, string> = {
+          'sft': 'Supervised Fine-Tuning (SFT)',
+          'rlhf': 'Reinforcement Learning (RLHF)',
+          'pt': 'Pre-Training (PT)'
+        }
+        const datasetTypeNames: Record<string, string> = {
+          'sft': 'instruction-response',
+          'rlhf': 'preference data',
+          'pt': 'raw text',
+          'kto': 'binary feedback'
+        }
+        
+        showAlert(
+          `Dataset format changed to ${datasetTypeNames[typeInfo.dataset_type] || typeInfo.dataset_type}. Training method has been automatically switched to ${methodNames[newMethod]}.`,
+          'info',
+          'Training Method Updated'
+        )
+      }
+    }
+    
+    setPreviousDatasetType(typeInfo.dataset_type)
+  }, [previousDatasetType, config.training_method, showAlert])
+
+  // Fetch model type info when model changes
+  const fetchModelTypeInfo = useCallback(async (modelPath: string) => {
+    if (!modelPath) {
+      setModelTypeInfo(null)
+      return
+    }
+    
+    try {
+      const res = await fetch(`/api/datasets/detect-model-type?model_path=${encodeURIComponent(modelPath)}`)
+      if (res.ok) {
+        const data = await res.json()
+        setModelTypeInfo(data)
+        
+        // Show warning if model is a LoRA adapter
+        if (data.is_adapter && data.warnings && data.warnings.length > 0) {
+          showAlert(
+            data.warnings.join(' '),
+            'warning',
+            'LoRA Adapter Detected'
+          )
+        }
+        
+        // Auto-adjust train_type if needed
+        if (data.is_adapter && config.train_type === 'full') {
+          setConfig(prev => ({
+            ...prev,
+            train_type: 'lora' // Switch to LoRA since full is not available for adapters
+          }))
+          showAlert(
+            'Full fine-tuning is not available for LoRA adapters. Switched to LoRA training.',
+            'info',
+            'Training Type Adjusted'
+          )
+        }
+      }
+    } catch (e) {
+      console.error('Failed to fetch model type info:', e)
+    }
+  }, [config.train_type, showAlert])
+
   // Fetch system capabilities - what this system can fine-tune
   const fetchSystemCapabilities = useCallback(async () => {
     try {
@@ -900,62 +1090,92 @@ export default function Home() {
     }
   }, [])
 
+  // Fetch global training status from the new unified endpoint
+  const fetchGlobalTrainingStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/system/training-status')
+      if (res.ok) {
+        const data: GlobalTrainingStatus = await res.json()
+        setGlobalTrainingStatus(data)
+        
+        // Sync isTraining state with global status
+        const isActive = data.is_training_active && (data.phase === 'running' || data.phase === 'initializing')
+        setIsTraining(isActive)
+        
+        return data
+      }
+    } catch (e) {
+      console.error('Failed to fetch global training status:', e)
+    }
+    return null
+  }, [])
+
   // Check for active training job on page load - restores state after refresh
   const checkActiveTraining = useCallback(async () => {
+    setIsCheckingActiveTraining(true)
     try {
-      const res = await fetch('/api/jobs/current')
-      if (res.ok) {
-        const data = await res.json()
-        
-        // Case 1: We have job info - restore full state
-        if (data.has_active_job && data.job) {
-          const job = data.job
-          setJobStatus({
-            job_id: job.job_id,
-            job_name: job.name || job.job_id,
-            status: job.status,
-            current_step: job.current_step || 0,
-            total_steps: job.total_steps || 0,
-            current_loss: job.current_loss,
-            logs: data.logs || [],
-            error: job.error,
-            learning_rate: job.learning_rate,
-            epoch: job.current_epoch,
-            total_epochs: job.total_epochs,
-          })
-          setTrainingLogs(data.logs || [])
-          setIsTraining(job.status === 'running' || job.status === 'initializing')
-          setCurrentStep(5) // Go to training progress view
-          console.log('Restored active training:', job.job_id)
-        }
-        // Case 2: Training process running but job state lost (fallback)
-        else if (data.has_active_job && data.process_running && !data.job) {
-          // Show a minimal training view - process is running in background
-          setJobStatus({
-            job_id: data.process_pid ? `pid-${data.process_pid}` : 'unknown',
-            job_name: 'Training in Progress',
-            status: 'running',
-            current_step: 0,
-            total_steps: 0,
-            current_loss: null,
-            logs: [],
-            error: null,
-          })
-          setTrainingLogs([
-            'Training process detected running in background.',
-            data.message || 'Job state was lost but training continues.',
-            `Process ID: ${data.process_pid || 'unknown'}`,
-            'Please wait for training to complete or stop it manually.'
-          ])
-          setIsTraining(true)
-          setCurrentStep(5)
-          console.log('Detected running training process:', data.process_pid)
+      // First, fetch global training status (new unified endpoint)
+      const globalStatus = await fetchGlobalTrainingStatus()
+      
+      // If training is active according to global status, restore the UI state
+      if (globalStatus?.is_training_active) {
+        // Fetch detailed job info
+        const res = await fetch('/api/jobs/current')
+        if (res.ok) {
+          const data = await res.json()
+          
+          // Case 1: We have job info - restore full state
+          if (data.has_active_job && data.job) {
+            const job = data.job
+            setJobStatus({
+              job_id: job.job_id,
+              job_name: job.name || job.job_id,
+              status: job.status,
+              current_step: job.current_step || 0,
+              total_steps: job.total_steps || 0,
+              current_loss: job.current_loss,
+              logs: data.logs || [],
+              error: job.error,
+              learning_rate: job.learning_rate,
+              epoch: job.current_epoch,
+              total_epochs: job.total_epochs,
+            })
+            setTrainingLogs(data.logs || [])
+            setIsTraining(job.status === 'running' || job.status === 'initializing')
+            setCurrentStep(5) // Go to training progress view
+            console.log('Restored active training:', job.job_id)
+          }
+          // Case 2: Training process running but job state lost (fallback)
+          else if (globalStatus.process_running) {
+            // Show a minimal training view - process is running in background
+            setJobStatus({
+              job_id: globalStatus.process_pid ? `pid-${globalStatus.process_pid}` : 'unknown',
+              job_name: globalStatus.job_name || 'Training in Progress',
+              status: 'running',
+              current_step: globalStatus.progress.current_step,
+              total_steps: globalStatus.progress.total_steps,
+              current_loss: globalStatus.progress.current_loss,
+              logs: [],
+              error: null,
+            })
+            setTrainingLogs([
+              'Training process detected running in background.',
+              globalStatus.status_message,
+              `Process ID: ${globalStatus.process_pid || 'unknown'}`,
+              'Please wait for training to complete or stop it manually.'
+            ])
+            setIsTraining(true)
+            setCurrentStep(5)
+            console.log('Detected running training process:', globalStatus.process_pid)
+          }
         }
       }
     } catch (e) {
       console.error('Failed to check active training:', e)
+    } finally {
+      setIsCheckingActiveTraining(false)
     }
-  }, [])
+  }, [fetchGlobalTrainingStatus])
 
   // Check system expiration FIRST on mount - blocks everything if expired
   useEffect(() => {
@@ -988,8 +1208,12 @@ export default function Home() {
   useEffect(() => {
     if (config.model_path) {
       fetchModelInfo(config.model_path, config.model_source)
+      // Also fetch model type info for LoRA adapter detection
+      if (config.model_source === 'local') {
+        fetchModelTypeInfo(config.model_path)
+      }
     }
-  }, [config.model_path, config.model_source, fetchModelInfo])
+  }, [config.model_path, config.model_source, fetchModelInfo, fetchModelTypeInfo])
 
   // Auto-set vLLM mode based on GPU count when selecting online RL algorithms
   // - Colocate mode (default) for 2+ GPUs: Training and inference share GPUs
@@ -1020,6 +1244,21 @@ export default function Home() {
       return () => clearInterval(interval)
     }
   }, [isTraining, mainTab, fetchSystemMetrics])
+
+  // Poll global training status - keeps UI in sync with backend state
+  // This is critical for detecting training state on page refresh and keeping UI responsive
+  useEffect(() => {
+    if (systemExpired) return
+    
+    // Initial fetch
+    fetchGlobalTrainingStatus()
+    
+    // Poll every 2 seconds when training is active, every 5 seconds when idle
+    const pollInterval = isTraining ? 2000 : 5000
+    const interval = setInterval(fetchGlobalTrainingStatus, pollInterval)
+    
+    return () => clearInterval(interval)
+  }, [fetchGlobalTrainingStatus, isTraining, systemExpired])
 
   // Poll for job status - CRITICAL for detecting failures
   // This is the primary way to detect when training completes/fails
@@ -1589,7 +1828,11 @@ export default function Home() {
   }, [jobStatus?.job_id, isTraining, jobStatus?.status])
 
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    // Scroll only the terminal container, NOT the entire page
+    // This allows user to view graphs while terminal logs scroll independently
+    if (terminalContainerRef.current) {
+      terminalContainerRef.current.scrollTop = terminalContainerRef.current.scrollHeight
+    }
   }, [trainingLogs])
   
   useEffect(() => {
@@ -1757,6 +2000,66 @@ export default function Home() {
     }
   }
 
+  // Actual training start logic - called after conflict resolution
+  const executeStartTraining = async () => {
+    try {
+      setIsStartingTraining(true)
+      setTrainingLogs([])
+      setLoadingMessage('Preparing for training...')
+      
+      // Step 1: Clean GPU memory before training to ensure maximum available VRAM
+      setLoadingMessage('Cleaning GPU memory before training...')
+      await deepCleanMemory()
+      
+      // Refresh inference status to confirm it's cleared
+      await fetchInferenceStatus()
+      
+      // Create job with combined dataset path and optional custom name
+      const jobConfig = {
+        ...config,
+        dataset_path: config.dataset_paths.join(','),
+        name: trainingName.trim() || undefined,
+      }
+      
+      const createRes = await fetch('/api/jobs/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(jobConfig),
+      })
+      if (!createRes.ok) {
+        const errData = await createRes.json().catch(() => ({}))
+        throw new Error(errData.detail || `Create failed: ${createRes.status}`)
+      }
+      const job = await createRes.json()
+      
+      const startRes = await fetch(`/api/jobs/${job.job_id}/start`, {
+        method: 'POST',
+      })
+      if (!startRes.ok) throw new Error(`Start failed: ${startRes.status}`)
+      
+      setJobStatus({
+        job_id: job.job_id,
+        job_name: job.name || job.job_id,
+        status: 'initializing',
+        current_step: 0,
+        total_steps: 0,
+        current_loss: null,
+        logs: [],
+        error: null,
+      })
+      setIsTraining(true)
+      setCurrentStep(5)
+      setLoadingMessage('')
+      
+    } catch (e) {
+      console.error('Training start failed:', e)
+      showAlert(`Failed to start training: ${getErrorMessage(e)}`, 'error', 'Training Failed')
+    } finally {
+      setIsStartingTraining(false)
+      setLoadingMessage('')
+    }
+  }
+
   const startTraining = async () => {
     if (config.dataset_paths.length === 0) {
       showAlert('Please select at least one dataset for training', 'warning', 'Dataset Required')
@@ -1783,59 +2086,61 @@ export default function Home() {
       return
     }
     
-    try {
-      setIsStartingTraining(true)
-      setTrainingLogs([])
-      setLoadingMessage('Preparing for training...')
-      
-      // Step 1: Clean GPU memory before training to ensure maximum available VRAM
-      setLoadingMessage('Cleaning GPU memory before training...')
-      await deepCleanMemory()
-      
-      // Create job with combined dataset path and optional custom name
-      const jobConfig = {
-        ...config,
-        dataset_path: config.dataset_paths.join(','),
-        // Include training name if provided (empty = auto-generate)
-        name: trainingName.trim() || undefined,
-      }
-      
-      const createRes = await fetch('/api/jobs/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(jobConfig),
+    // Refresh inference status to get latest state - use returned data directly (avoids async state issues)
+    const currentInferenceStatus = await fetchInferenceStatus()
+    
+    // CRITICAL: Check if inference is loaded - need confirmation to stop it first
+    if (currentInferenceStatus?.model_loaded) {
+      // Show conflict resolution modal
+      setConflictState({
+        isOpen: true,
+        conflictType: 'training_while_inference',
+        context: {
+          currentModelPath: currentInferenceStatus.model_path || undefined,
+          currentModelName: currentInferenceStatus.model_path?.split('/').pop() || undefined,
+          currentAdapterPath: currentInferenceStatus.adapter_path || undefined,
+          currentAdapterName: currentInferenceStatus.adapter_path?.split('/').pop() || undefined,
+          currentModelType: currentInferenceStatus.model_type,
+          currentBackend: currentInferenceStatus.backend || undefined,
+          memoryUsedGB: currentInferenceStatus.memory_used_gb,
+        },
+        onResolve: () => {
+          // User confirmed to stop inference and start training
+          setConflictState(initialConflictState)
+          executeStartTraining()
+        }
       })
-      if (!createRes.ok) {
-        const errData = await createRes.json().catch(() => ({}))
-        throw new Error(errData.detail || `Create failed: ${createRes.status}`)
-      }
-      const job = await createRes.json()
-      
-      const startRes = await fetch(`/api/jobs/${job.job_id}/start`, {
-        method: 'POST',
-      })
-      if (!startRes.ok) throw new Error(`Start failed: ${startRes.status}`)
-      
-      setJobStatus({
-        job_id: job.job_id,
-        job_name: job.name, // Store the job name
-        status: 'running',
-        current_step: 0,
-        total_steps: 0,
-        current_loss: null,
-        logs: [],
-        error: null,
-      })
-      setIsTraining(true)
-      setCurrentStep(5)
-      setTrainingName('') // Clear the input after successful creation
-      setLoadingMessage('') // Clear loading message
-    } catch (e) {
-      showAlert(`Failed to start training: ${getErrorMessage(e)}`, 'error', 'Training Failed')
-    } finally {
-      setIsStartingTraining(false)
-      setLoadingMessage('')
+      return
     }
+    
+    // Check if another training is already running
+    const checkRes = await fetch('/api/jobs/current')
+    if (checkRes.ok) {
+      const checkData = await checkRes.json()
+      if (checkData.has_active_job) {
+        // Show conflict resolution modal for training conflict
+        setConflictState({
+          isOpen: true,
+          conflictType: 'training_while_training',
+          context: {
+            trainingJobName: checkData.job?.name || 'Unknown',
+            trainingModel: checkData.job?.config?.model_path?.split('/').pop() || undefined,
+            trainingProgress: checkData.job?.total_steps > 0 
+              ? (checkData.job.current_step / checkData.job.total_steps * 100) 
+              : undefined,
+          },
+          onResolve: () => {
+            // Just close and go to training view
+            setConflictState(initialConflictState)
+            setCurrentStep(5)
+          }
+        })
+        return
+      }
+    }
+    
+    // No conflicts - start training directly
+    executeStartTraining()
   }
 
   // Show confirmation before stopping training
@@ -1876,8 +2181,8 @@ export default function Home() {
     setTrainingMetrics([])
   }
 
-  // Inference functions
-  const fetchInferenceStatus = async () => {
+  // Inference functions - Returns the fetched data for immediate use (avoids async state issues)
+  const fetchInferenceStatus = async (): Promise<typeof detailedInferenceStatus | null> => {
     try {
       const res = await fetch('/api/inference/status')
       if (res.ok) {
@@ -1887,9 +2192,37 @@ export default function Home() {
         if (data.available_backends) {
           setAvailableBackends(data.available_backends)
         }
+        
+        // Update detailed inference status for conflict resolution
+        // Determine model type based on adapter presence and path patterns
+        let modelType: ModelType = 'full'
+        if (data.adapter_path) {
+          if (data.adapter_path.toLowerCase().includes('qlora')) {
+            modelType = 'qlora'
+          } else if (data.adapter_path.toLowerCase().includes('lora')) {
+            modelType = 'lora'
+          } else {
+            modelType = 'adapter'
+          }
+        }
+        
+        const detailedStatus = {
+          model_loaded: data.model_loaded || false,
+          model_path: data.model_path || null,
+          adapter_path: data.adapter_path || null,
+          model_type: modelType,
+          backend: data.backend || null,
+          memory_used_gb: data.memory_used_gb || 0,
+          loaded_adapters: data.loaded_adapters || []
+        }
+        
+        setDetailedInferenceStatus(detailedStatus)
+        return detailedStatus // Return for immediate use
       }
+      return null
     } catch (e) {
       console.error('Failed to fetch inference status:', e)
+      return null
     }
   }
   
@@ -1945,21 +2278,21 @@ export default function Home() {
     }
   }
 
-  // Load model for inference (basic - used by inference page input)
-  const loadModel = async () => {
-    if (!inferenceModel.trim()) return
+  // Actual model loading logic - called after conflict resolution
+  const executeLoadModel = async (modelPath: string, adapterPathToLoad?: string) => {
     setIsModelLoading(true)
     setLoadingMessage('Loading model...')
     try {
       // First clean memory
       await deepCleanMemory()
       
-      setLoadingMessage(`Loading base model with ${inferenceBackend} backend...`)
+      setLoadingMessage(`Loading model with ${inferenceBackend} backend...`)
       const res = await fetch('/api/inference/load', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          model_path: inferenceModel,
+          model_path: modelPath,
+          adapter_path: adapterPathToLoad || undefined,
           backend: inferenceBackend 
         })
       })
@@ -1967,7 +2300,12 @@ export default function Home() {
       if (data.success) {
         await fetchInferenceStatus()
       } else {
-        showAlert(`Failed to load model: ${data.error || 'Unknown error'}`, 'error', 'Model Load Failed')
+        // Check if blocked by training
+        if (data.blocked_by_training) {
+          showAlert('Cannot load model while training is in progress. Please wait for training to complete.', 'error', 'Blocked by Training')
+        } else {
+          showAlert(`Failed to load model: ${data.error || 'Unknown error'}`, 'error', 'Model Load Failed')
+        }
       }
     } catch (e) {
       showAlert(`Failed to load model: ${getErrorMessage(e)}`, 'error', 'Model Load Failed')
@@ -1977,13 +2315,115 @@ export default function Home() {
     }
   }
 
+  // Load model for inference (basic - used by inference page input)
+  const loadModel = async () => {
+    if (!inferenceModel.trim()) return
+    
+    // Refresh statuses to get latest state - use returned data directly (avoids async state issues)
+    const currentInferenceStatus = await fetchInferenceStatus()
+    const currentTrainingStatus = await fetchGlobalTrainingStatus()
+    
+    // CRITICAL: Check if training is in progress - block loading
+    if (currentTrainingStatus?.is_training_active) {
+      setConflictState({
+        isOpen: true,
+        conflictType: 'inference_while_training',
+        context: {
+          trainingJobName: currentTrainingStatus.job_name || 'Unknown',
+          trainingModel: currentTrainingStatus.model_name || undefined,
+          trainingProgress: currentTrainingStatus.progress?.progress_percent,
+        },
+        onResolve: () => {
+          // Just close and go to training view
+          setConflictState(initialConflictState)
+          setCurrentStep(5)
+          setMainTab('train')
+        }
+      })
+      return
+    }
+    
+    // Check if another model is already loaded - need confirmation to replace
+    if (currentInferenceStatus?.model_loaded) {
+      // Determine if this is a different model
+      const isSameModel = currentInferenceStatus.model_path === inferenceModel
+      const isSameAdapter = currentInferenceStatus.adapter_path === adapterPath
+      
+      // If loading the exact same model and adapter, no need to confirm
+      if (isSameModel && isSameAdapter) {
+        showAlert('This model is already loaded.', 'info', 'Model Already Loaded')
+        return
+      }
+      
+      // Determine new model type
+      let newModelType: ModelType = 'full'
+      if (adapterPath) {
+        if (adapterPath.toLowerCase().includes('qlora')) {
+          newModelType = 'qlora'
+        } else if (adapterPath.toLowerCase().includes('lora')) {
+          newModelType = 'lora'
+        } else {
+          newModelType = 'adapter'
+        }
+      }
+      
+      // Show conflict resolution modal
+      setConflictState({
+        isOpen: true,
+        conflictType: 'new_inference_replace',
+        context: {
+          currentModelPath: currentInferenceStatus.model_path || undefined,
+          currentModelName: currentInferenceStatus.model_path?.split('/').pop() || undefined,
+          currentAdapterPath: currentInferenceStatus.adapter_path || undefined,
+          currentAdapterName: currentInferenceStatus.adapter_path?.split('/').pop() || undefined,
+          currentModelType: currentInferenceStatus.model_type,
+          currentBackend: currentInferenceStatus.backend || undefined,
+          memoryUsedGB: currentInferenceStatus.memory_used_gb,
+          newModelPath: inferenceModel,
+          newModelName: inferenceModel.split('/').pop() || undefined,
+          newAdapterPath: adapterPath || undefined,
+          newAdapterName: adapterPath?.split('/').pop() || undefined,
+          newModelType: newModelType,
+        },
+        onResolve: () => {
+          setConflictState(initialConflictState)
+          executeLoadModel(inferenceModel, adapterPath || undefined)
+        }
+      })
+      return
+    }
+    
+    // No conflicts - load model directly
+    executeLoadModel(inferenceModel, adapterPath || undefined)
+  }
+
   // Comprehensive load model with adapter - used after training or from history
   // Handles different training types:
   // - LoRA/QLoRA/AdaLoRA: Load base model with adapter
   // - Full fine-tuning: Load output model directly (no adapter)
   // - RLHF with LoRA: Load base model with adapter
   // - RLHF with full: Load output model directly
-  const loadModelForInference = async (modelPath: string, adapterPath?: string, switchToInference: boolean = true) => {
+  const loadModelForInference = async (modelPath: string, adapterPathToLoad?: string, switchToInference: boolean = true) => {
+    // CRITICAL: Check if training is in progress - block loading
+    await fetchGlobalTrainingStatus()
+    if (globalTrainingStatus?.is_training_active) {
+      setConflictState({
+        isOpen: true,
+        conflictType: 'inference_while_training',
+        context: {
+          trainingJobName: globalTrainingStatus.job_name || 'Unknown',
+          trainingModel: globalTrainingStatus.model_name || undefined,
+          trainingProgress: globalTrainingStatus.progress?.progress_percent,
+        },
+        onResolve: () => {
+          setConflictState(initialConflictState)
+          setCurrentStep(5)
+          setMainTab('train')
+        }
+      })
+      return false
+    }
+    
     setIsModelLoading(true)
     setLoadingMessage('Preparing to load model...')
     
@@ -1997,9 +2437,9 @@ export default function Home() {
       
       // Step 2: Load model (with or without adapter based on training type)
       // Note: LoRA adapters only work with transformers backend
-      const backendToUse = adapterPath ? 'transformers' : inferenceBackend
+      const backendToUse = adapterPathToLoad ? 'transformers' : inferenceBackend
       
-      if (adapterPath) {
+      if (adapterPathToLoad) {
         // LoRA-type training: Load base model with adapter in single call
         setLoadingMessage(`Loading model with adapter: ${getModelDisplayName(modelPath)}...`)
         const loadRes = await fetch('/api/inference/load', {
@@ -2007,22 +2447,27 @@ export default function Home() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ 
             model_path: modelPath,
-            adapter_path: adapterPath,
+            adapter_path: adapterPathToLoad,
             backend: backendToUse
           })
         })
         const loadData = await loadRes.json()
         
         if (!loadData.success) {
-          showAlert(`Failed to load model with adapter: ${loadData.error || 'Unknown error'}`, 'error', 'Model Load Failed')
+          // Check if blocked by training
+          if (loadData.blocked_by_training) {
+            showAlert('Cannot load model while training is in progress. Please wait for training to complete.', 'error', 'Blocked by Training')
+          } else {
+            showAlert(`Failed to load model with adapter: ${loadData.error || 'Unknown error'}`, 'error', 'Model Load Failed')
+          }
           return false
         }
         
         // Add to loaded adapters list for UI tracking
         const newAdapter: LoadedAdapter = {
           id: `adapter-${Date.now()}`,
-          name: adapterPath.split('/').pop() || 'fine-tuned',
-          path: adapterPath,
+          name: adapterPathToLoad.split('/').pop() || 'fine-tuned',
+          path: adapterPathToLoad,
           active: true
         }
         setLoadedAdapters(prev => [...prev.map(a => ({ ...a, active: false })), newAdapter])
@@ -2040,7 +2485,12 @@ export default function Home() {
         const loadData = await loadRes.json()
         
         if (!loadData.success) {
-          showAlert(`Failed to load model: ${loadData.error || 'Unknown error'}`, 'error', 'Model Load Failed')
+          // Check if blocked by training
+          if (loadData.blocked_by_training) {
+            showAlert('Cannot load model while training is in progress. Please wait for training to complete.', 'error', 'Blocked by Training')
+          } else {
+            showAlert(`Failed to load model: ${loadData.error || 'Unknown error'}`, 'error', 'Model Load Failed')
+          }
           return false
         }
         
@@ -2050,8 +2500,8 @@ export default function Home() {
       
       // Step 4: Update UI state
       setInferenceModel(modelPath)
-      if (adapterPath) {
-        setAdapterPath(adapterPath)
+      if (adapterPathToLoad) {
+        setAdapterPath(adapterPathToLoad)
       }
       await fetchInferenceStatus()
       
@@ -2371,6 +2821,107 @@ export default function Home() {
   // Check if training should be locked due to hardware issues
   const isTrainingLocked = hardwareStatus.checked && !hardwareStatus.can_train
 
+  // Training Status Banner - Shows prominently when training is active
+  // This is the MAIN indicator that training is in progress
+  const TrainingStatusBanner = () => {
+    if (!globalTrainingStatus?.is_training_active) return null
+    
+    const { phase, job_name, progress, status_message, model_name } = globalTrainingStatus
+    const progressPercent = progress?.progress_percent || 0
+    const isInitializing = phase === 'initializing'
+    
+    return (
+      <div className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white">
+        <div className="max-w-7xl mx-auto px-4 py-3">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            {/* Left side - Status info */}
+            <div className="flex items-center gap-3">
+              <div className="relative">
+                <div className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center">
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                </div>
+                {/* Pulsing ring */}
+                <div className="absolute inset-0 rounded-full bg-white/30 animate-ping" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold">
+                    {isInitializing ? 'Initializing Training...' : 'Training in Progress'}
+                  </span>
+                  {job_name && (
+                    <span className="text-white/80 text-sm">• {job_name}</span>
+                  )}
+                </div>
+                <p className="text-sm text-white/80">
+                  {status_message}
+                  {model_name && <span className="ml-2 text-white/60">({model_name})</span>}
+                </p>
+              </div>
+            </div>
+            
+            {/* Right side - Progress bar and controls */}
+            <div className="flex items-center gap-4">
+              {/* Progress */}
+              {progress?.total_steps > 0 && (
+                <div className="flex items-center gap-3">
+                  <div className="w-32 h-2 bg-white/20 rounded-full overflow-hidden">
+                    <div 
+                      className="h-full bg-white rounded-full transition-all duration-500"
+                      style={{ width: `${Math.min(progressPercent, 100)}%` }}
+                    />
+                  </div>
+                  <span className="text-sm font-medium min-w-[3rem]">
+                    {progressPercent.toFixed(1)}%
+                  </span>
+                </div>
+              )}
+              
+              {/* View Training button */}
+              {currentStep !== 5 && (
+                <button
+                  onClick={() => setCurrentStep(5)}
+                  className="px-3 py-1.5 bg-white/20 hover:bg-white/30 rounded-lg text-sm font-medium transition-colors flex items-center gap-1"
+                >
+                  <Activity className="w-4 h-4" />
+                  View
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // Blocked Action Banner - Shows when user tries to do something blocked by training
+  const BlockedByTrainingBanner = ({ action }: { action: 'job' | 'inference' }) => {
+    if (!globalTrainingStatus?.is_training_active) return null
+    
+    const message = action === 'job' 
+      ? 'Cannot create new training jobs while another training is in progress.'
+      : 'Cannot load inference models while training is in progress.'
+    
+    return (
+      <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-4">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center flex-shrink-0">
+            <Lock className="w-5 h-5 text-amber-600" />
+          </div>
+          <div>
+            <h4 className="font-medium text-amber-900">Action Blocked</h4>
+            <p className="text-sm text-amber-700">{message}</p>
+            <p className="text-xs text-amber-600 mt-1">
+              Training: <strong>{globalTrainingStatus.job_name || 'Unknown'}</strong> 
+              {globalTrainingStatus.progress?.progress_percent > 0 && 
+                ` (${globalTrainingStatus.progress.progress_percent.toFixed(1)}% complete)`
+              }
+            </p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-white">
       {/* Shimmer Animation Styles */}
@@ -2475,6 +3026,9 @@ export default function Home() {
 
       {/* Hardware Error Banner - Shows when no NVIDIA GPU detected */}
       <HardwareErrorBanner />
+      
+      {/* Training Status Banner - Shows prominently when training is active */}
+      <TrainingStatusBanner />
 
       {/* Header - Light Theme with Blue Accents */}
       <header className="bg-white border-b border-slate-200 shadow-sm sticky top-0 z-40">
@@ -2532,7 +3086,7 @@ export default function Home() {
                   <span>VRAM: {systemMetrics.gpu_memory_used.toFixed(1)}/{systemMetrics.gpu_memory_total.toFixed(0)}GB{systemMetrics.device_count && systemMetrics.device_count > 1 ? ` (${systemMetrics.device_count} GPUs)` : ''}</span>
                 </div>
               )}
-              <div className="text-slate-500">Powered by US Inc</div>
+              <div className="text-slate-500">Powered by <a href="https://us.inc" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline font-medium">Ultrasafe AI</a></div>
             </div>
           </div>
           
@@ -3162,12 +3716,15 @@ export default function Home() {
                 </div>
               )}
               
-              {/* Terminal Logs */}
+              {/* Terminal Logs - Only this container scrolls, NOT the page */}
               <div className="bg-slate-900 rounded-lg border border-slate-700 flex flex-col h-64">
                 <div className="flex-shrink-0 px-3 py-2 border-b border-slate-700 text-slate-500 text-[10px] bg-slate-900 rounded-t-lg">
                   TERMINAL OUTPUT ({trainingLogs.length} lines)
                 </div>
-                <div className="flex-1 overflow-y-auto p-3 font-mono text-xs text-green-400">
+                <div 
+                  ref={terminalContainerRef}
+                  className="flex-1 overflow-y-auto p-3 font-mono text-xs text-green-400"
+                >
                   {trainingLogs.length === 0 ? (
                     <div className="text-slate-500 text-center py-4">Waiting for training output...</div>
                   ) : (
@@ -3580,6 +4137,7 @@ export default function Home() {
                     selectedPaths={config.dataset_paths}
                     onSelectionChange={(paths) => setConfig(prev => ({ ...prev, dataset_paths: paths }))}
                     onShowAlert={showAlert}
+                    onDatasetTypeChange={handleDatasetTypeChange}
                   />
                 </div>
               )}
@@ -3609,6 +4167,8 @@ export default function Home() {
                     availableGpus={availableGpus}
                     modelContextLength={modelContextLength}
                     featureFlags={featureFlags}
+                    datasetTypeInfo={datasetTypeInfo}
+                    modelTypeInfo={modelTypeInfo}
                   />
                 </div>
               )}
@@ -3735,8 +4295,19 @@ export default function Home() {
                     </p>
                   </div>
                   
+                  {/* Training already in progress warning */}
+                  {isTraining && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-700 flex items-center gap-2">
+                      <Loader2 className="w-5 h-5 flex-shrink-0 animate-spin" />
+                      <div>
+                        <strong>Training in progress:</strong> A training job is currently running.
+                        <span className="block text-xs mt-1">Please wait for it to complete or stop it from the Training History.</span>
+                      </div>
+                    </div>
+                  )}
+                  
                   {/* System status warning */}
-                  {systemStatus.status !== 'live' && (
+                  {systemStatus.status !== 'live' && !isTraining && (
                     <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700 flex items-center gap-2">
                       <XCircle className="w-5 h-5 flex-shrink-0" />
                       <div>
@@ -3747,9 +4318,9 @@ export default function Home() {
                   )}
                   
                   <button onClick={startTraining}
-                    disabled={config.dataset_paths.length === 0 || systemStatus.status !== 'live' || isStartingTraining}
+                    disabled={config.dataset_paths.length === 0 || systemStatus.status !== 'live' || isStartingTraining || isCheckingActiveTraining || isTraining}
                     className="w-full py-4 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-semibold text-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg">
-                    <Zap className="w-5 h-5" /> {isStartingTraining ? 'Starting...' : (systemStatus.status === 'live' ? 'Start Training' : 'System Not Ready')}
+                    <Zap className="w-5 h-5" /> {isCheckingActiveTraining ? 'Checking...' : isStartingTraining ? 'Starting...' : isTraining ? 'Training in Progress' : (systemStatus.status === 'live' ? 'Start Training' : 'System Not Ready')}
                   </button>
                 </div>
               )}
@@ -3774,234 +4345,36 @@ export default function Home() {
         )}
 
         {/* ===================== INFERENCE TAB ===================== */}
-        {/* Only show when NOT training */}
-        {mainTab === 'inference' && !isTraining && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            {/* Left Panel - Model & Settings */}
-            <div className="bg-white rounded-xl border border-slate-200 shadow-lg p-4 space-y-4">
-              <h3 className="font-bold text-slate-900 flex items-center gap-2">
-                <Cpu className="w-5 h-5 text-blue-500" /> Model Settings
-              </h3>
-              
-              {/* Model Loading */}
-              <div className="space-y-2">
-                <label className="block text-sm font-medium text-slate-700">Base Model</label>
-                <input type="text" value={inferenceModel}
-                  onChange={(e) => setInferenceModel(e.target.value)}
-                  placeholder="/path/to/model"
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-slate-900 text-sm placeholder-slate-400" />
-                
-                {/* Backend Selection */}
-                <div className="flex items-center gap-2">
-                  <label className="text-xs text-slate-500 whitespace-nowrap">Backend:</label>
-                  <select 
-                    value={inferenceBackend}
-                    onChange={(e) => setInferenceBackend(e.target.value as 'transformers' | 'vllm' | 'sglang')}
-                    className="flex-1 px-2 py-1.5 border border-slate-300 rounded-lg text-slate-900 text-xs bg-white"
-                  >
-                    <option value="transformers" disabled={!availableBackends.transformers}>
-                      Transformers {!availableBackends.transformers && '(unavailable)'}
-                    </option>
-                    <option value="vllm" disabled={!availableBackends.vllm}>
-                      vLLM {!availableBackends.vllm && '(unavailable)'}
-                    </option>
-                    <option value="sglang" disabled={!availableBackends.sglang}>
-                      SGLang {!availableBackends.sglang && '(unavailable)'}
-                    </option>
-                  </select>
-                </div>
-                {inferenceBackend !== 'transformers' && (
-                  <p className="text-xs text-amber-600">Note: LoRA adapters only work with Transformers backend</p>
-                )}
-                
-                <button onClick={loadModel} disabled={!inferenceModel.trim() || isModelLoading}
-                  className="w-full py-2 bg-blue-500 text-white rounded-lg text-sm font-medium hover:bg-blue-600 disabled:opacity-50 flex items-center justify-center gap-2">
-                  {isModelLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                  {isModelLoading ? 'Loading...' : 'Load Model'}
-                </button>
+        {/* Show blocked message when training is active */}
+        {mainTab === 'inference' && isTraining && (
+          <div className="bg-white rounded-xl border border-slate-200 shadow-lg p-6">
+            <BlockedByTrainingBanner action="inference" />
+            <div className="text-center py-8">
+              <div className="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <Lock className="w-8 h-8 text-amber-600" />
               </div>
-              
-              {/* Adapter Management */}
-              <div className="border-t border-slate-200 pt-4 space-y-2">
-                <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
-                  <Layers className="w-4 h-4 text-blue-500" /> LoRA Adapters
-                </label>
-                <div className="flex gap-2">
-                  <input type="text" value={adapterPath}
-                    onChange={(e) => setAdapterPath(e.target.value)}
-                    placeholder="/path/to/adapter"
-                    disabled={!inferenceStatus.model_loaded}
-                    className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-slate-900 text-sm placeholder-slate-400 disabled:opacity-50" />
-                  <button onClick={loadAdapter} disabled={!adapterPath.trim() || !inferenceStatus.model_loaded}
-                    className="px-3 py-2 bg-blue-50 text-blue-600 border border-blue-200 rounded-lg text-sm font-medium hover:bg-blue-100 disabled:opacity-50">
-                    Load
-                  </button>
-                </div>
-                {loadedAdapters.length > 0 && (
-                  <div className="space-y-1 mt-2">
-                    {loadedAdapters.map(adapter => (
-                      <div key={adapter.id} className={`flex items-center gap-2 p-2 rounded-lg text-xs ${adapter.active ? 'bg-blue-50 border border-blue-200' : 'bg-slate-50'}`}>
-                        <button onClick={() => switchAdapter(adapter.id)} className={`w-4 h-4 rounded-full border-2 ${adapter.active ? 'bg-blue-500 border-blue-500' : 'border-slate-300'}`} />
-                        <span className="flex-1 text-slate-700 truncate">{adapter.name}</span>
-                        <button onClick={() => removeAdapter(adapter.id)} className="text-slate-400 hover:text-red-500"><X className="w-3 h-3" /></button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-              
-              {/* Chat Mode Toggle */}
-              <div className="border-t border-slate-200 pt-4">
-                <label className="block text-sm font-medium text-slate-700 mb-2">Mode</label>
-                <div className="flex gap-2">
-                  <button onClick={() => setChatMode('chat')}
-                    className={`flex-1 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-1 ${chatMode === 'chat' ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-600'}`}>
-                    <MessageSquare className="w-4 h-4" /> Chat
-                  </button>
-                  <button onClick={() => setChatMode('completion')}
-                    className={`flex-1 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-1 ${chatMode === 'completion' ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-600'}`}>
-                    <FileText className="w-4 h-4" /> Complete
-                  </button>
-                </div>
-                {chatMode === 'chat' && (
-                  <div className="mt-2 flex items-center gap-2">
-                    <button onClick={() => setKeepHistory(!keepHistory)} className="text-slate-500 hover:text-slate-900">
-                      {keepHistory ? <ToggleRight className="w-5 h-5 text-blue-500" /> : <ToggleLeft className="w-5 h-5" />}
-                    </button>
-                    <span className="text-xs text-slate-500">Keep conversation history</span>
-                  </div>
-                )}
-              </div>
-              
-              {/* Generation Settings */}
-              <div className="border-t border-slate-200 pt-4">
-                <h4 className="text-sm font-medium text-slate-700 mb-2">Generation</h4>
-                <div className="space-y-3">
-                  <div>
-                    <div className="flex justify-between text-xs text-slate-500 mb-1">
-                      <span>Max Tokens</span><span>{inferenceSettings.max_new_tokens} / {modelContextLength.toLocaleString()}</span>
-                    </div>
-                    <input type="range" min="64" max={modelContextLength} value={inferenceSettings.max_new_tokens}
-                      onChange={(e) => setInferenceSettings({ ...inferenceSettings, max_new_tokens: parseInt(e.target.value) })}
-                      className="w-full accent-blue-500" />
-                  </div>
-                  <div>
-                    <div className="flex justify-between text-xs text-slate-500 mb-1">
-                      <span>Temperature</span><span>{inferenceSettings.temperature}</span>
-                    </div>
-                    <input type="range" min="0" max="2" step="0.1" value={inferenceSettings.temperature}
-                      onChange={(e) => setInferenceSettings({ ...inferenceSettings, temperature: parseFloat(e.target.value) })}
-                      className="w-full accent-blue-500" />
-                  </div>
-                </div>
-              </div>
-              
-              {/* System Status - only show actual data */}
-              <div className="border-t border-slate-200 pt-4">
-                <h4 className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
-                  <Monitor className="w-4 h-4 text-green-500" /> System Status
-                </h4>
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <div className="bg-slate-50 rounded-lg p-2 text-center border border-slate-200">
-                    <Gauge className={`w-4 h-4 mx-auto mb-1 ${systemMetrics.available && systemMetrics.gpu_utilization !== null ? 'text-blue-500' : 'text-slate-400'}`} />
-                    <span className="text-slate-500">GPU</span>
-                    <p className={`font-medium ${systemMetrics.available && systemMetrics.gpu_utilization !== null ? 'text-slate-900' : 'text-slate-400'}`}>
-                      {systemMetrics.available && systemMetrics.gpu_utilization !== null ? `${systemMetrics.gpu_utilization}%` : 'N/A'}
-                    </p>
-                  </div>
-                  <div className="bg-slate-50 rounded-lg p-2 text-center border border-slate-200">
-                    <HardDrive className={`w-4 h-4 mx-auto mb-1 ${systemMetrics.available && systemMetrics.gpu_memory_used !== null ? 'text-blue-500' : 'text-slate-400'}`} />
-                    <span className="text-slate-500">VRAM</span>
-                    <p className={`font-medium ${systemMetrics.available && systemMetrics.gpu_memory_used !== null ? 'text-slate-900' : 'text-slate-400'}`}>
-                      {systemMetrics.available && systemMetrics.gpu_memory_used !== null ? `${systemMetrics.gpu_memory_used.toFixed(1)}GB` : 'N/A'}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex gap-2 mt-2">
-                  <button onClick={fetchInferenceStatus}
-                    className="flex-1 px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded text-xs font-medium text-slate-600 flex items-center justify-center gap-1">
-                    <RefreshCw className="w-3 h-3" /> Refresh
-                  </button>
-                  <button onClick={clearMemory}
-                    className="flex-1 px-2 py-1 bg-red-50 hover:bg-red-100 text-red-600 rounded text-xs font-medium flex items-center justify-center gap-1">
-                    <Trash2 className="w-3 h-3" /> Clear
-                  </button>
-                </div>
-              </div>
-            </div>
-            
-            {/* Right Panel - Chat Interface */}
-            <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 shadow-lg flex flex-col h-[500px] sm:h-[600px]">
-              <div className="p-4 border-b border-slate-200 flex items-center justify-between">
-                <div>
-                  <h3 className="font-bold text-slate-900">{chatMode === 'chat' ? 'Chat Interface' : 'Text Completion'}</h3>
-                  <p className="text-xs text-slate-500">
-                    {inferenceStatus.model_loaded ? `Model: ${inferenceStatus.model_path?.split('/').pop()}` : 'Load a model to start'}
-                  </p>
-                </div>
-                {chatMode === 'chat' && (
-                  <button onClick={() => setChatMessages([])} className="p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg">
-                    <History className="w-4 h-4" />
-                  </button>
-                )}
-              </div>
-              
-              {/* System Prompt (Chat mode only) */}
-              {chatMode === 'chat' && (
-                <div className="px-4 pt-2">
-                  <input type="text" value={systemPrompt}
-                    onChange={(e) => setSystemPrompt(e.target.value)}
-                    placeholder="System prompt (optional)..."
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-900 text-xs placeholder-slate-400" />
-                </div>
-              )}
-              
-              <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                {chatMessages.length === 0 && (
-                  <div className="text-center text-slate-400 py-10">
-                    <MessageSquare className="w-10 h-10 mx-auto mb-2 opacity-50" />
-                    <p>{inferenceStatus.model_loaded ? 'Start a conversation' : 'Load a model first'}</p>
-                  </div>
-                )}
-                {chatMessages.map((msg, i) => (
-                  <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`max-w-[85%] px-4 py-2 rounded-lg ${
-                      msg.role === 'user' ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-900'
-                    }`}>
-                      <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
-                    </div>
-                  </div>
-                ))}
-                {isGenerating && (
-                  <div className="flex justify-start">
-                    <div className="bg-slate-100 px-4 py-2 rounded-lg">
-                      <Loader2 className="w-5 h-5 animate-spin text-blue-500" />
-                    </div>
-                  </div>
-                )}
-                <div ref={chatEndRef} />
-              </div>
-              
-              <div className="p-4 border-t border-slate-200">
-                <div className="flex gap-2">
-                  <button onClick={() => setChatMessages([])}
-                    className="px-3 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg">
-                    <Trash2 className="w-5 h-5 text-slate-500" />
-                  </button>
-                  <input type="text" value={inputMessage}
-                    onChange={(e) => setInputMessage(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendMessage()}
-                    placeholder={chatMode === 'chat' ? 'Type your message...' : 'Enter text to complete...'}
-                    disabled={!inferenceStatus.model_loaded || isGenerating}
-                    className="flex-1 px-4 py-2 border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:ring-2 focus:ring-blue-500 disabled:opacity-50" />
-                  <button onClick={sendMessage} disabled={!inferenceStatus.model_loaded || !inputMessage.trim() || isGenerating}
-                    className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50">
-                    <Send className="w-5 h-5" />
-                  </button>
-                </div>
-              </div>
+              <h3 className="text-lg font-semibold text-slate-900 mb-2">Inference Unavailable</h3>
+              <p className="text-slate-600 max-w-md mx-auto">
+                Model inference is disabled while training is in progress. This prevents GPU memory conflicts and ensures training stability.
+              </p>
+              <button
+                onClick={() => setCurrentStep(5)}
+                className="mt-6 px-4 py-2 bg-blue-500 text-white rounded-lg font-medium hover:bg-blue-600 flex items-center gap-2 mx-auto"
+              >
+                <Activity className="w-4 h-4" />
+                View Training Progress
+              </button>
             </div>
           </div>
+        )}
+        
+        {/* Only show inference UI when NOT training */}
+        {mainTab === 'inference' && !isTraining && (
+          <InferencePanel
+            systemMetrics={systemMetrics}
+            onRefreshMetrics={fetchSystemMetrics}
+            lockedModels={lockedModels.map(m => ({ name: m.name, path: m.path, modality: m.modality }))}
+          />
         )}
       </main>
 
@@ -4028,6 +4401,22 @@ export default function Home() {
         type={confirmModal.type}
         confirmText={confirmModal.confirmText}
         isLoading={confirmModal.isLoading}
+      />
+      
+      {/* Conflict Resolution Modal - handles training/inference conflicts */}
+      <ConflictResolutionModal
+        isOpen={conflictState.isOpen}
+        onClose={() => setConflictState(initialConflictState)}
+        onConfirm={() => {
+          if (conflictState.onResolve) {
+            setConflictLoading(true)
+            conflictState.onResolve()
+            setConflictLoading(false)
+          }
+        }}
+        conflictType={conflictState.conflictType || 'training_while_inference'}
+        context={conflictState.context}
+        isLoading={conflictLoading}
       />
     </div>
   )

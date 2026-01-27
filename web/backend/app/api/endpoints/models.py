@@ -13,6 +13,7 @@ from ...models.schemas import ModelSource, ModelValidation
 from ...core.database import get_db
 from ...core.capabilities import get_validator
 from ...services.model_registry_service import ModelRegistryService
+from ...services.system_encrypted_log_service import system_encrypted_log
 
 router = APIRouter()
 
@@ -130,6 +131,13 @@ async def validate_model(
             return ModelValidation(valid=True, model_type="remote")
     
     except Exception as e:
+        # Log model validation error (encrypted only)
+        system_encrypted_log.log_model_validation(
+            model_path=model_path,
+            model_source=source.value if hasattr(source, 'value') else str(source),
+            valid=False,
+            reason=str(e)
+        )
         return ModelValidation(valid=False, error="Failed to validate model")
 
 
@@ -542,3 +550,276 @@ async def get_model_info(
     except Exception as e:
         # Return defaults on any error
         return ModelInfo(model_path=model_path)
+
+
+# ============================================================================
+# Model Capabilities Detection Endpoint
+# ============================================================================
+
+class ModelCapabilities(BaseModel):
+    """
+    Model capabilities for inference UI.
+    
+    Defines input/output modalities and backend compatibility.
+    
+    Model Types:
+    - llm: Text-to-text (all backends)
+    - vlm: Image+text to text (transformers, some vllm/sglang)
+    - mllm: Any modality (transformers only)
+    - asr: Audio to text (transformers only)
+    - tts: Text to audio (transformers only)
+    - t2i: Text to image (transformers/diffusers only)
+    - i2i: Image to image (transformers/diffusers only)
+    - t2v: Text to video (transformers only)
+    """
+    # Input capabilities
+    supports_text_input: bool = True
+    supports_image_input: bool = False
+    supports_audio_input: bool = False
+    supports_video_input: bool = False
+    
+    # Output capabilities
+    supports_text_output: bool = True
+    supports_image_output: bool = False
+    supports_audio_output: bool = False
+    supports_video_output: bool = False
+    
+    # Backend compatibility
+    supported_backends: List[str] = ["transformers"]
+    
+    # Other capabilities
+    supports_streaming: bool = True
+    supports_system_prompt: bool = True
+    supports_tool_calls: bool = False
+    max_context_length: int = 4096
+    
+    # Model classification
+    model_type: str = "llm"  # llm, vlm, mllm, asr, tts, t2i, i2i, t2v
+
+
+# Vision-Language Model architectures
+_VLM_ARCHITECTURES = {
+    "qwen2_vl", "qwen2vl", "qwenvl", "llava", "cogvlm", "internvl", 
+    "minicpm", "minicpmv", "phi3v", "phi3_v", "idefics", "idefics2",
+    "fuyu", "paligemma", "pixtral", "molmo", "mllama", "llama3.2-vision"
+}
+
+# Audio/Speech Model architectures
+_AUDIO_ARCHITECTURES = {
+    "whisper", "qwen2audio", "qwen2_audio", "seamless", "mms", 
+    "wav2vec", "hubert", "speecht5"
+}
+
+# Multimodal LLM architectures (text + image + audio + video)
+_MLLM_ARCHITECTURES = {
+    "qwen2.5-omni", "qwen2_5_omni", "gemini", "gpt4o", "gpt-4o"
+}
+
+# Models known to support tool/function calling
+_TOOL_CALL_ARCHITECTURES = {
+    "qwen2", "qwen2.5", "llama3", "llama3.1", "llama3.2", "mistral", 
+    "mixtral", "deepseek", "yi", "glm4", "internlm2"
+}
+
+
+def _detect_capabilities_from_config(config: dict, model_path: str) -> ModelCapabilities:
+    """
+    Detect model capabilities from config.json.
+    Returns capabilities with input/output modality and backend compatibility.
+    """
+    capabilities = ModelCapabilities()
+    
+    model_path_lower = model_path.lower()
+    model_type = config.get("model_type", "").lower()
+    architectures = [a.lower() for a in config.get("architectures", [])]
+    arch_str = " ".join(architectures) + " " + model_type + " " + model_path_lower
+    
+    # Pattern sets for different model types
+    t2i_patterns = {"stable-diffusion", "sdxl", "flux", "dalle", "kandinsky", "pixart", "hunyuan"}
+    i2i_patterns = {"controlnet", "ip-adapter", "instruct-pix2pix", "img2img"}
+    t2v_patterns = {"cogvideo", "text2video", "zeroscope", "animatediff", "videocrafter"}
+    tts_patterns = {"speecht5", "xtts", "bark", "vall-e", "voicecraft", "parler", "tortoise"}
+    
+    # Check for tool call support
+    supports_tools = any(tc in arch_str for tc in _TOOL_CALL_ARCHITECTURES)
+    
+    # Get context length from config
+    context_length = _get_context_length_from_config(config) or 8192
+    
+    # ============================================================
+    # TEXT-TO-IMAGE MODELS
+    # ============================================================
+    if any(t2i in arch_str for t2i in t2i_patterns):
+        return ModelCapabilities(
+            supports_text_input=True, supports_image_input=False,
+            supports_audio_input=False, supports_video_input=False,
+            supports_text_output=False, supports_image_output=True,
+            supports_audio_output=False, supports_video_output=False,
+            supported_backends=["transformers"],
+            supports_streaming=False, supports_system_prompt=False,
+            model_type="t2i", max_context_length=77
+        )
+    
+    # ============================================================
+    # IMAGE-TO-IMAGE MODELS
+    # ============================================================
+    if any(i2i in arch_str for i2i in i2i_patterns):
+        return ModelCapabilities(
+            supports_text_input=True, supports_image_input=True,
+            supports_audio_input=False, supports_video_input=False,
+            supports_text_output=False, supports_image_output=True,
+            supports_audio_output=False, supports_video_output=False,
+            supported_backends=["transformers"],
+            supports_streaming=False, supports_system_prompt=False,
+            model_type="i2i", max_context_length=77
+        )
+    
+    # ============================================================
+    # TEXT-TO-VIDEO MODELS
+    # ============================================================
+    if any(t2v in arch_str for t2v in t2v_patterns):
+        return ModelCapabilities(
+            supports_text_input=True, supports_image_input=False,
+            supports_audio_input=False, supports_video_input=False,
+            supports_text_output=False, supports_image_output=False,
+            supports_audio_output=False, supports_video_output=True,
+            supported_backends=["transformers"],
+            supports_streaming=False, supports_system_prompt=False,
+            model_type="t2v", max_context_length=256
+        )
+    
+    # ============================================================
+    # TTS MODELS (Text-to-Speech)
+    # ============================================================
+    if any(tts in arch_str for tts in tts_patterns):
+        return ModelCapabilities(
+            supports_text_input=True, supports_image_input=False,
+            supports_audio_input=False, supports_video_input=False,
+            supports_text_output=False, supports_image_output=False,
+            supports_audio_output=True, supports_video_output=False,
+            supported_backends=["transformers"],
+            supports_streaming=True, supports_system_prompt=False,
+            model_type="tts", max_context_length=4096
+        )
+    
+    # ============================================================
+    # ASR MODELS (Speech-to-Text)
+    # ============================================================
+    if any(audio in arch_str for audio in _AUDIO_ARCHITECTURES):
+        return ModelCapabilities(
+            supports_text_input=False, supports_image_input=False,
+            supports_audio_input=True, supports_video_input=False,
+            supports_text_output=True, supports_image_output=False,
+            supports_audio_output=False, supports_video_output=False,
+            supported_backends=["transformers"],
+            supports_streaming=True, supports_system_prompt=False,
+            model_type="asr", max_context_length=4096
+        )
+    
+    # ============================================================
+    # MULTIMODAL LLMs (Omni models)
+    # ============================================================
+    if any(mllm in arch_str for mllm in _MLLM_ARCHITECTURES):
+        return ModelCapabilities(
+            supports_text_input=True, supports_image_input=True,
+            supports_audio_input=True, supports_video_input=True,
+            supports_text_output=True, supports_image_output=True,
+            supports_audio_output=True, supports_video_output=True,
+            supported_backends=["transformers"],
+            supports_streaming=True, supports_system_prompt=True,
+            supports_tool_calls=True, model_type="mllm",
+            max_context_length=128000
+        )
+    
+    # ============================================================
+    # VISION-LANGUAGE MODELS (VLM)
+    # ============================================================
+    if any(vlm in arch_str for vlm in _VLM_ARCHITECTURES):
+        # Determine backend support
+        vlm_vllm = any(v in arch_str for v in ['qwen2_vl', 'qwen2-vl', 'llava', 'pixtral'])
+        vlm_sglang = any(v in arch_str for v in ['qwen2_vl', 'qwen2-vl', 'llava'])
+        backends = ["transformers"]
+        if vlm_vllm:
+            backends.append("vllm")
+        if vlm_sglang:
+            backends.append("sglang")
+        
+        return ModelCapabilities(
+            supports_text_input=True, supports_image_input=True,
+            supports_audio_input=False,
+            supports_video_input='video' in arch_str or 'qwen2_vl' in arch_str or 'qwen2-vl' in arch_str,
+            supports_text_output=True, supports_image_output=False,
+            supports_audio_output=False, supports_video_output=False,
+            supported_backends=backends,
+            supports_streaming=True, supports_system_prompt=True,
+            supports_tool_calls=supports_tools, model_type="vlm",
+            max_context_length=max(context_length, 32768)
+        )
+    
+    # ============================================================
+    # DEFAULT: Text-only LLM (all backends)
+    # ============================================================
+    return ModelCapabilities(
+        supports_text_input=True, supports_image_input=False,
+        supports_audio_input=False, supports_video_input=False,
+        supports_text_output=True, supports_image_output=False,
+        supports_audio_output=False, supports_video_output=False,
+        supported_backends=["transformers", "vllm", "sglang"],
+        supports_streaming=True, supports_system_prompt=True,
+        supports_tool_calls=supports_tools, model_type="llm",
+        max_context_length=context_length
+    )
+
+
+@router.get("/capabilities")
+async def get_model_capabilities(
+    model_path: str = Query(..., description="Path to model or HuggingFace model ID"),
+    source: str = Query("local", description="Model source: local, huggingface, modelscope")
+):
+    """
+    Detect model capabilities from its architecture.
+    
+    Returns capabilities like:
+    - supports_text: Always true for LLMs
+    - supports_image: True for VLMs (Qwen2-VL, LLaVA, etc.)
+    - supports_audio: True for audio models (Whisper, Qwen2-Audio, etc.)
+    - supports_video: True for video-capable models
+    - supports_streaming: Backend-dependent
+    - supports_tool_calls: True for models with function calling support
+    - max_context_length: Maximum context window size
+    - model_type: llm, vlm, mllm, asr, tts
+    """
+    import json
+    
+    try:
+        capabilities = ModelCapabilities()
+        
+        if source == "local":
+            path = Path(model_path)
+            if not path.exists():
+                # Return defaults for non-existent paths
+                return capabilities.model_dump()
+            
+            config_path = path / "config.json" if path.is_dir() else None
+            
+            if config_path and config_path.exists():
+                try:
+                    with open(config_path) as f:
+                        config = json.load(f)
+                    capabilities = _detect_capabilities_from_config(config, model_path)
+                except (json.JSONDecodeError, IOError):
+                    pass  # Return defaults
+        else:
+            # For HuggingFace models, detect from model name using same logic
+            capabilities = _detect_capabilities_from_config({}, model_path)
+            
+            # Try to get context length from known models
+            known_context = _get_context_from_known_models(model_path)
+            if known_context:
+                capabilities.max_context_length = known_context
+        
+        return capabilities.model_dump()
+        
+    except Exception as e:
+        # Return defaults on any error
+        return ModelCapabilities().model_dump()

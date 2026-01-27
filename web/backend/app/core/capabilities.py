@@ -316,6 +316,10 @@ class SystemSettings:
     
     @property
     def OUTPUT_DIR(self) -> Path:
+        # Use the SAME locked output path as system_guard for consistency
+        # This ensures backend and CLI write to the SAME location
+        if _SYSTEM_GUARD_AVAILABLE and _LOCKED_OUTPUT_BASE_PATH:
+            return Path(_LOCKED_OUTPUT_BASE_PATH)
         return self._data_dir / "outputs"
     
     @property
@@ -723,36 +727,38 @@ class SystemValidator:
         
         ALLOWS:
         - Models that pass normal validation (authorized base models)
-        - Fine-tuned models from the output directory (/app/data/outputs/)
-        - Models from the models directory (/app/data/models/)
+        - Fine-tuned models from the output directory (locked path from system_guard)
+        - Models from the models directory (both /app/data/models and /workspace/models)
         
         This enables loading:
         - Base models for inference
         - Full fine-tuned models for inference (output dir contains complete model)
         - LoRA adapters are loaded separately, base model still needs validation
         """
+        from pathlib import Path
+        
         # First, check if this is a fine-tuned model from output directory
         # These are always allowed for inference since they were trained from authorized models
         settings = get_system_settings()
         output_dir_str = str(settings.OUTPUT_DIR)
         models_dir_str = str(settings.MODELS_DIR)
         
-        # Allow models from output directory (fine-tuned models)
-        if model_path.startswith(output_dir_str):
-            # Verify the path exists (basic security check)
-            from pathlib import Path
-            if Path(model_path).exists():
-                return True, ""
-            else:
-                return False, f"Model path does not exist: {model_path}"
+        # Define all allowed model directories (both container paths and workspace paths)
+        allowed_model_dirs = [
+            output_dir_str,           # Fine-tuned models output directory
+            models_dir_str,           # App models directory (/app/data/models)
+            "/workspace/models",      # Workspace models directory
+            "/workspace/output",      # Workspace output directory
+        ]
         
-        # Allow models from models directory
-        if model_path.startswith(models_dir_str):
-            from pathlib import Path
-            if Path(model_path).exists():
-                return True, ""
-            else:
-                return False, f"Model path does not exist: {model_path}"
+        # Check if model path starts with any allowed directory
+        for allowed_dir in allowed_model_dirs:
+            if model_path.startswith(allowed_dir):
+                # Verify the path exists (basic security check)
+                if Path(model_path).exists():
+                    return True, ""
+                else:
+                    return False, f"Model path does not exist: {model_path}"
         
         # For other paths, use standard validation
         return self.validate_model_path(model_path, model_source)

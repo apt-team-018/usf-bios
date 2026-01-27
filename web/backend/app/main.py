@@ -14,6 +14,7 @@ from .api import api_router
 from .core.config import settings
 from .core.database import init_db, engine
 from .core.capabilities import is_system_expired
+from .services.system_encrypted_log_service import system_encrypted_log
 
 # System expiration middleware - blocks ALL APIs when expired
 class SystemExpirationMiddleware(BaseHTTPMiddleware):
@@ -89,10 +90,13 @@ async def startup_event():
     data_dir = os.environ.get("DATA_DIR", "/app/data")
     os.makedirs(data_dir, exist_ok=True)
     os.makedirs(f"{data_dir}/datasets", exist_ok=True)
-    os.makedirs(f"{data_dir}/output", exist_ok=True)
     os.makedirs(f"{data_dir}/checkpoints", exist_ok=True)
     os.makedirs(f"{data_dir}/logs", exist_ok=True)
     os.makedirs(f"{data_dir}/terminal_logs", exist_ok=True)
+    
+    # Create output directory using locked path from system_guard (single source of truth)
+    from .core.capabilities import get_system_settings
+    os.makedirs(str(get_system_settings().OUTPUT_DIR), exist_ok=True)
     
     init_db()
     
@@ -107,6 +111,32 @@ async def startup_event():
             for r in recovered:
                 print(f"    - Job {r['job_id']}: {r['name']} -> {r['new_status']}")
     
+    # Initialize system encrypted log service for non-training logs
+    # This handles: inference, datasets, models, system operations
+    # Structure: /app/data/encrypted_logs/system/YYYY-MM-DD/HH.enc.log
+    # Auto-cleanup: removes folders older than 24 hours (runs hourly)
+    
+    # CRITICAL: Ensure cleanup scheduler is running
+    # This is BULLETPROOF - works after restarts, deployments, container recreation
+    # - Runs cleanup IMMEDIATELY on startup (catches old logs)
+    # - Continues running every hour in background daemon thread
+    # - Never crashes - handles all exceptions internally
+    # - Singleton pattern - only one cleanup thread per process
+    cleanup_running = system_encrypted_log.ensure_cleanup_running()
+    
+    system_encrypted_log.log_system_startup({
+        "app_name": settings.APP_NAME,
+        "app_version": settings.APP_VERSION,
+        "data_dir": data_dir,
+        "output_dir": str(get_system_settings().OUTPUT_DIR),
+        "cleanup_scheduler_active": cleanup_running
+    })
+    
+    # Also run manual cleanup on startup as safety net
+    cleanup_result = system_encrypted_log.force_cleanup()
+    if cleanup_result.get("removed", 0) > 0:
+        print(f"  Cleaned up {cleanup_result['removed']} old log folder(s)")
+    
     print("=" * 60)
     print(f"  {settings.APP_NAME} v{settings.APP_VERSION}")
     print("  Powered by US Inc")
@@ -116,4 +146,6 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
+    # Log system shutdown (encrypted only)
+    system_encrypted_log.log_system_shutdown("normal")
     engine.dispose()

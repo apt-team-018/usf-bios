@@ -834,6 +834,17 @@ class TrainingService:
             sanitized_log_service.create_terminal_log(job_id, "Training started...", "INFO")
             await ws_manager.send_log(job_id, "Training started...")
             
+            # CRITICAL: Update global training status service
+            from .training_status_service import training_status_service
+            job = await job_manager.get_job(job_id)
+            model_name = job.config.model_path.split('/')[-1] if job and job.config else None
+            await training_status_service.set_training_started(
+                job_id=job_id,
+                job_name=job.name if job else job_id,
+                model_name=model_name,
+            )
+            await training_status_service.set_training_running(job_id)
+            
             total_steps = 0
             current_step = 0
             current_loss = None
@@ -971,6 +982,16 @@ class TrainingService:
                 
                 if update_fields:
                     await job_manager.update_job(job_id, **update_fields)
+                    
+                    # Update global training status service with progress
+                    await training_status_service.update_progress(
+                        job_id=job_id,
+                        current_step=update_fields.get("current_step"),
+                        total_steps=update_fields.get("total_steps"),
+                        current_loss=update_fields.get("current_loss"),
+                        learning_rate=update_fields.get("learning_rate"),
+                        current_epoch=update_fields.get("current_epoch"),
+                    )
                 
                 # ============================================================
                 # DATABASE: Save metrics for graphs (every step with metrics)
@@ -1052,6 +1073,10 @@ class TrainingService:
                 await ws_manager.send_log(job_id, "Training completed successfully!", "success")
                 sanitized_log_service.log_session_end(job_id, "COMPLETED")
                 
+                # CRITICAL: Update global training status service
+                from .training_status_service import training_status_service
+                await training_status_service.set_training_completed(job_id)
+                
                 # POST-TRAINING CLEANUP: Release GPU memory after successful completion
                 await self._cleanup_after_training(job_id, "completed")
             else:
@@ -1080,6 +1105,10 @@ class TrainingService:
                 await ws_manager.send_log(job_id, error_msg, "error")
                 sanitized_log_service.log_session_end(job_id, "FAILED", error_message=error_msg)
                 
+                # CRITICAL: Update global training status service
+                from .training_status_service import training_status_service
+                await training_status_service.set_training_failed(job_id, error_msg)
+                
                 # POST-TRAINING CLEANUP: Release GPU memory after failure
                 await self._cleanup_after_training(job_id, "failed")
         
@@ -1089,6 +1118,10 @@ class TrainingService:
             sanitized_log_service.create_terminal_log(job_id, "Training stopped by user", "WARN")
             await ws_manager.send_log(job_id, "Training stopped by user", "warning")
             sanitized_log_service.log_session_end(job_id, "CANCELLED")
+            
+            # CRITICAL: Update global training status service
+            from .training_status_service import training_status_service
+            await training_status_service.set_training_stopped(job_id)
             
             # POST-TRAINING CLEANUP: Release GPU memory after cancellation
             await self._cleanup_after_training(job_id, "cancelled")
@@ -1120,6 +1153,10 @@ class TrainingService:
             sanitized_log_service.create_terminal_log(job_id, f"Error: {minimal_error}", "ERROR")
             await ws_manager.send_log(job_id, f"Error: {minimal_error}", "error")
             sanitized_log_service.log_session_end(job_id, "FAILED", error_message=full_error)
+            
+            # CRITICAL: Update global training status service
+            from .training_status_service import training_status_service
+            await training_status_service.set_training_failed(job_id, minimal_error)
             
             # POST-TRAINING CLEANUP: Release GPU memory after exception
             await self._cleanup_after_training(job_id, "exception")

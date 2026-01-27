@@ -39,7 +39,13 @@ class JobServiceError(Exception):
 
 class JobService:
     
-    OUTPUT_BASE_PATH = os.getenv("OUTPUT_PATH", "/app/data/output")
+    # Use locked output path from system_guard (single source of truth)
+    # This ensures consistency between backend, CLI, and WebUI
+    @staticmethod
+    def _get_output_base_path() -> str:
+        from ..core.capabilities import get_system_settings
+        return str(get_system_settings().OUTPUT_DIR)
+    
     CHECKPOINT_BASE_PATH = os.getenv("CHECKPOINT_PATH", "/app/data/checkpoints")
     LOG_BASE_PATH = os.getenv("LOG_PATH", "/app/data/logs")
     
@@ -55,6 +61,7 @@ class JobService:
     
     def __init__(self, db: Session):
         self.db = db
+        self.OUTPUT_BASE_PATH = self._get_output_base_path()
         os.makedirs(self.OUTPUT_BASE_PATH, exist_ok=True)
         os.makedirs(self.CHECKPOINT_BASE_PATH, exist_ok=True)
         os.makedirs(self.LOG_BASE_PATH, exist_ok=True)

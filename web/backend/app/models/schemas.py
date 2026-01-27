@@ -261,6 +261,13 @@ class TrainingConfig(BaseModel):
     hf_token: Optional[str] = Field(default=None, description="HuggingFace token for private models/datasets")
     ms_token: Optional[str] = Field(default=None, description="ModelScope token for private models/datasets")
     
+    # Dataset streaming for large datasets (billions of samples)
+    # When enabled, dataset is read on-the-fly without loading into memory
+    # Requires max_steps to be set (dataset length unknown in streaming mode)
+    streaming: bool = Field(default=False, description="Enable streaming for large datasets")
+    max_steps: Optional[int] = Field(default=None, ge=1, description="Max training steps (required when streaming=True)")
+    shuffle_buffer_size: int = Field(default=1000, ge=1, description="Buffer size for shuffling in streaming mode")
+    
     @field_validator('gpu_ids')
     @classmethod
     def validate_gpu_ids(cls, v):
@@ -322,6 +329,10 @@ class TrainingConfig(BaseModel):
         # QLoRA requires quant_bits
         if self.train_type.value == "qlora" and not self.quant_bits:
             self.quant_bits = 4  # Default to 4-bit
+        
+        # Streaming validation: max_steps is required when streaming is enabled
+        if self.streaming and not self.max_steps:
+            errors.append("Streaming mode requires max_steps to be specified (dataset length is unknown in streaming mode)")
         
         if errors:
             raise ValueError("; ".join(errors))
