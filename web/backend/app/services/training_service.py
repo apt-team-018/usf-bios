@@ -31,6 +31,8 @@ class TrainingService:
     
     def __init__(self):
         self._running_tasks: dict = {}
+        # Track merged model temp directories for cleanup
+        self._merged_model_dirs: dict = {}  # job_id -> temp_dir_path
     
     def _validate_feature_flags(self, config: TrainingConfig) -> tuple[bool, str]:
         """
@@ -694,6 +696,343 @@ class TrainingService:
             
             # Note: Don't show validation message or command to user - internal details
             
+            # ============================================================
+            # STORAGE SPACE VALIDATION - Ensure enough disk space
+            # ============================================================
+            import shutil
+            
+            def get_dir_size_gb(path: str) -> float:
+                """Get directory size in GB"""
+                total = 0
+                try:
+                    for dirpath, dirnames, filenames in os.walk(path):
+                        for f in filenames:
+                            fp = os.path.join(dirpath, f)
+                            if os.path.exists(fp):
+                                total += os.path.getsize(fp)
+                except Exception:
+                    pass
+                return total / (1024 ** 3)
+            
+            def get_available_space_gb(path: str) -> float:
+                """Get available disk space in GB for a path"""
+                try:
+                    # Find the mount point for the path
+                    check_path = path
+                    while not os.path.exists(check_path) and check_path != '/':
+                        check_path = os.path.dirname(check_path)
+                    if not check_path:
+                        check_path = '/'
+                    usage = shutil.disk_usage(check_path)
+                    return usage.free / (1024 ** 3)
+                except Exception:
+                    return -1  # Unknown
+            
+            def estimate_model_size_from_name(model_name: str) -> float:
+                """Estimate model size in GB based on model name/ID (for HuggingFace models)"""
+                model_lower = model_name.lower()
+                
+                # Common model size patterns
+                size_patterns = [
+                    # Explicit size in name
+                    ('405b', 800), ('400b', 780), ('340b', 680), ('236b', 470),
+                    ('180b', 360), ('175b', 350), ('140b', 280), ('123b', 246),
+                    ('100b', 200), ('90b', 180), ('80b', 160), ('72b', 144),
+                    ('70b', 140), ('65b', 130), ('55b', 110),
+                    ('40b', 80), ('34b', 68), ('33b', 66), ('32b', 64), ('30b', 60),
+                    ('27b', 54), ('26b', 52), ('25b', 50), ('24b', 48), ('22b', 44),
+                    ('20b', 40), ('14b', 28), ('13b', 26), ('12b', 24), ('11b', 22),
+                    ('9b', 18), ('8b', 16), ('7b', 14), ('6b', 12),
+                    ('4b', 8), ('3.8b', 8), ('3b', 6), ('2.7b', 5.5), ('2b', 4),
+                    ('1.5b', 3), ('1b', 2), ('0.5b', 1), ('500m', 1),
+                    # Model families with known sizes
+                    ('llama-3.1-405b', 800), ('llama-3-70b', 140), ('llama-3-8b', 16),
+                    ('llama-2-70b', 140), ('llama-2-13b', 26), ('llama-2-7b', 14),
+                    ('mistral-7b', 14), ('mixtral-8x7b', 95), ('mixtral-8x22b', 280),
+                    ('qwen2.5-72b', 144), ('qwen2.5-32b', 64), ('qwen2.5-14b', 28),
+                    ('qwen2.5-7b', 14), ('qwen2.5-3b', 6), ('qwen2.5-1.5b', 3),
+                    ('deepseek-v3', 680), ('deepseek-v2', 236), ('deepseek-67b', 134),
+                    ('phi-3-medium', 28), ('phi-3-small', 14), ('phi-3-mini', 8),
+                    ('gemma-2-27b', 54), ('gemma-2-9b', 18), ('gemma-7b', 14),
+                ]
+                
+                for pattern, size_gb in size_patterns:
+                    if pattern in model_lower:
+                        return size_gb
+                
+                # Default estimate for unknown models
+                return 15  # Conservative default
+            
+            merge_enabled = getattr(config, 'merge_adapter_before_training', False)
+            adapter_base_path = getattr(config, 'adapter_base_model_path', None)
+            output_dir = getattr(config, 'output_dir', 'output') or 'output'
+            train_type = getattr(config, 'train_type', None)
+            train_type_value = train_type.value if hasattr(train_type, 'value') else str(train_type)
+            
+            # Estimate required space
+            required_space_gb = 0
+            space_breakdown = []
+            
+            # Get base model size (for merge or training)
+            base_model_size_gb = 0
+            adapter_size_gb = 0
+            
+            # 1. Calculate adapter size (if merge mode - adapter is the model_path)
+            if merge_enabled and adapter_base_path:
+                # model_path is the adapter in merge mode
+                if os.path.exists(model_path):
+                    adapter_size_gb = get_dir_size_gb(model_path)
+                    space_breakdown.append(f"Adapter size: {adapter_size_gb:.2f}GB")
+                
+                # Get base model size
+                if os.path.exists(adapter_base_path):
+                    # Local path - get actual size
+                    base_model_size_gb = get_dir_size_gb(adapter_base_path)
+                    space_breakdown.append(f"Base model size: {base_model_size_gb:.1f}GB (from disk)")
+                else:
+                    # HuggingFace or remote - estimate from name
+                    base_model_size_gb = estimate_model_size_from_name(adapter_base_path)
+                    space_breakdown.append(f"Base model size: ~{base_model_size_gb:.1f}GB (estimated from name)")
+                
+                # Merged model = base model size (adapter weights are fused in)
+                merge_space = base_model_size_gb * 1.1  # 10% buffer for safety
+                required_space_gb += merge_space
+                space_breakdown.append(f"Merged model output: ~{merge_space:.1f}GB")
+            
+            # 2. Get model size for training output estimation
+            if base_model_size_gb == 0:
+                # Not merge mode - model_path is the base model
+                if model_source == 'local' and os.path.exists(model_path):
+                    base_model_size_gb = get_dir_size_gb(model_path)
+                    space_breakdown.append(f"Model size: {base_model_size_gb:.1f}GB (from disk)")
+                else:
+                    # HuggingFace/ModelScope - estimate from name
+                    base_model_size_gb = estimate_model_size_from_name(model_path)
+                    space_breakdown.append(f"Model size: ~{base_model_size_gb:.1f}GB (estimated)")
+            
+            # 3. Estimate training output size based on calculated model size
+            # Full fine-tuning creates full model checkpoints
+            # LoRA creates small adapter checkpoints
+            if train_type_value == 'full':
+                # Full checkpoints: ~3 checkpoints + final model = 4x model size
+                output_space = base_model_size_gb * 4
+                required_space_gb += output_space
+                space_breakdown.append(f"Training output (full, 4 checkpoints): ~{output_space:.1f}GB")
+            elif train_type_value in ['lora', 'qlora', 'adalora']:
+                # LoRA adapters are small (typically 10-500MB per checkpoint)
+                # Size depends on rank - estimate ~1-2% of model size per checkpoint
+                lora_rank = getattr(config, 'lora_rank', 8)
+                # Higher rank = larger adapters
+                adapter_checkpoint_size = base_model_size_gb * 0.02 * (lora_rank / 8)  # Scale by rank
+                output_space = max(adapter_checkpoint_size * 4, 2)  # At least 2GB, 4 checkpoints
+                required_space_gb += output_space
+                space_breakdown.append(f"Training output (LoRA r={lora_rank}): ~{output_space:.1f}GB")
+            else:
+                # Unknown train type - be conservative
+                output_space = base_model_size_gb * 2
+                required_space_gb += output_space
+                space_breakdown.append(f"Training output: ~{output_space:.1f}GB (estimated)")
+            
+            # 4. Add buffer for logs, temporary files, etc.
+            required_space_gb += 2
+            space_breakdown.append("Logs & temp files: ~2GB")
+            
+            # ============================================================
+            # CHECK STORAGE AT EACH PATH SEPARATELY
+            # Different paths may be on different drives with different space
+            # ============================================================
+            storage_checks = []
+            
+            # Check 1: Merge storage (only if merge mode enabled)
+            if merge_enabled and adapter_base_path:
+                import tempfile
+                temp_dir = tempfile.gettempdir()
+                merge_space_needed = base_model_size_gb * 1.1  # Merged model size
+                temp_space_available = get_available_space_gb(temp_dir)
+                
+                storage_checks.append({
+                    'path': temp_dir,
+                    'purpose': 'Adapter merge (temp)',
+                    'required_gb': merge_space_needed,
+                    'available_gb': temp_space_available
+                })
+                
+                if temp_space_available >= 0 and temp_space_available < merge_space_needed:
+                    validation_errors.append(
+                        f"Insufficient disk space for adapter merge.\n"
+                        f"  Path: {temp_dir}\n"
+                        f"  Available: {temp_space_available:.1f}GB\n"
+                        f"  Required for merged model: ~{merge_space_needed:.1f}GB\n"
+                        f"  Tip: Set TMPDIR environment variable to use a different temp directory."
+                    )
+                else:
+                    sanitized_log_service.create_terminal_log(
+                        job_id,
+                        f"Merge storage OK: {temp_space_available:.1f}GB available at {temp_dir}",
+                        "INFO"
+                    )
+            
+            # Check 2: Output directory for checkpoints and final model
+            output_space_needed = output_space + 2  # Training output + logs buffer
+            output_space_available = get_available_space_gb(output_dir)
+            
+            storage_checks.append({
+                'path': output_dir,
+                'purpose': 'Training output (checkpoints)',
+                'required_gb': output_space_needed,
+                'available_gb': output_space_available
+            })
+            
+            if output_space_available >= 0 and output_space_available < output_space_needed:
+                validation_errors.append(
+                    f"Insufficient disk space for training output.\n"
+                    f"  Path: {output_dir}\n"
+                    f"  Available: {output_space_available:.1f}GB\n"
+                    f"  Required: ~{output_space_needed:.1f}GB\n"
+                    f"  Breakdown:\n    " + "\n    ".join(space_breakdown) + "\n"
+                    f"  Tip: Change the output directory or free up disk space."
+                )
+            elif output_space_available >= 0:
+                sanitized_log_service.create_terminal_log(
+                    job_id,
+                    f"Output storage OK: {output_space_available:.1f}GB available at {output_dir}",
+                    "INFO"
+                )
+            
+            # Log total storage summary
+            if not validation_errors:
+                total_required = sum(c['required_gb'] for c in storage_checks)
+                sanitized_log_service.create_terminal_log(
+                    job_id,
+                    f"✓ Storage check passed. Total required: ~{total_required:.1f}GB",
+                    "INFO"
+                )
+                await ws_manager.send_log(job_id, f"✓ Storage check passed (~{total_required:.1f}GB needed)")
+            
+            # Report storage validation errors
+            if validation_errors:
+                error_msg = "Pre-training validation failed:\n" + "\n".join(f"  - {e}" for e in validation_errors)
+                sanitized_log_service.create_terminal_log(job_id, f"ERROR: {error_msg}", "ERROR")
+                await ws_manager.send_log(job_id, f"ERROR: {error_msg}")
+                await job_manager.add_log(job_id, f"ERROR: {error_msg}")
+                _debug_log(job_id, error_msg, "ERROR")
+                
+                await job_manager.update_job(job_id, 
+                    status=JobStatus.FAILED,
+                    error=error_msg,
+                    completed_at=datetime.now()
+                )
+                await ws_manager.send_status(job_id, "failed")
+                return
+            
+            # ============================================================
+            # ADAPTER MERGE MODE - Merge adapter with base before training
+            # This enables full fine-tuning on LoRA/QLoRA adapters
+            # ============================================================
+            
+            if merge_enabled and adapter_base_path:
+                sanitized_log_service.create_terminal_log(
+                    job_id, 
+                    "Merging adapter with base model...", 
+                    "INFO"
+                )
+                await ws_manager.send_log(job_id, "Merging adapter with base model...")
+                _debug_log(job_id, f"Adapter merge mode enabled. Adapter: {model_path}, Base: {adapter_base_path}")
+                
+                try:
+                    # Import merge utilities
+                    from peft import PeftModel, PeftConfig
+                    from transformers import AutoModelForCausalLM, AutoTokenizer
+                    import torch
+                    import tempfile
+                    import shutil
+                    
+                    # Create temporary directory for merged model
+                    merge_output_dir = tempfile.mkdtemp(prefix="merged_model_")
+                    _debug_log(job_id, f"Merge output directory: {merge_output_dir}")
+                    
+                    sanitized_log_service.create_terminal_log(
+                        job_id, 
+                        f"Loading base model: {adapter_base_path}", 
+                        "INFO"
+                    )
+                    await ws_manager.send_log(job_id, f"Loading base model for merge...")
+                    
+                    # Load base model
+                    base_model = AutoModelForCausalLM.from_pretrained(
+                        adapter_base_path,
+                        torch_dtype=torch.bfloat16,
+                        device_map="auto",
+                        trust_remote_code=True
+                    )
+                    
+                    sanitized_log_service.create_terminal_log(
+                        job_id, 
+                        f"Loading adapter: {model_path}", 
+                        "INFO"
+                    )
+                    await ws_manager.send_log(job_id, f"Loading adapter for merge...")
+                    
+                    # Load adapter onto base model
+                    model = PeftModel.from_pretrained(base_model, model_path)
+                    
+                    sanitized_log_service.create_terminal_log(
+                        job_id, 
+                        "Merging adapter weights into base model...", 
+                        "INFO"
+                    )
+                    await ws_manager.send_log(job_id, "Merging adapter weights...")
+                    
+                    # Merge and unload
+                    merged_model = model.merge_and_unload()
+                    
+                    # Save merged model
+                    sanitized_log_service.create_terminal_log(
+                        job_id, 
+                        f"Saving merged model...", 
+                        "INFO"
+                    )
+                    await ws_manager.send_log(job_id, "Saving merged model...")
+                    
+                    merged_model.save_pretrained(merge_output_dir)
+                    
+                    # Copy tokenizer from base model
+                    tokenizer = AutoTokenizer.from_pretrained(adapter_base_path, trust_remote_code=True)
+                    tokenizer.save_pretrained(merge_output_dir)
+                    
+                    # Update model path to use merged model
+                    job.config.model_path = merge_output_dir
+                    model_path = merge_output_dir
+                    
+                    # Track merged model directory for cleanup after training
+                    self._merged_model_dirs[job_id] = merge_output_dir
+                    
+                    # Clean up GPU memory after merge
+                    del base_model, model, merged_model
+                    torch.cuda.empty_cache()
+                    
+                    sanitized_log_service.create_terminal_log(
+                        job_id, 
+                        "✅ Adapter merged successfully. Proceeding with training on merged model.", 
+                        "INFO"
+                    )
+                    await ws_manager.send_log(job_id, "✅ Adapter merged successfully")
+                    _debug_log(job_id, f"Adapter merge complete. Training on: {merge_output_dir}")
+                    
+                except Exception as merge_err:
+                    error_msg = f"Adapter merge failed: {str(merge_err)}"
+                    sanitized_log_service.create_terminal_log(job_id, f"ERROR: {error_msg}", "ERROR")
+                    await ws_manager.send_log(job_id, f"ERROR: {error_msg}")
+                    _debug_log(job_id, error_msg, "ERROR")
+                    
+                    await job_manager.update_job(job_id, 
+                        status=JobStatus.FAILED,
+                        error=error_msg,
+                        completed_at=datetime.now()
+                    )
+                    await ws_manager.send_status(job_id, "failed")
+                    return
+            
             # Build command (with resume checkpoint if set)
             resume_checkpoint = getattr(job, 'resume_from_checkpoint', None)
             if resume_checkpoint:
@@ -1163,17 +1502,56 @@ class TrainingService:
     
     async def _cleanup_after_training(self, job_id: str, reason: str) -> None:
         """
-        Perform GPU memory cleanup after training ends.
+        Perform GPU memory cleanup and temp file cleanup after training ends.
         
-        This is critical for preventing VRAM leaks between training sessions.
+        This is critical for:
+        1. Preventing VRAM leaks between training sessions
+        2. Cleaning up merged model temp directories to free disk space
+        
         Called after training completes, fails, is cancelled, or throws an exception.
         """
         try:
-            _debug_log(job_id, f"Performing post-training GPU cleanup (reason: {reason})...")
+            _debug_log(job_id, f"Performing post-training cleanup (reason: {reason})...")
+            
+            # ============================================================
+            # CLEANUP MERGED MODEL TEMP DIRECTORY
+            # This frees up significant disk space (can be 10-100+ GB)
+            # ============================================================
+            if job_id in self._merged_model_dirs:
+                merge_dir = self._merged_model_dirs[job_id]
+                try:
+                    import shutil
+                    if os.path.exists(merge_dir):
+                        # Calculate size before deletion for logging
+                        dir_size_gb = 0
+                        for dirpath, dirnames, filenames in os.walk(merge_dir):
+                            for f in filenames:
+                                fp = os.path.join(dirpath, f)
+                                if os.path.exists(fp):
+                                    dir_size_gb += os.path.getsize(fp)
+                        dir_size_gb = dir_size_gb / (1024 ** 3)
+                        
+                        # Delete the merged model directory
+                        shutil.rmtree(merge_dir)
+                        
+                        _debug_log(job_id, f"Cleaned up merged model temp dir: {merge_dir} ({dir_size_gb:.1f}GB freed)")
+                        sanitized_log_service.create_terminal_log(
+                            job_id,
+                            f"Cleaned up temporary merged model ({dir_size_gb:.1f}GB freed)",
+                            "INFO"
+                        )
+                except Exception as cleanup_err:
+                    _debug_log(job_id, f"Failed to cleanup merged model dir {merge_dir}: {cleanup_err}", "WARN")
+                finally:
+                    # Remove from tracking dict regardless of success
+                    del self._merged_model_dirs[job_id]
             
             # Small delay to allow subprocess to fully terminate
             await asyncio.sleep(0.5)
             
+            # ============================================================
+            # GPU MEMORY CLEANUP
+            # ============================================================
             # Deep cleanup with orphan killing enabled
             cleanup_result = await gpu_cleanup_service.async_deep_cleanup(
                 kill_orphans=True,
@@ -1186,7 +1564,7 @@ class TrainingService:
                 used_gb = mem_after.get("total_used_gb", 0)
                 total_gb = mem_after.get("total_memory_gb", 0)
                 
-                _debug_log(job_id, f"Post-training cleanup: freed {freed_gb}GB, now using {used_gb}/{total_gb}GB")
+                _debug_log(job_id, f"Post-training GPU cleanup: freed {freed_gb}GB, now using {used_gb}/{total_gb}GB")
                 
                 if freed_gb > 1.0:  # Only log if significant memory was freed
                     sanitized_log_service.create_terminal_log(

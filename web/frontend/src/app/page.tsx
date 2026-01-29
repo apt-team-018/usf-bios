@@ -402,7 +402,24 @@ export default function Home() {
     can_do_full: boolean
     can_do_rlhf: boolean
     warnings: string[]
+    // Merge support fields
+    can_merge_with_base?: boolean
+    merge_unlocks_full?: boolean
+    adapter_r?: number
+    adapter_alpha?: number
+    quantization_bits?: number
   } | null>(null)
+  
+  // State for adapter merge mode
+  const [adapterMergeMode, setAdapterMergeMode] = useState(false)
+  const [adapterBaseModelPath, setAdapterBaseModelPath] = useState('')
+  const [adapterValidation, setAdapterValidation] = useState<{
+    valid: boolean
+    compatible: boolean
+    message: string
+    merge_warnings: string[]
+  } | null>(null)
+  const [isValidatingAdapter, setIsValidatingAdapter] = useState(false)
   
   // Custom alert modal state (replaces browser alert)
   const [alertModal, setAlertModal] = useState<{
@@ -1129,6 +1146,58 @@ export default function Home() {
     }, 100) // 100ms debounce
   }, []) // NO DEPENDENCIES - completely stable callback
 
+  // Validate adapter + base model compatibility for merge
+  const validateAdapterBase = useCallback(async (adapterPath: string, basePath: string) => {
+    if (!adapterPath || !basePath) {
+      setAdapterValidation(null)
+      return
+    }
+    
+    setIsValidatingAdapter(true)
+    try {
+      const res = await fetch('/api/datasets/validate-adapter-base', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adapter_path: adapterPath,
+          base_model_path: basePath,
+          merge_before_training: true
+        })
+      })
+      
+      if (res.ok) {
+        const data = await res.json()
+        setAdapterValidation({
+          valid: data.valid,
+          compatible: data.compatible,
+          message: data.message,
+          merge_warnings: data.merge_warnings || []
+        })
+        
+        // If compatible and merge mode, enable all training options
+        if (data.valid && data.compatible && adapterMergeMode) {
+          // Update modelTypeInfo to reflect merged capabilities
+          setModelTypeInfo(prev => prev ? {
+            ...prev,
+            can_do_full: true,
+            can_do_rlhf: true,
+            warnings: [...(prev.warnings || []), '✅ Merge mode enabled: All training options available']
+          } : prev)
+        }
+      }
+    } catch (e) {
+      console.error('Failed to validate adapter:', e)
+      setAdapterValidation({
+        valid: false,
+        compatible: false,
+        message: 'Failed to validate adapter compatibility',
+        merge_warnings: []
+      })
+    } finally {
+      setIsValidatingAdapter(false)
+    }
+  }, [adapterMergeMode])
+
   // Fetch system capabilities - what this system can fine-tune
   const fetchSystemCapabilities = useCallback(async () => {
     try {
@@ -1328,7 +1397,8 @@ export default function Home() {
       if (modelInfoAbortController.current) modelInfoAbortController.current.abort()
       if (modelTypeAbortController.current) modelTypeAbortController.current.abort()
     }
-  }, [config.model_path, config.model_source, fetchModelInfo, fetchModelTypeInfo])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config.model_path, config.model_source]) // ONLY trigger on actual path/source change - callbacks are stable
 
   // Auto-set vLLM mode based on GPU count when selecting online RL algorithms
   // - Colocate mode (default) for 2+ GPUs: Training and inference share GPUs
@@ -2130,10 +2200,14 @@ export default function Home() {
       await fetchInferenceStatus()
       
       // Create job with combined dataset path and optional custom name
+      // Include adapter merge configuration if merge mode is enabled
       const jobConfig = {
         ...config,
         dataset_path: config.dataset_paths.join(','),
         name: trainingName.trim() || undefined,
+        // Adapter merge mode - merge adapter with base before training
+        merge_adapter_before_training: adapterMergeMode && modelTypeInfo?.is_adapter,
+        adapter_base_model_path: adapterMergeMode ? adapterBaseModelPath : undefined,
       }
       
       const createRes = await fetch('/api/jobs/create', {
@@ -4146,6 +4220,124 @@ export default function Home() {
                                       )}
                                     </div>
                                   ) : null}
+                                </div>
+                              )}
+                              
+                              {/* Adapter Merge Mode - shown when LoRA/QLoRA adapter is detected */}
+                              {modelTypeInfo?.is_adapter && config.model_source === 'local' && (
+                                <div className="mt-4 p-4 bg-amber-50 rounded-lg border border-amber-200">
+                                  <div className="flex items-start gap-3 mb-3">
+                                    <div className="w-8 h-8 rounded-lg bg-amber-100 flex items-center justify-center flex-shrink-0">
+                                      <span className="text-amber-600 text-lg">🔗</span>
+                                    </div>
+                                    <div>
+                                      <p className="font-medium text-amber-800">
+                                        {modelTypeInfo.model_type === 'qlora' ? 'QLoRA' : 'LoRA'} Adapter Detected
+                                      </p>
+                                      <p className="text-sm text-amber-700 mt-1">
+                                        {modelTypeInfo.quantization_bits ? `${modelTypeInfo.quantization_bits}-bit quantized • ` : ''}
+                                        {modelTypeInfo.adapter_r ? `Rank: ${modelTypeInfo.adapter_r}` : ''}
+                                        {modelTypeInfo.adapter_alpha ? ` • Alpha: ${modelTypeInfo.adapter_alpha}` : ''}
+                                      </p>
+                                      {modelTypeInfo.base_model_path && (
+                                        <p className="text-xs text-amber-600 mt-1">
+                                          Trained on: {modelTypeInfo.base_model_path}
+                                        </p>
+                                      )}
+                                    </div>
+                                  </div>
+                                  
+                                  {/* Merge Mode Toggle */}
+                                  <label className="flex items-center gap-3 p-3 bg-white rounded-lg border border-amber-200 cursor-pointer hover:bg-amber-25 transition-colors">
+                                    <input
+                                      type="checkbox"
+                                      checked={adapterMergeMode}
+                                      onChange={(e) => {
+                                        setAdapterMergeMode(e.target.checked)
+                                        if (!e.target.checked) {
+                                          setAdapterBaseModelPath('')
+                                          setAdapterValidation(null)
+                                        }
+                                      }}
+                                      className="w-5 h-5 rounded text-blue-600 focus:ring-blue-500"
+                                    />
+                                    <div>
+                                      <p className="font-medium text-slate-800">Enable Merge Mode</p>
+                                      <p className="text-xs text-slate-600">
+                                        Merge adapter with base model to unlock Full Fine-tuning & RLHF options
+                                      </p>
+                                    </div>
+                                  </label>
+                                  
+                                  {/* Base Model Path Input - shown when merge mode enabled */}
+                                  {adapterMergeMode && (
+                                    <div className="mt-3 space-y-3">
+                                      <div>
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">
+                                          Base Model Path
+                                        </label>
+                                        <input
+                                          type="text"
+                                          value={adapterBaseModelPath}
+                                          onChange={(e) => setAdapterBaseModelPath(e.target.value)}
+                                          onBlur={() => {
+                                            if (adapterBaseModelPath && config.model_path) {
+                                              validateAdapterBase(config.model_path, adapterBaseModelPath)
+                                            }
+                                          }}
+                                          placeholder={modelTypeInfo.base_model_path || '/path/to/base/model'}
+                                          className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                        />
+                                        {modelTypeInfo.base_model_path && (
+                                          <button
+                                            onClick={() => {
+                                              setAdapterBaseModelPath(modelTypeInfo.base_model_path || '')
+                                              if (modelTypeInfo.base_model_path && config.model_path) {
+                                                validateAdapterBase(config.model_path, modelTypeInfo.base_model_path)
+                                              }
+                                            }}
+                                            className="mt-1 text-xs text-blue-600 hover:text-blue-700"
+                                          >
+                                            Use adapter's base model: {modelTypeInfo.base_model_path}
+                                          </button>
+                                        )}
+                                      </div>
+                                      
+                                      {/* Validation Status */}
+                                      {isValidatingAdapter && (
+                                        <div className="flex items-center gap-2 text-sm text-slate-500">
+                                          <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                                          <span>Validating compatibility...</span>
+                                        </div>
+                                      )}
+                                      
+                                      {adapterValidation && !isValidatingAdapter && (
+                                        <div className={`p-3 rounded-lg ${
+                                          adapterValidation.compatible 
+                                            ? 'bg-green-50 border border-green-200' 
+                                            : 'bg-red-50 border border-red-200'
+                                        }`}>
+                                          <p className={`text-sm font-medium ${
+                                            adapterValidation.compatible ? 'text-green-800' : 'text-red-800'
+                                          }`}>
+                                            {adapterValidation.compatible ? '✅ ' : '⚠️ '}{adapterValidation.message}
+                                          </p>
+                                          {adapterValidation.merge_warnings.length > 0 && (
+                                            <ul className="mt-2 text-xs text-slate-600 space-y-1">
+                                              {adapterValidation.merge_warnings.map((warning, idx) => (
+                                                <li key={idx}>• {warning}</li>
+                                              ))}
+                                            </ul>
+                                          )}
+                                          {adapterValidation.compatible && (
+                                            <p className="mt-2 text-xs text-green-700">
+                                              ✓ Full fine-tuning now available • ✓ RLHF with full training enabled
+                                            </p>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
                                 </div>
                               )}
                             </div>

@@ -298,13 +298,19 @@ class ModelTypeInfo:
     """Model type detection result"""
     model_type: ModelType
     is_adapter: bool
-    base_model_path: Optional[str]  # For LoRA adapters, the base model path
+    base_model_path: Optional[str]  # For LoRA adapters, the base model path from adapter_config
     adapter_config: Optional[Dict[str, Any]]
     can_do_lora: bool
     can_do_qlora: bool
     can_do_full: bool
     can_do_rlhf: bool
     warnings: List[str]
+    # New fields for runtime merge support
+    can_merge_with_base: bool = False  # True if adapter can be merged with base for full options
+    merge_unlocks_full: bool = False   # True if merging would enable full fine-tuning
+    adapter_r: Optional[int] = None    # LoRA rank from adapter config
+    adapter_alpha: Optional[int] = None  # LoRA alpha from adapter config
+    quantization_bits: Optional[int] = None  # 4 or 8 for QLoRA, None for LoRA
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -316,6 +322,11 @@ class ModelTypeInfo:
             "can_do_full": self.can_do_full,
             "can_do_rlhf": self.can_do_rlhf,
             "warnings": self.warnings,
+            "can_merge_with_base": self.can_merge_with_base,
+            "merge_unlocks_full": self.merge_unlocks_full,
+            "adapter_r": self.adapter_r,
+            "adapter_alpha": self.adapter_alpha,
+            "quantization_bits": self.quantization_bits,
         }
 
 
@@ -1020,6 +1031,22 @@ class DatasetTypeService:
                         "Base model path not found in adapter config. RLHF training may require manual base model specification."
                     )
                 
+                # Extract adapter details for UI display
+                adapter_r = adapter_config.get("r")
+                adapter_alpha = adapter_config.get("lora_alpha")
+                quant_bits = adapter_config.get("bits")
+                if not quant_bits and adapter_config.get("load_in_4bit"):
+                    quant_bits = 4
+                elif not quant_bits and adapter_config.get("load_in_8bit"):
+                    quant_bits = 8
+                
+                # Adapters can be merged with base model to unlock full fine-tuning
+                can_merge = base_model is not None
+                
+                warnings.append(
+                    "💡 Tip: Provide the base model to merge with this adapter and unlock all training options (Full, RLHF with Full)."
+                )
+                
                 return ModelTypeInfo(
                     model_type=model_type,
                     is_adapter=True,
@@ -1027,9 +1054,14 @@ class DatasetTypeService:
                     adapter_config=adapter_config,
                     can_do_lora=True,  # Can train new LoRA on top
                     can_do_qlora=True,
-                    can_do_full=False,  # Cannot do full fine-tuning on adapter
+                    can_do_full=False,  # Cannot do full fine-tuning on adapter alone
                     can_do_rlhf=can_do_rlhf,
-                    warnings=warnings
+                    warnings=warnings,
+                    can_merge_with_base=can_merge,
+                    merge_unlocks_full=True,  # Merging enables full fine-tuning
+                    adapter_r=adapter_r,
+                    adapter_alpha=adapter_alpha,
+                    quantization_bits=quant_bits,
                 )
                 
             except (json.JSONDecodeError, IOError) as e:

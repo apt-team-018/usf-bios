@@ -751,6 +751,33 @@ class ModelTypeResponse(BaseModel):
     can_do_full: bool
     can_do_rlhf: bool
     warnings: List[str]
+    # New fields for runtime merge support
+    can_merge_with_base: bool = False
+    merge_unlocks_full: bool = False
+    adapter_r: Optional[int] = None
+    adapter_alpha: Optional[int] = None
+    quantization_bits: Optional[int] = None
+
+
+class AdapterValidationRequest(BaseModel):
+    """Request for validating adapter + base model compatibility"""
+    adapter_path: str
+    base_model_path: str
+    merge_before_training: bool = False  # If true, merge adapter into base at runtime
+
+
+class AdapterValidationResponse(BaseModel):
+    """Response for adapter validation"""
+    valid: bool
+    compatible: bool
+    message: str
+    adapter_base_model: Optional[str] = None  # Base model from adapter config
+    provided_base_model: str
+    can_merge: bool = False
+    merge_warnings: List[str] = []
+    # After merge, all options available
+    after_merge_can_do_full: bool = True
+    after_merge_can_do_rlhf: bool = True
 
 
 class TrainingValidationRequest(BaseModel):
@@ -829,6 +856,7 @@ async def detect_model_type(model_path: str = Query(..., description="Path to mo
     1. Warn users if they try to do full fine-tuning on a LoRA adapter
     2. Ensure proper base model is available for LoRA adapter training
     3. Validate RLHF compatibility
+    4. Check if adapter can be merged with base for full training options
     """
     try:
         result = dataset_type_service.detect_model_type(model_path)
@@ -841,6 +869,11 @@ async def detect_model_type(model_path: str = Query(..., description="Path to mo
             can_do_full=result.can_do_full,
             can_do_rlhf=result.can_do_rlhf,
             warnings=result.warnings,
+            can_merge_with_base=result.can_merge_with_base,
+            merge_unlocks_full=result.merge_unlocks_full,
+            adapter_r=result.adapter_r,
+            adapter_alpha=result.adapter_alpha,
+            quantization_bits=result.quantization_bits,
         )
     except Exception as e:
         return ModelTypeResponse(
@@ -853,6 +886,122 @@ async def detect_model_type(model_path: str = Query(..., description="Path to mo
             can_do_rlhf=True,
             warnings=[f"Error detecting model type: {str(e)}"],
         )
+
+
+@router.post("/validate-adapter-base", response_model=AdapterValidationResponse)
+async def validate_adapter_base(request: AdapterValidationRequest):
+    """
+    Validate if an adapter is compatible with a provided base model.
+    
+    This is used when user wants to:
+    1. Provide adapter + base model separately
+    2. Merge adapter into base at runtime for full training options
+    3. Validate compatibility before training starts
+    """
+    from pathlib import Path
+    import json
+    
+    adapter_path = Path(request.adapter_path)
+    base_path = Path(request.base_model_path)
+    merge_warnings = []
+    
+    # Check adapter exists
+    if not adapter_path.exists():
+        return AdapterValidationResponse(
+            valid=False,
+            compatible=False,
+            message=f"Adapter path does not exist: {request.adapter_path}",
+            provided_base_model=request.base_model_path,
+            can_merge=False,
+        )
+    
+    # Check base model exists
+    if not base_path.exists():
+        return AdapterValidationResponse(
+            valid=False,
+            compatible=False,
+            message=f"Base model path does not exist: {request.base_model_path}",
+            provided_base_model=request.base_model_path,
+            can_merge=False,
+        )
+    
+    # Check adapter has adapter_config.json
+    adapter_config_path = adapter_path / "adapter_config.json"
+    if not adapter_config_path.exists():
+        return AdapterValidationResponse(
+            valid=False,
+            compatible=False,
+            message=f"Not a valid adapter: missing adapter_config.json in {request.adapter_path}",
+            provided_base_model=request.base_model_path,
+            can_merge=False,
+        )
+    
+    # Check base has config.json
+    base_config_path = base_path / "config.json"
+    if not base_config_path.exists():
+        return AdapterValidationResponse(
+            valid=False,
+            compatible=False,
+            message=f"Not a valid base model: missing config.json in {request.base_model_path}",
+            provided_base_model=request.base_model_path,
+            can_merge=False,
+        )
+    
+    # Read adapter config
+    try:
+        with open(adapter_config_path, 'r') as f:
+            adapter_config = json.load(f)
+    except Exception as e:
+        return AdapterValidationResponse(
+            valid=False,
+            compatible=False,
+            message=f"Could not read adapter config: {str(e)}",
+            provided_base_model=request.base_model_path,
+            can_merge=False,
+        )
+    
+    adapter_base_model = adapter_config.get("base_model_name_or_path", "")
+    
+    # Check compatibility - compare model names (flexible matching)
+    compatible = True
+    if adapter_base_model:
+        # Extract model name from full path (e.g., "meta-llama/Llama-3.1-8B" -> "llama-3.1-8b")
+        adapter_base_name = adapter_base_model.split("/")[-1].lower().replace("_", "-")
+        provided_base_name = request.base_model_path.split("/")[-1].lower().replace("_", "-")
+        
+        if adapter_base_name not in provided_base_name and provided_base_name not in adapter_base_name:
+            compatible = False
+            merge_warnings.append(
+                f"Warning: Adapter was trained on '{adapter_base_model}' but you provided '{request.base_model_path}'. "
+                "Merging may produce unexpected results if architectures differ."
+            )
+    else:
+        merge_warnings.append(
+            "Adapter config does not specify base model. Cannot verify compatibility automatically."
+        )
+    
+    # Check for QLoRA - merging quantized adapters has limitations
+    is_qlora = adapter_config.get("bits") in [4, 8] or adapter_config.get("load_in_4bit") or adapter_config.get("load_in_8bit")
+    if is_qlora:
+        merge_warnings.append(
+            "This is a QLoRA adapter. Merging will produce a full-precision model. "
+            "Ensure you have sufficient VRAM for the merged model."
+        )
+    
+    message = "Adapter and base model are compatible for merging." if compatible else \
+              "Adapter may not be compatible with the provided base model. Proceed with caution."
+    
+    return AdapterValidationResponse(
+        valid=True,
+        compatible=compatible,
+        message=message,
+        adapter_base_model=adapter_base_model,
+        provided_base_model=request.base_model_path,
+        can_merge=True,
+        merge_warnings=merge_warnings,
+        after_merge_can_do_full=True,
+        after_merge_can_do_rlhf=True,
+    )
 
 
 @router.post("/validate-training-config", response_model=TrainingValidationResponse)

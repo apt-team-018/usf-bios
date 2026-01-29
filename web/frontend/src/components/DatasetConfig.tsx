@@ -327,11 +327,71 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
     return true // Allow if check fails
   }
 
+  // Helper to format user-friendly error messages
+  const formatUploadError = (error: any, context: string): string => {
+    const errorStr = error?.message || String(error)
+    
+    // Network/connection errors
+    if (errorStr.includes('Failed to fetch') || errorStr.includes('NetworkError') || errorStr.includes('ERR_')) {
+      return `Connection error: Unable to reach the server. Please check:\n• Backend service is running\n• Network connection is stable\n• Try refreshing the page`
+    }
+    
+    // File size errors
+    if (errorStr.includes('too large') || errorStr.includes('size') || errorStr.includes('413')) {
+      return `File too large: The file exceeds the maximum upload size. For large datasets, use JSONL format or the Local Path option.`
+    }
+    
+    // Format errors
+    if (errorStr.includes('format') || errorStr.includes('parse') || errorStr.includes('JSON') || errorStr.includes('invalid')) {
+      return `Invalid format: The file format is not recognized. Please ensure:\n• JSONL files have one JSON object per line\n• JSON files are valid JSON arrays\n• CSV files have proper headers`
+    }
+    
+    // Permission errors
+    if (errorStr.includes('permission') || errorStr.includes('access') || errorStr.includes('403')) {
+      return `Permission denied: Cannot write to the data directory. Please check server file permissions.`
+    }
+    
+    // Disk space errors
+    if (errorStr.includes('space') || errorStr.includes('disk') || errorStr.includes('storage')) {
+      return `Storage error: Insufficient disk space. Please free up space on the server.`
+    }
+    
+    // Timeout errors
+    if (errorStr.includes('timeout') || errorStr.includes('timed out')) {
+      return `Upload timeout: The upload took too long. For large files, try:\n• Using JSONL format (faster streaming)\n• Splitting into smaller files\n• Using Local Path option`
+    }
+    
+    // Server errors
+    if (errorStr.includes('500') || errorStr.includes('Internal Server Error')) {
+      return `Server error: An unexpected error occurred. Please check the backend logs for details.`
+    }
+    
+    // Return original error if no specific match
+    return `${context} failed: ${errorStr}`
+  }
+
   const uploadDataset = async () => {
     if (!uploadFile || !uploadName.trim()) {
       setUploadError('Please provide both a file and a name')
       return
     }
+    
+    // Validate file extension
+    const fileName = uploadFile.name.toLowerCase()
+    const validExtensions = ['.jsonl', '.json', '.csv', '.txt']
+    const hasValidExtension = validExtensions.some(ext => fileName.endsWith(ext))
+    if (!hasValidExtension) {
+      setUploadError(`Unsupported file type. Please upload one of: ${validExtensions.join(', ')}`)
+      return
+    }
+    
+    // Warn about large files
+    const fileSizeMB = uploadFile.size / (1024 * 1024)
+    if (fileSizeMB > 500 && !fileName.endsWith('.jsonl')) {
+      setUploadError(`Large files (${fileSizeMB.toFixed(1)}MB) should use JSONL format for better performance. Please convert to JSONL or use Local Path option.`)
+      return
+    }
+    
     setIsUploading(true)
     setUploadError('')
     try {
@@ -350,8 +410,14 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
       })
       
       if (!res.ok) {
-        const data = await res.json()
-        throw new Error(data.detail || `Upload failed with status ${res.status}`)
+        let errorDetail = `Upload failed (HTTP ${res.status})`
+        try {
+          const data = await res.json()
+          errorDetail = data.detail || data.error || data.message || errorDetail
+        } catch {
+          // Response not JSON
+        }
+        throw new Error(errorDetail)
       }
       
       const data = await res.json()
@@ -360,11 +426,15 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
         setUploadFile(null)
         if (fileInputRef.current) fileInputRef.current.value = ''
         await fetchDatasets()
+        // Show success message if callback available
+        if (onShowAlert) {
+          onShowAlert(`Dataset "${uploadName}" uploaded successfully with ${data.total_samples || 'unknown'} samples.`, 'success', 'Upload Complete')
+        }
       } else {
-        setUploadError(data.detail || 'Upload failed')
+        setUploadError(data.detail || data.error || 'Upload failed - please check file format')
       }
     } catch (e: any) {
-      setUploadError(e.message || `Upload failed: ${e}`)
+      setUploadError(formatUploadError(e, 'Upload'))
     } finally {
       setIsUploading(false)
     }
@@ -375,6 +445,24 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
       setRegisterError('Please provide a name and dataset ID/path')
       return
     }
+    
+    // Validate HuggingFace dataset ID format
+    if (activeTab === 'huggingface') {
+      const hfPattern = /^[\w.-]+\/[\w.-]+$/
+      if (!hfPattern.test(registerPath.trim()) && !registerPath.includes('/')) {
+        setRegisterError('Invalid HuggingFace dataset ID. Format should be: owner/dataset-name (e.g., "tatsu-lab/alpaca")')
+        return
+      }
+    }
+    
+    // Validate local path format
+    if (activeTab === 'local_path') {
+      if (!registerPath.startsWith('/')) {
+        setRegisterError('Local path must be an absolute path starting with / (e.g., "/data/my_dataset.jsonl")')
+        return
+      }
+    }
+    
     setIsRegistering(true)
     setRegisterError('')
     try {
@@ -402,8 +490,25 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
       })
       
       if (!res.ok) {
-        const data = await res.json()
-        throw new Error(data.detail || `Registration failed with status ${res.status}`)
+        let errorDetail = `Registration failed (HTTP ${res.status})`
+        try {
+          const data = await res.json()
+          errorDetail = data.detail || data.error || data.message || errorDetail
+          
+          // Provide specific guidance for common errors
+          if (res.status === 404) {
+            if (activeTab === 'huggingface') {
+              errorDetail = `Dataset not found on HuggingFace: "${registerPath}". Please verify:\n• Dataset ID is correct (owner/dataset-name)\n• Dataset is public or you have access\n• HuggingFace token is configured if private`
+            } else if (activeTab === 'local_path') {
+              errorDetail = `File not found: "${registerPath}". Please verify:\n• Path exists on the server\n• Path is accessible by the backend service\n• File has correct permissions`
+            }
+          } else if (res.status === 401 || res.status === 403) {
+            errorDetail = `Access denied for "${registerPath}". For private datasets, configure HF_TOKEN in environment.`
+          }
+        } catch {
+          // Response not JSON
+        }
+        throw new Error(errorDetail)
       }
       
       const data = await res.json()
@@ -415,11 +520,15 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
         setDatasetInfo(null)
         setInfoFetched(false)
         await fetchDatasets()
+        // Show success message
+        if (onShowAlert) {
+          onShowAlert(`Dataset "${registerName}" registered successfully.`, 'success', 'Registration Complete')
+        }
       } else {
-        setRegisterError(data.detail || 'Registration failed')
+        setRegisterError(data.detail || data.error || 'Registration failed - please check dataset path')
       }
     } catch (e: any) {
-      setRegisterError(e.message || `Registration failed: ${e}`)
+      setRegisterError(formatUploadError(e, 'Registration'))
     } finally {
       setIsRegistering(false)
     }

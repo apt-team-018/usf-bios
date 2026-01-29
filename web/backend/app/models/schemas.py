@@ -268,6 +268,15 @@ class TrainingConfig(BaseModel):
     max_steps: Optional[int] = Field(default=None, ge=1, description="Max training steps (required when streaming=True)")
     shuffle_buffer_size: int = Field(default=1000, ge=1, description="Buffer size for shuffling in streaming mode")
     
+    # Adapter merge mode - merge LoRA/QLoRA adapter with base model before training
+    # This enables full fine-tuning and RLHF on adapters by merging them first
+    merge_adapter_before_training: bool = Field(
+        default=False, description="Merge adapter with base model before training to unlock full fine-tuning"
+    )
+    adapter_base_model_path: Optional[str] = Field(
+        default=None, description="Base model path for merging with adapter (required when merge_adapter_before_training=True)"
+    )
+    
     @field_validator('gpu_ids')
     @classmethod
     def validate_gpu_ids(cls, v):
