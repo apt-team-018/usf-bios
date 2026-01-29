@@ -590,7 +590,7 @@ class UsfOmegaAgentTemplate(BaseAgentTemplate):
         
         for refs_str, content in matches:
             # Parse refs like "s001","s002" or 's001','s002'
-            refs = re.findall(r'["\']([^"\']*)["\'']', refs_str)
+            refs = re.findall(r'["\']([^"\']*)["\']', refs_str)
             results.append({
                 'refs': refs,
                 'content': content.strip()
