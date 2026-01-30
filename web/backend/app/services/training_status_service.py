@@ -156,11 +156,17 @@ class TrainingStatusService:
     2. Real-time status updates
     3. System restrictions (block inference during training)
     4. Process-level fallback detection
+    5. Staleness detection for stuck training jobs
     """
+    
+    # Staleness thresholds (in seconds)
+    INITIALIZING_STALE_THRESHOLD = 300  # 5 minutes in initializing with no logs = stale
+    NO_PROGRESS_STALE_THRESHOLD = 600   # 10 minutes with no progress updates = stale
     
     def __init__(self):
         self._status = TrainingStatus()
         self._lock = asyncio.Lock()
+        self._last_progress_update: Optional[datetime] = None
     
     async def get_status(self) -> TrainingStatus:
         """
@@ -181,6 +187,8 @@ class TrainingStatusService:
     
     async def _refresh_status(self) -> None:
         """Refresh status from all sources"""
+        from .sanitized_log_service import sanitized_log_service
+        
         # Check job manager for active jobs
         jobs = await job_manager.get_all_jobs()
         active_job = None
@@ -193,6 +201,54 @@ class TrainingStatusService:
         # Check OS process as fallback
         process_running = job_manager.is_training_process_running()
         process_pid = job_manager.get_running_training_pid() if process_running else None
+        
+        # STALENESS DETECTION: Check if job appears stuck
+        is_stale = False
+        stale_reason = None
+        
+        if active_job and not process_running:
+            # Job says it's running but no process - definitely stale
+            is_stale = True
+            stale_reason = "Training process not found - job may have crashed"
+        elif active_job and active_job.started_at:
+            time_since_start = (datetime.utcnow() - active_job.started_at).total_seconds()
+            
+            # Check if stuck in INITIALIZING too long
+            if active_job.status == JobStatus.INITIALIZING:
+                # Check if there are any terminal logs
+                try:
+                    logs = sanitized_log_service.get_terminal_logs(active_job.job_id, lines=10)
+                    has_logs = len(logs) > 0
+                except Exception:
+                    has_logs = False
+                
+                if time_since_start > self.INITIALIZING_STALE_THRESHOLD and not has_logs:
+                    is_stale = True
+                    stale_reason = f"Stuck in initializing for {int(time_since_start/60)} minutes with no output"
+            
+            # Check if running but no progress for too long
+            elif active_job.status == JobStatus.RUNNING:
+                if self._last_progress_update:
+                    time_since_progress = (datetime.utcnow() - self._last_progress_update).total_seconds()
+                    if time_since_progress > self.NO_PROGRESS_STALE_THRESHOLD:
+                        is_stale = True
+                        stale_reason = f"No progress updates for {int(time_since_progress/60)} minutes"
+        
+        # If stale, mark job as failed
+        if is_stale and active_job:
+            await job_manager.update_job(
+                active_job.job_id,
+                status=JobStatus.FAILED,
+                error=f"Training appears stuck: {stale_reason}",
+                completed_at=datetime.utcnow()
+            )
+            sanitized_log_service.create_terminal_log(
+                active_job.job_id,
+                f"ERROR: Training detected as stale - {stale_reason}",
+                "ERROR"
+            )
+            # Clear the active job reference
+            active_job = None
         
         # Determine training state
         if active_job:
@@ -294,6 +350,8 @@ class TrainingStatusService:
                     )
                 
                 self._status.last_updated = datetime.utcnow()
+                # Track last progress update for staleness detection
+                self._last_progress_update = datetime.utcnow()
     
     async def set_training_started(
         self,
@@ -408,6 +466,69 @@ class TrainingStatusService:
         if status.is_training_active:
             return False, f"Another training is already in progress: {status.job_name or 'Unknown'}. Please wait for it to complete or stop it first."
         return True, "Ready to start training"
+
+
+    async def force_reset_stuck_training(self, job_id: str = None) -> Dict[str, Any]:
+        """
+        Force reset a stuck training job.
+        
+        This is used when a training job appears stuck and needs manual intervention.
+        It will:
+        1. Mark the job as failed
+        2. Clear training state
+        3. Allow new training to start
+        
+        Returns status of the reset operation.
+        """
+        from .sanitized_log_service import sanitized_log_service
+        
+        async with self._lock:
+            target_job_id = job_id or self._status.job_id
+            
+            if not target_job_id and not self._status.is_training_active:
+                return {
+                    "success": False,
+                    "message": "No active training to reset"
+                }
+            
+            # Try to stop any running training process
+            try:
+                job_manager.stop_all_training_processes()
+            except Exception as e:
+                pass  # Best effort
+            
+            # Mark job as failed if we have a job_id
+            if target_job_id and target_job_id != "unknown" and not target_job_id.startswith("pid-"):
+                try:
+                    await job_manager.update_job(
+                        target_job_id,
+                        status=JobStatus.FAILED,
+                        error="Training forcefully reset by user - job appeared stuck",
+                        completed_at=datetime.utcnow()
+                    )
+                    sanitized_log_service.create_terminal_log(
+                        target_job_id,
+                        "Training forcefully reset by user",
+                        "WARN"
+                    )
+                except Exception:
+                    pass
+            
+            # Clear training state
+            self._status.is_training_active = False
+            self._status.phase = TrainingPhase.FAILED
+            self._status.error_message = "Training forcefully reset"
+            self._status.can_create_job = True
+            self._status.can_load_inference = True
+            self._status.can_start_training = True
+            self._status.last_updated = datetime.utcnow()
+            self._last_progress_update = None
+            
+            return {
+                "success": True,
+                "message": f"Training reset successfully. Job {target_job_id} marked as failed.",
+                "job_id": target_job_id
+            }
 
 
 # Global instance

@@ -82,15 +82,7 @@ def get_gpu_metrics():
     Get AGGREGATED GPU metrics across ALL GPUs using pynvml (NVIDIA Management Library).
     Returns system-wide GPU metrics matching what cloud providers (RunPod, etc.) show.
     
-    IMPORTANT: We aggregate metrics across ALL GPUs because:
-    - Cloud providers show total VRAM across all GPUs
-    - Users expect to see system-wide resource usage, not just one GPU
-    - This matches nvidia-smi behavior when showing total system resources
-    
-    Aggregation rules:
-    - VRAM: Sum of all GPUs (used and total)
-    - Utilization: Average across all GPUs (weighted by activity)
-    - Temperature: Maximum across all GPUs (hottest GPU matters for throttling)
+    Returns real-time data - no caching since GPU metrics change every second.
     """
     result = {
         "gpu_utilization": None,

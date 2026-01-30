@@ -21,9 +21,270 @@ from .job_service import JobService
 from .gpu_cleanup_service import gpu_cleanup_service
 
 
+def _sync_job_to_database(job_id: str, status: str, error_message: str = None, 
+                          started_at: datetime = None, completed_at: datetime = None):
+    """Sync job status to database for persistent history.
+    
+    This ensures training history survives server restarts.
+    Called after job status changes (started, completed, failed, stopped).
+    """
+    try:
+        from ..core.database import SessionLocal
+        from ..models.db_models import TrainingJob as DBTrainingJob
+        
+        db = SessionLocal()
+        try:
+            db_job = db.query(DBTrainingJob).filter(DBTrainingJob.id == job_id).first()
+            if db_job:
+                db_job.status = status
+                if error_message:
+                    db_job.error_message = error_message
+                if started_at:
+                    db_job.started_at = started_at
+                if completed_at:
+                    db_job.completed_at = completed_at
+                    # Calculate duration
+                    if db_job.started_at:
+                        duration = (completed_at - db_job.started_at).total_seconds()
+                        db_job.duration_seconds = int(duration)
+                db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        _debug_log(job_id, f"Failed to sync job to database: {e}", "WARNING")
+
+
 def _debug_log(job_id: str, message: str, level: str = "DEBUG"):
     """Write debug log to ENCRYPTED log file (only US Inc can read)."""
     encrypted_log_service.encrypt_and_format(f"[{level}] {message}", job_id, level)
+
+
+# ============================================================
+# OPTIMIZED HELPER FUNCTIONS - Defined once, reused across calls
+# ============================================================
+
+# Cache for model size patterns - avoids recreating on every call
+_MODEL_SIZE_PATTERNS = [
+    ('405b', 800), ('400b', 780), ('340b', 680), ('236b', 470),
+    ('180b', 360), ('175b', 350), ('140b', 280), ('123b', 246),
+    ('100b', 200), ('90b', 180), ('80b', 160), ('72b', 144),
+    ('70b', 140), ('65b', 130), ('55b', 110),
+    ('40b', 80), ('34b', 68), ('33b', 66), ('32b', 64), ('30b', 60),
+    ('27b', 54), ('26b', 52), ('25b', 50), ('24b', 48), ('22b', 44),
+    ('20b', 40), ('14b', 28), ('13b', 26), ('12b', 24), ('11b', 22),
+    ('9b', 18), ('8b', 16), ('7b', 14), ('6b', 12),
+    ('4b', 8), ('3.8b', 8), ('3b', 6), ('2.7b', 5.5), ('2b', 4),
+    ('1.5b', 3), ('1b', 2), ('0.5b', 1), ('500m', 1),
+    ('llama-3.1-405b', 800), ('llama-3-70b', 140), ('llama-3-8b', 16),
+    ('llama-2-70b', 140), ('llama-2-13b', 26), ('llama-2-7b', 14),
+    ('mistral-7b', 14), ('mixtral-8x7b', 95), ('mixtral-8x22b', 280),
+    ('qwen2.5-72b', 144), ('qwen2.5-32b', 64), ('qwen2.5-14b', 28),
+    ('qwen2.5-7b', 14), ('qwen2.5-3b', 6), ('qwen2.5-1.5b', 3),
+    ('deepseek-v3', 680), ('deepseek-v2', 236), ('deepseek-67b', 134),
+    ('phi-3-medium', 28), ('phi-3-small', 14), ('phi-3-mini', 8),
+    ('gemma-2-27b', 54), ('gemma-2-9b', 18), ('gemma-7b', 14),
+]
+
+
+def _get_model_size_from_config(model_path: str) -> Optional[float]:
+    """Try to read actual model size in GB from model's config.json.
+    
+    Detects dtype and calculates accurate size based on:
+    - Parameter count from architecture
+    - Bytes per parameter based on dtype (float32=4, bfloat16/float16=2, int8=1, int4=0.5)
+    
+    Returns size in GB if calculable, None otherwise.
+    """
+    import json
+    
+    config_path = os.path.join(model_path, "config.json")
+    if not os.path.exists(config_path):
+        return None
+    
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        # Detect dtype - check multiple possible field names
+        torch_dtype = config.get('torch_dtype', None)
+        dtype = config.get('dtype', None)
+        
+        # Determine bytes per parameter based on dtype
+        bytes_per_param = 2  # Default: bfloat16/float16
+        
+        dtype_str = (torch_dtype or dtype or '').lower()
+        if 'float32' in dtype_str or 'fp32' in dtype_str:
+            bytes_per_param = 4
+        elif 'float16' in dtype_str or 'fp16' in dtype_str or 'bfloat16' in dtype_str or 'bf16' in dtype_str:
+            bytes_per_param = 2
+        elif 'int8' in dtype_str or 'q8' in dtype_str:
+            bytes_per_param = 1
+        elif 'int4' in dtype_str or 'q4' in dtype_str or 'nf4' in dtype_str or 'fp4' in dtype_str:
+            bytes_per_param = 0.5
+        else:
+            # Check for quantization config
+            quant_config = config.get('quantization_config', {})
+            if quant_config:
+                quant_method = quant_config.get('quant_method', '').lower()
+                bits = quant_config.get('bits', quant_config.get('load_in_4bit', quant_config.get('load_in_8bit', None)))
+                
+                if bits == 4 or quant_config.get('load_in_4bit'):
+                    bytes_per_param = 0.5
+                elif bits == 8 or quant_config.get('load_in_8bit'):
+                    bytes_per_param = 1
+                elif 'gptq' in quant_method or 'awq' in quant_method:
+                    # GPTQ/AWQ typically use 4-bit
+                    bits = quant_config.get('bits', 4)
+                    bytes_per_param = bits / 8
+        
+        # Get parameter count
+        total_params = None
+        
+        # Some models have explicit parameter count
+        if 'num_parameters' in config:
+            total_params = config['num_parameters']
+        else:
+            # Calculate from architecture
+            hidden_size = config.get('hidden_size', config.get('d_model', 0))
+            num_layers = config.get('num_hidden_layers', config.get('n_layer', config.get('num_layers', 0)))
+            vocab_size = config.get('vocab_size', 0)
+            intermediate_size = config.get('intermediate_size', config.get('ffn_dim', hidden_size * 4 if hidden_size else 0))
+            num_attention_heads = config.get('num_attention_heads', config.get('n_head', 0))
+            num_kv_heads = config.get('num_key_value_heads', num_attention_heads)
+            
+            if hidden_size and num_layers and vocab_size:
+                # Embedding parameters
+                embedding_params = vocab_size * hidden_size * 2  # input + output embeddings
+                
+                # Per-layer parameters (attention + FFN)
+                head_dim = hidden_size // num_attention_heads if num_attention_heads else hidden_size
+                q_params = hidden_size * hidden_size
+                k_params = hidden_size * (num_kv_heads * head_dim) if num_kv_heads else hidden_size * hidden_size
+                v_params = k_params
+                o_params = hidden_size * hidden_size
+                attention_params = q_params + k_params + v_params + o_params
+                
+                # FFN: gate, up, down projections (for LLaMA-style)
+                ffn_params = hidden_size * intermediate_size * 3
+                
+                # Layer norms
+                ln_params = hidden_size * 4
+                
+                layer_params = attention_params + ffn_params + ln_params
+                total_layer_params = layer_params * num_layers
+                
+                total_params = embedding_params + total_layer_params
+        
+        if total_params:
+            # Calculate size in GB
+            size_gb = (total_params * bytes_per_param) / (1024 ** 3)
+            return max(size_gb, 0.5)
+            
+    except Exception:
+        pass
+    
+    return None
+
+
+def _estimate_model_size_from_name(model_name_or_path: str) -> float:
+    """Estimate model size in GB.
+    
+    Priority:
+    1. Read actual size from config.json with dtype detection (most accurate)
+    2. Check known model patterns
+    3. Parse size from model name (41b, 123b, etc.)
+    4. Conservative fallback (15GB)
+    
+    Handles all dtypes: float32, bfloat16, float16, int8, int4, GPTQ, AWQ, etc.
+    """
+    import re
+    
+    # 1. Try to read actual size from config.json (if local path)
+    # This handles dtype detection automatically (float32, bf16, int8, int4, etc.)
+    if os.path.isdir(model_name_or_path):
+        size_gb = _get_model_size_from_config(model_name_or_path)
+        if size_gb:
+            return size_gb
+    
+    # 2. Check known patterns (for model names/IDs)
+    model_lower = model_name_or_path.lower()
+    model_basename = os.path.basename(model_name_or_path).lower()
+    
+    for pattern, size_gb in _MODEL_SIZE_PATTERNS:
+        if pattern in model_lower or pattern in model_basename:
+            return size_gb
+    
+    # 3. Dynamic parsing: Extract size from model name
+    # Matches: 41b, 41B, 41-b, 41_b, 41billion, 123b, etc.
+    size_patterns = [
+        r'(\d+\.?\d*)[\-_]?b(?:illion)?(?:\b|$)',  # 41b, 41B, 41-b, 41billion
+        r'(\d+\.?\d*)[\-_]?m(?:illion)?(?:\b|$)',  # 500m, 500M, 500million
+    ]
+    
+    for check_str in [model_lower, model_basename]:
+        for pattern in size_patterns:
+            match = re.search(pattern, check_str)
+            if match:
+                size_value = float(match.group(1))
+                if 'm' in pattern:
+                    # Million parameters: ~2GB per billion params
+                    return max(size_value / 500, 0.5)
+                else:
+                    # Billion parameters: ~2GB per billion params
+                    return size_value * 2
+    
+    # 4. Conservative fallback
+    return 15
+
+
+def _get_dir_size_gb_fast(path: str, job_id: str = None, timeout_seconds: int = 10) -> float:
+    """Get directory size in GB using fast 'du' command with timeout."""
+    import subprocess
+    import platform
+    
+    if not os.path.exists(path):
+        return 0
+    
+    try:
+        if platform.system() == 'Darwin':  # macOS
+            result = subprocess.run(
+                ['du', '-sk', path],
+                capture_output=True, text=True, timeout=timeout_seconds
+            )
+            if result.returncode == 0:
+                size_kb = int(result.stdout.split()[0])
+                return size_kb / (1024 * 1024)
+        else:  # Linux
+            result = subprocess.run(
+                ['du', '-sb', path],
+                capture_output=True, text=True, timeout=timeout_seconds
+            )
+            if result.returncode == 0:
+                size_bytes = int(result.stdout.split()[0])
+                return size_bytes / (1024 ** 3)
+    except subprocess.TimeoutExpired:
+        if job_id:
+            _debug_log(job_id, f"du command timed out for {path}, using estimation")
+    except Exception as e:
+        if job_id:
+            _debug_log(job_id, f"du command failed: {e}, using estimation")
+    
+    return _estimate_model_size_from_name(os.path.basename(path))
+
+
+def _get_available_space_gb(path: str) -> float:
+    """Get available disk space in GB for a path."""
+    import shutil
+    try:
+        check_path = path
+        while not os.path.exists(check_path) and check_path != '/':
+            check_path = os.path.dirname(check_path)
+        if not check_path:
+            check_path = '/'
+        usage = shutil.disk_usage(check_path)
+        return usage.free / (1024 ** 3)
+    except Exception:
+        return -1
 
 
 def _log_step(job_id: str, step_name: str, details: dict = None, level: str = "INFO"):
@@ -747,71 +1008,14 @@ class TrainingService:
             
             # ============================================================
             # STORAGE SPACE VALIDATION - Ensure enough disk space
+            # Uses optimized helper functions defined at module level
             # ============================================================
             _log_step(job_id, "STORAGE_VALIDATION_START", {"phase": "storage space check"})
-            import shutil
             
-            def get_dir_size_gb(path: str) -> float:
-                """Get directory size in GB"""
-                total = 0
-                try:
-                    for dirpath, dirnames, filenames in os.walk(path):
-                        for f in filenames:
-                            fp = os.path.join(dirpath, f)
-                            if os.path.exists(fp):
-                                total += os.path.getsize(fp)
-                except Exception:
-                    pass
-                return total / (1024 ** 3)
-            
-            def get_available_space_gb(path: str) -> float:
-                """Get available disk space in GB for a path"""
-                try:
-                    # Find the mount point for the path
-                    check_path = path
-                    while not os.path.exists(check_path) and check_path != '/':
-                        check_path = os.path.dirname(check_path)
-                    if not check_path:
-                        check_path = '/'
-                    usage = shutil.disk_usage(check_path)
-                    return usage.free / (1024 ** 3)
-                except Exception:
-                    return -1  # Unknown
-            
-            def estimate_model_size_from_name(model_name: str) -> float:
-                """Estimate model size in GB based on model name/ID (for HuggingFace models)"""
-                model_lower = model_name.lower()
-                
-                # Common model size patterns
-                size_patterns = [
-                    # Explicit size in name
-                    ('405b', 800), ('400b', 780), ('340b', 680), ('236b', 470),
-                    ('180b', 360), ('175b', 350), ('140b', 280), ('123b', 246),
-                    ('100b', 200), ('90b', 180), ('80b', 160), ('72b', 144),
-                    ('70b', 140), ('65b', 130), ('55b', 110),
-                    ('40b', 80), ('34b', 68), ('33b', 66), ('32b', 64), ('30b', 60),
-                    ('27b', 54), ('26b', 52), ('25b', 50), ('24b', 48), ('22b', 44),
-                    ('20b', 40), ('14b', 28), ('13b', 26), ('12b', 24), ('11b', 22),
-                    ('9b', 18), ('8b', 16), ('7b', 14), ('6b', 12),
-                    ('4b', 8), ('3.8b', 8), ('3b', 6), ('2.7b', 5.5), ('2b', 4),
-                    ('1.5b', 3), ('1b', 2), ('0.5b', 1), ('500m', 1),
-                    # Model families with known sizes
-                    ('llama-3.1-405b', 800), ('llama-3-70b', 140), ('llama-3-8b', 16),
-                    ('llama-2-70b', 140), ('llama-2-13b', 26), ('llama-2-7b', 14),
-                    ('mistral-7b', 14), ('mixtral-8x7b', 95), ('mixtral-8x22b', 280),
-                    ('qwen2.5-72b', 144), ('qwen2.5-32b', 64), ('qwen2.5-14b', 28),
-                    ('qwen2.5-7b', 14), ('qwen2.5-3b', 6), ('qwen2.5-1.5b', 3),
-                    ('deepseek-v3', 680), ('deepseek-v2', 236), ('deepseek-67b', 134),
-                    ('phi-3-medium', 28), ('phi-3-small', 14), ('phi-3-mini', 8),
-                    ('gemma-2-27b', 54), ('gemma-2-9b', 18), ('gemma-7b', 14),
-                ]
-                
-                for pattern, size_gb in size_patterns:
-                    if pattern in model_lower:
-                        return size_gb
-                
-                # Default estimate for unknown models
-                return 15  # Conservative default
+            # Use optimized module-level functions
+            get_dir_size_gb = lambda path: _get_dir_size_gb_fast(path, job_id)
+            get_available_space_gb = _get_available_space_gb
+            estimate_model_size_from_name = _estimate_model_size_from_name
             
             merge_enabled = getattr(config, 'merge_adapter_before_training', False)
             adapter_base_path = getattr(config, 'adapter_base_model_path', None)
@@ -1248,7 +1452,12 @@ class TrainingService:
             })
             
             await job_manager.set_process(job_id, process)
+            started_time = datetime.now()
             await job_manager.update_job(job_id, status=JobStatus.RUNNING)
+            
+            # PERSIST TO DATABASE - mark as running with start time
+            _sync_job_to_database(job_id, "running", started_at=started_time)
+            
             _log_step(job_id, "STATUS_UPDATE", {"status": "RUNNING", "pid": process.pid})
             await ws_manager.send_status(job_id, "running")
             sanitized_log_service.create_terminal_log(job_id, "Training started...", "INFO")
@@ -1498,10 +1707,15 @@ class TrainingService:
                     "total_steps": total_steps,
                     "checkpoint_count": checkpoint_count,
                 })
+                completed_time = datetime.now()
                 await job_manager.update_job(job_id,
                     status=JobStatus.COMPLETED,
-                    completed_at=datetime.now()
+                    completed_at=completed_time
                 )
+                
+                # PERSIST TO DATABASE for training history
+                _sync_job_to_database(job_id, "completed", completed_at=completed_time)
+                
                 await ws_manager.send_status(job_id, "completed")
                 sanitized_log_service.create_terminal_log(job_id, "Training completed successfully!", "INFO")
                 await ws_manager.send_log(job_id, "Training completed successfully!", "success")
@@ -1535,11 +1749,16 @@ class TrainingService:
                     elif "out of memory" in last_log.lower():
                         error_msg = "Out of memory. Try reducing batch size."
                 
+                completed_time = datetime.now()
                 await job_manager.update_job(job_id,
                     status=JobStatus.FAILED,
                     error=error_msg,
-                    completed_at=datetime.now()
+                    completed_at=completed_time
                 )
+                
+                # PERSIST TO DATABASE for training history
+                _sync_job_to_database(job_id, "failed", error_message=error_msg, completed_at=completed_time)
+                
                 await ws_manager.send_status(job_id, "failed", error_msg)
                 sanitized_log_service.create_terminal_log(job_id, error_msg, "ERROR")
                 await ws_manager.send_log(job_id, error_msg, "error")
@@ -1557,7 +1776,12 @@ class TrainingService:
                 "status": "cancelled",
                 "reason": "user_requested",
             }, "WARN")
+            completed_time = datetime.now()
             await job_manager.update_job(job_id, status=JobStatus.STOPPED)
+            
+            # PERSIST TO DATABASE for training history
+            _sync_job_to_database(job_id, "cancelled", completed_at=completed_time)
+            
             await ws_manager.send_status(job_id, "stopped")
             sanitized_log_service.create_terminal_log(job_id, "Training stopped by user", "WARN")
             await ws_manager.send_log(job_id, "Training stopped by user", "warning")
@@ -1591,10 +1815,15 @@ class TrainingService:
             sanitized = sanitized_log_service.sanitize_error(full_error)
             minimal_error = sanitized['user_message']
             
+            completed_time = datetime.now()
             await job_manager.update_job(job_id,
                 status=JobStatus.FAILED,
                 error=minimal_error  # Store minimal error only
             )
+            
+            # PERSIST TO DATABASE for training history
+            _sync_job_to_database(job_id, "failed", error_message=minimal_error, completed_at=completed_time)
+            
             await ws_manager.send_status(job_id, "failed", minimal_error)
             sanitized_log_service.create_terminal_log(job_id, f"Error: {minimal_error}", "ERROR")
             await ws_manager.send_log(job_id, f"Error: {minimal_error}", "error")
@@ -1629,14 +1858,8 @@ class TrainingService:
                 try:
                     import shutil
                     if os.path.exists(merge_dir):
-                        # Calculate size before deletion for logging
-                        dir_size_gb = 0
-                        for dirpath, dirnames, filenames in os.walk(merge_dir):
-                            for f in filenames:
-                                fp = os.path.join(dirpath, f)
-                                if os.path.exists(fp):
-                                    dir_size_gb += os.path.getsize(fp)
-                        dir_size_gb = dir_size_gb / (1024 ** 3)
+                        # Use fast 'du' command to get size (avoids slow os.walk on large models)
+                        dir_size_gb = _get_dir_size_gb_fast(merge_dir, job_id, timeout_seconds=5)
                         
                         # Delete the merged model directory
                         shutil.rmtree(merge_dir)

@@ -290,6 +290,8 @@ export default function Home() {
   const [isStartingTraining, setIsStartingTraining] = useState(false)
   const [isCheckingActiveTraining, setIsCheckingActiveTraining] = useState(true) // Start true - check on load
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null)
+  const [isTrainingStuck, setIsTrainingStuck] = useState(false) // Detect stuck training
+  const [isResettingTraining, setIsResettingTraining] = useState(false)
   const [trainingLogs, setTrainingLogs] = useState<string[]>([])
   
   // Global training status - single source of truth from backend
@@ -1707,6 +1709,73 @@ export default function Home() {
       clearInterval(interval)
     }
   }, [jobStatus?.job_id, isTraining])
+
+  // Detect stuck training - if initializing with 0 logs for > 2 minutes
+  useEffect(() => {
+    if (!isTraining || !jobStatus) {
+      setIsTrainingStuck(false)
+      return
+    }
+    
+    const checkStuck = () => {
+      // If status is initializing/running but no logs for extended time
+      if ((jobStatus.status === 'initializing' || jobStatus.status === 'running') && 
+          trainingLogs.length === 0 && 
+          jobStatus.current_step === 0) {
+        // Check how long we've been waiting
+        const startTime = localStorage.getItem(`training_start_${jobStatus.job_id}`)
+        if (!startTime) {
+          localStorage.setItem(`training_start_${jobStatus.job_id}`, Date.now().toString())
+        } else {
+          const elapsed = Date.now() - parseInt(startTime)
+          // If more than 2 minutes with no output, mark as stuck
+          if (elapsed > 120000) {
+            setIsTrainingStuck(true)
+          }
+        }
+      } else {
+        // We have logs or progress, not stuck
+        setIsTrainingStuck(false)
+        localStorage.removeItem(`training_start_${jobStatus.job_id}`)
+      }
+    }
+    
+    checkStuck()
+    const interval = setInterval(checkStuck, 10000) // Check every 10 seconds
+    
+    return () => clearInterval(interval)
+  }, [isTraining, jobStatus, trainingLogs.length])
+
+  // Force reset stuck training
+  const forceResetTraining = async () => {
+    if (!confirm('This will forcefully reset the stuck training. The job will be marked as failed. Continue?')) {
+      return
+    }
+    
+    setIsResettingTraining(true)
+    try {
+      const res = await fetch('/api/jobs/force-reset', { method: 'POST' })
+      if (res.ok) {
+        const data = await res.json()
+        showAlert(data.message || 'Training reset successfully', 'success', 'Reset Complete')
+        setIsTraining(false)
+        setIsTrainingStuck(false)
+        setJobStatus(prev => prev ? { ...prev, status: 'failed', error: 'Training forcefully reset' } : null)
+        // Clean up localStorage
+        if (jobStatus?.job_id) {
+          localStorage.removeItem(`training_start_${jobStatus.job_id}`)
+        }
+      } else {
+        const err = await res.json().catch(() => ({}))
+        showAlert(err.detail || 'Failed to reset training', 'error', 'Reset Failed')
+      }
+    } catch (e) {
+      console.error('Force reset failed:', e)
+      showAlert('Failed to reset training', 'error', 'Reset Failed')
+    } finally {
+      setIsResettingTraining(false)
+    }
+  }
 
   // State for training type and available metrics
   const [trainTypeInfo, setTrainTypeInfo] = useState<{
@@ -3966,8 +4035,53 @@ export default function Home() {
                 </div>
               )}
               
+              {/* STUCK TRAINING WARNING - Show when training appears stuck */}
+              {isTrainingStuck && isTraining && (
+                <div className="bg-amber-50 border-2 border-amber-400 rounded-xl p-5 shadow-lg">
+                  <div className="flex items-start gap-4">
+                    <div className="w-12 h-12 rounded-full bg-amber-100 flex items-center justify-center flex-shrink-0">
+                      <AlertCircle className="w-7 h-7 text-amber-600" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <h4 className="font-bold text-amber-800 text-lg mb-2">Training Appears Stuck</h4>
+                      <p className="text-amber-700 text-sm mb-3">
+                        No output has been received for an extended period. The training process may have crashed or encountered an error.
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          onClick={forceResetTraining}
+                          disabled={isResettingTraining}
+                          className="px-4 py-2 bg-amber-600 text-white rounded-lg font-medium hover:bg-amber-700 disabled:opacity-50 flex items-center gap-2 text-sm"
+                        >
+                          {isResettingTraining ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                              Resetting...
+                            </>
+                          ) : (
+                            <>
+                              <RefreshCw className="w-4 h-4" />
+                              Force Reset Training
+                            </>
+                          )}
+                        </button>
+                        <button
+                          onClick={() => setIsTrainingStuck(false)}
+                          className="px-4 py-2 bg-amber-100 text-amber-800 rounded-lg font-medium hover:bg-amber-200 text-sm"
+                        >
+                          Dismiss Warning
+                        </button>
+                      </div>
+                      <p className="text-xs text-amber-600 mt-3">
+                        If you believe training is still running, you can dismiss this warning. Check server logs for more details.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+              
               {/* Placeholder when no metrics yet */}
-              {trainingMetrics.length <= 1 && isTraining && (
+              {trainingMetrics.length <= 1 && isTraining && !isTrainingStuck && (
                 <div className="bg-slate-50 rounded-lg border border-slate-200 p-6 text-center">
                   <Loader2 className="w-8 h-8 animate-spin text-blue-500 mx-auto mb-2" />
                   <p className="text-sm text-slate-600">Waiting for training metrics...</p>

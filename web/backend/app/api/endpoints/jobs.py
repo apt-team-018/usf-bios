@@ -33,10 +33,12 @@ class JobNameUpdate(BaseModel):
 
 
 @router.post("/create", response_model=JobInfo)
-async def create_job(config: TrainingConfig):
+async def create_job(config: TrainingConfig, db: Session = Depends(get_db)):
     """Create a new training job
     
     BLOCKED if another training is already in progress.
+    
+    IMPORTANT: Saves to both in-memory job_manager AND database for persistence.
     """
     _debug_log(f"create_job called with config: {config}")
     try:
@@ -86,7 +88,48 @@ async def create_job(config: TrainingConfig):
         # Architecture validation happens when model is loaded
         _debug_log("Creating job in job_manager...")
         job = await job_manager.create_job(config)
-        _debug_log(f"Job created: {job.job_id}")
+        _debug_log(f"Job created in memory: {job.job_id}")
+        
+        # ============================================================
+        # PERSIST TO DATABASE for training history
+        # This ensures history survives server restarts
+        # ============================================================
+        try:
+            from ...models.db_models import TrainingJob as DBTrainingJob
+            
+            # Convert config to dict for JSON storage
+            config_dict = {
+                "train_type": config.train_type.value if hasattr(config.train_type, 'value') else str(config.train_type),
+                "training_method": config.training_method.value if hasattr(config.training_method, 'value') else 'sft',
+                "model_path": config.model_path,
+                "dataset_path": config.dataset_path,
+                "num_train_epochs": config.num_train_epochs,
+                "learning_rate": config.learning_rate,
+                "per_device_train_batch_size": config.per_device_train_batch_size,
+                "gradient_accumulation_steps": config.gradient_accumulation_steps,
+                "max_length": config.max_length,
+                "lora_rank": config.lora_rank,
+                "lora_alpha": config.lora_alpha,
+                "output_dir": config.output_dir,
+            }
+            
+            db_job = DBTrainingJob(
+                id=job.job_id,
+                name=job.name,
+                model_source=model_source,
+                model_path=config.model_path,
+                model_name=config.model_path.split('/')[-1],
+                training_config=config_dict,
+                status="pending",
+                created_at=job.created_at,
+            )
+            db.add(db_job)
+            db.commit()
+            _debug_log(f"Job persisted to database: {job.job_id}")
+        except Exception as db_err:
+            _debug_log(f"Failed to persist job to database: {db_err}", level="WARNING")
+            # Don't fail the request - in-memory job is still valid
+        
         return job
     except HTTPException:
         raise
@@ -180,6 +223,26 @@ async def stop_job(job_id: str):
         raise HTTPException(status_code=500, detail="Failed to stop training")
     
     return {"job_id": job_id, "status": "stopped"}
+
+
+@router.post("/force-reset")
+async def force_reset_stuck_training():
+    """Force reset a stuck training job.
+    
+    This endpoint is used when training appears stuck (no progress for extended time).
+    It will:
+    1. Stop any running training processes
+    2. Mark the current job as failed
+    3. Clear training state to allow new training
+    """
+    from ...services.training_status_service import training_status_service
+    
+    result = await training_status_service.force_reset_stuck_training()
+    
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    
+    return result
 
 
 @router.get("/{job_id}", response_model=JobResponse)
@@ -1368,54 +1431,63 @@ async def get_training_history(
     
     Returns a list of all training jobs with their final metrics,
     output paths, and status. Ordered by creation date (newest first).
+    
+    IMPORTANT: Uses DATABASE for persistence, not in-memory job_manager.
+    This ensures training history survives server restarts.
     """
     from pathlib import Path
     from ...core.capabilities import get_system_settings
+    from ...models.db_models import TrainingJob as DBTrainingJob
     
     try:
-        jobs = await job_manager.get_all_jobs()
-        
-        # Sort by created_at descending (newest first)
-        jobs.sort(key=lambda x: x.created_at, reverse=True)
-        jobs = jobs[:limit]
-        
-        history = []
         service = JobService(db)
         
-        for job in jobs:
+        # ============================================================
+        # QUERY DATABASE for persistent training history
+        # This ensures history survives server restarts
+        # ============================================================
+        db_jobs = db.query(DBTrainingJob).order_by(
+            DBTrainingJob.created_at.desc()
+        ).limit(limit).all()
+        
+        # Also get in-memory jobs for currently running trainings
+        memory_jobs = await job_manager.get_all_jobs()
+        memory_job_ids = {j.job_id for j in memory_jobs}
+        
+        history = []
+        
+        # Process database jobs first (persistent history)
+        for db_job in db_jobs:
             job_data = {
-                "job_id": job.job_id,
-                "job_name": job.name,
-                "status": job.status.value if hasattr(job.status, 'value') else str(job.status),
-                "created_at": job.created_at.isoformat() if job.created_at else None,
-                "started_at": job.started_at.isoformat() if job.started_at else None,
-                "completed_at": job.completed_at.isoformat() if job.completed_at else None,
-                "current_step": job.current_step,
-                "total_steps": job.total_steps,
-                "error": job.error,
+                "job_id": db_job.id,
+                "job_name": db_job.name,
+                "status": db_job.status,
+                "created_at": db_job.created_at.isoformat() if db_job.created_at else None,
+                "started_at": db_job.started_at.isoformat() if db_job.started_at else None,
+                "completed_at": db_job.completed_at.isoformat() if db_job.completed_at else None,
+                "current_step": None,
+                "total_steps": None,
+                "error": db_job.error_message,
             }
             
-            # Add training config info
-            if job.config:
-                train_type = job.config.train_type.value if hasattr(job.config.train_type, 'value') else str(job.config.train_type)
-                training_method = getattr(job.config, 'training_method', None)
-                method_value = training_method.value if hasattr(training_method, 'value') else 'sft'
-                
+            # Add training config info from JSON
+            if db_job.training_config:
+                config = db_job.training_config
                 job_data["config"] = {
-                    "train_type": train_type,
-                    "training_method": method_value,
-                    "num_epochs": job.config.num_train_epochs,
-                    "learning_rate": job.config.learning_rate,
-                    "batch_size": job.config.per_device_train_batch_size,
+                    "train_type": config.get("train_type", "lora"),
+                    "training_method": config.get("training_method", "sft"),
+                    "num_epochs": config.get("num_train_epochs", 1),
+                    "learning_rate": config.get("learning_rate", 5e-5),
+                    "batch_size": config.get("per_device_train_batch_size", 1),
                 }
             
             # Add output path info
-            output_dir = get_system_settings().OUTPUT_DIR / job.job_id
+            output_dir = Path(db_job.output_dir) if db_job.output_dir else get_system_settings().OUTPUT_DIR / db_job.id
             job_data["output_path"] = str(output_dir)
-            job_data["output_exists"] = output_dir.exists()
+            job_data["output_exists"] = output_dir.exists() if output_dir else False
             
             # Check for adapter/checkpoint files
-            if output_dir.exists():
+            if output_dir and output_dir.exists():
                 adapters = list(output_dir.glob("**/adapter_model.safetensors")) + list(output_dir.glob("**/adapter_model.bin"))
                 job_data["has_adapter"] = len(adapters) > 0
                 if adapters:
@@ -1430,7 +1502,7 @@ async def get_training_history(
             # Add final metrics if requested
             if include_metrics:
                 try:
-                    metrics = service.get_job_metrics(job.job_id, limit=1)
+                    metrics = service.get_job_metrics(db_job.id, limit=1)
                     if metrics:
                         last_metric = metrics[-1]
                         job_data["final_metrics"] = {
@@ -1439,20 +1511,60 @@ async def get_training_history(
                             "epoch": last_metric.epoch,
                             "step": last_metric.step,
                         }
+                    else:
+                        job_data["final_metrics"] = None
                 except Exception:
                     job_data["final_metrics"] = None
             
             history.append(job_data)
+        
+        # Add in-memory jobs that aren't in DB yet (currently running)
+        db_job_ids = {j.id for j in db_jobs}
+        for mem_job in memory_jobs:
+            if mem_job.job_id not in db_job_ids:
+                job_data = {
+                    "job_id": mem_job.job_id,
+                    "job_name": mem_job.name,
+                    "status": mem_job.status.value if hasattr(mem_job.status, 'value') else str(mem_job.status),
+                    "created_at": mem_job.created_at.isoformat() if mem_job.created_at else None,
+                    "started_at": mem_job.started_at.isoformat() if mem_job.started_at else None,
+                    "completed_at": mem_job.completed_at.isoformat() if mem_job.completed_at else None,
+                    "current_step": mem_job.current_step,
+                    "total_steps": mem_job.total_steps,
+                    "error": mem_job.error,
+                    "config": None,
+                    "output_path": str(get_system_settings().OUTPUT_DIR / mem_job.job_id),
+                    "output_exists": False,
+                    "has_adapter": False,
+                    "checkpoint_count": 0,
+                    "final_metrics": None,
+                }
+                
+                if mem_job.config:
+                    train_type = mem_job.config.train_type.value if hasattr(mem_job.config.train_type, 'value') else str(mem_job.config.train_type)
+                    training_method = getattr(mem_job.config, 'training_method', None)
+                    method_value = training_method.value if hasattr(training_method, 'value') else 'sft'
+                    job_data["config"] = {
+                        "train_type": train_type,
+                        "training_method": method_value,
+                        "num_epochs": mem_job.config.num_train_epochs,
+                        "learning_rate": mem_job.config.learning_rate,
+                        "batch_size": mem_job.config.per_device_train_batch_size,
+                    }
+                
+                history.insert(0, job_data)  # Currently running jobs at top
         
         return {
             "count": len(history),
             "history": history
         }
     except Exception as e:
+        import traceback
         return {
             "count": 0,
             "history": [],
-            "error": str(e)
+            "error": str(e),
+            "traceback": traceback.format_exc()
         }
 
 
