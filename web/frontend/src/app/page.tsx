@@ -1339,9 +1339,20 @@ export default function Home() {
               total_epochs: job.total_epochs,
             })
             setTrainingLogs(data.logs || [])
-            setIsTraining(job.status === 'running' || job.status === 'initializing')
-            setCurrentStep(5) // Go to training progress view
-            console.log('Restored active training:', job.job_id)
+            
+            // Handle recently terminal jobs (failed/completed/stopped) differently from active jobs
+            const isTerminalStatus = ['failed', 'completed', 'stopped'].includes(job.status)
+            if (isTerminalStatus) {
+              // Job already finished - show results but don't set isTraining
+              setIsTraining(false)
+              setCurrentStep(5) // Go to training results view
+              console.log('Restored recent terminal job:', job.job_id, 'status:', job.status)
+            } else {
+              // Job is running/initializing
+              setIsTraining(job.status === 'running' || job.status === 'initializing')
+              setCurrentStep(5) // Go to training progress view
+              console.log('Restored active training:', job.job_id)
+            }
           }
           // Case 2: Training process running but job state lost (fallback)
           else if (globalStatus.process_running) {
@@ -2262,6 +2273,42 @@ export default function Home() {
       setIsTraining(true)
       setCurrentStep(5)
       setLoadingMessage('')
+      
+      // CRITICAL: Immediate status check to catch quick validation failures
+      // Validation can fail within milliseconds - poll immediately to catch errors
+      const checkQuickFailure = async () => {
+        // Wait a moment for validation to complete
+        await new Promise(resolve => setTimeout(resolve, 500))
+        
+        try {
+          const statusRes = await fetch(`/api/jobs/${job.job_id}`)
+          if (statusRes.ok) {
+            const statusData = await statusRes.json()
+            if (statusData.job && statusData.job.status === 'failed') {
+              console.log('[QUICK CHECK] Detected validation failure:', statusData.job.error)
+              setIsTraining(false)
+              setJobStatus(prev => prev ? {
+                ...prev,
+                status: 'failed',
+                error: statusData.job.error || 'Validation failed'
+              } : null)
+              // Fetch terminal logs immediately
+              const logsRes = await fetch(`/api/jobs/${job.job_id}/terminal-logs?lines=500`)
+              if (logsRes.ok) {
+                const logsData = await logsRes.json()
+                if (logsData.logs) {
+                  setTrainingLogs(logsData.logs)
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.error('[QUICK CHECK] Error:', e)
+        }
+      }
+      
+      // Run quick failure check in background
+      checkQuickFailure()
       
     } catch (e) {
       console.error('Training start failed:', e)
@@ -3929,19 +3976,35 @@ export default function Home() {
               )}
               
               {/* Terminal Logs - Only this container scrolls, NOT the page */}
-              <div className="bg-slate-900 rounded-lg border border-slate-700 flex flex-col h-64">
-                <div className="flex-shrink-0 px-3 py-2 border-b border-slate-700 text-slate-500 text-[10px] bg-slate-900 rounded-t-lg">
-                  TERMINAL OUTPUT ({trainingLogs.length} lines)
+              <div className={`bg-slate-900 rounded-lg border flex flex-col h-64 ${
+                jobStatus.status === 'failed' ? 'border-red-500/50' : 'border-slate-700'
+              }`}>
+                <div className={`flex-shrink-0 px-3 py-2 border-b text-[10px] bg-slate-900 rounded-t-lg flex items-center justify-between ${
+                  jobStatus.status === 'failed' ? 'border-red-500/50 text-red-400' : 'border-slate-700 text-slate-500'
+                }`}>
+                  <span>TERMINAL OUTPUT ({trainingLogs.length} lines)</span>
+                  {jobStatus.status === 'failed' && <span className="text-red-400 font-medium">⚠ CHECK LOGS FOR ERROR DETAILS</span>}
                 </div>
                 <div 
                   ref={terminalContainerRef}
                   className="flex-1 overflow-y-auto p-3 font-mono text-xs text-green-400"
                 >
                   {trainingLogs.length === 0 ? (
-                    <div className="text-slate-500 text-center py-4">Waiting for training output...</div>
+                    <div className="text-slate-500 text-center py-4">
+                      {jobStatus.status === 'failed' ? (
+                        <div className="space-y-2">
+                          <Loader2 className="w-5 h-5 animate-spin mx-auto text-slate-400" />
+                          <p>Loading error logs...</p>
+                        </div>
+                      ) : (
+                        'Waiting for training output...'
+                      )}
+                    </div>
                   ) : (
                     trainingLogs.map((log, i) => (
-                      <div key={i} className="hover:bg-slate-800/50 py-0.5 whitespace-pre-wrap break-all">{log}</div>
+                      <div key={i} className={`hover:bg-slate-800/50 py-0.5 whitespace-pre-wrap break-all ${
+                        log.includes('ERROR') || log.includes('[ERROR]') ? 'text-red-400 bg-red-900/20' : ''
+                      }`}>{log}</div>
                     ))
                   )}
                   <div ref={logsEndRef} />
@@ -3984,10 +4047,31 @@ export default function Home() {
                 </div>
               )}
               
-              {/* Error message when failed */}
-              {jobStatus.status === 'failed' && jobStatus.error && (
-                <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
-                  <strong>Error:</strong> {jobStatus.error}
+              {/* Error message when failed - PROMINENT display for validation errors */}
+              {jobStatus.status === 'failed' && (
+                <div className="bg-red-50 border-2 border-red-300 rounded-xl p-5 shadow-lg">
+                  <div className="flex items-start gap-4">
+                    <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
+                      <XCircle className="w-7 h-7 text-red-600" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <h4 className="font-bold text-red-800 text-lg mb-2">Training Failed</h4>
+                      {jobStatus.error ? (
+                        <div className="space-y-2">
+                          <p className="text-red-700 font-medium">Validation Error:</p>
+                          <pre className="text-sm text-red-800 bg-red-100 rounded-lg p-3 whitespace-pre-wrap break-words overflow-x-auto max-h-48 overflow-y-auto border border-red-200">
+                            {jobStatus.error}
+                          </pre>
+                        </div>
+                      ) : (
+                        <p className="text-red-700">Training failed. Check the terminal logs below for details.</p>
+                      )}
+                      <p className="text-xs text-red-600 mt-3 flex items-center gap-1">
+                        <AlertCircle className="w-3 h-3" />
+                        Review the error above and terminal logs below, then start a new training with corrected settings.
+                      </p>
+                    </div>
+                  </div>
                 </div>
               )}
               

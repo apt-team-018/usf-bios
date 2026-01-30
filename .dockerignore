@@ -1,12 +1,17 @@
 # USF BIOS - Docker Ignore File
 # Exclude files not needed in Docker build
+# IMPORTANT: Only essential files should be in Docker image
 
-# Version Control
-.git
+# =============================================================================
+# VERSION CONTROL
+# =============================================================================
+.git/
 .gitignore
 .gitattributes
 
-# Virtual Environments
+# =============================================================================
+# VIRTUAL ENVIRONMENTS
+# =============================================================================
 venv/
 env/
 .venv/
@@ -16,7 +21,9 @@ env/
 **/.venv/
 **/.env/
 
-# Python Cache
+# =============================================================================
+# PYTHON BUILD ARTIFACTS
+# =============================================================================
 __pycache__/
 **/__pycache__/
 *.py[cod]
@@ -36,10 +43,13 @@ sdist/
 var/
 wheels/
 *.egg-info/
+usf_bios.egg-info/
 .installed.cfg
 *.egg
 
-# Node.js
+# =============================================================================
+# NODE.JS
+# =============================================================================
 node_modules/
 **/node_modules/
 npm-debug.log
@@ -53,34 +63,60 @@ yarn-error.log
 out/
 **/out/
 
-# IDE
+# =============================================================================
+# IDE & OS
+# =============================================================================
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
 .DS_Store
+**/.DS_Store
 
-# Testing
+# =============================================================================
+# TESTING - Not needed in production
+# =============================================================================
+tests/
 .pytest_cache/
 .coverage
 htmlcov/
 .tox/
 .nox/
 
-# Documentation
+# =============================================================================
+# DOCUMENTATION - Not needed in production
+# =============================================================================
 docs/
 *.md
 !README.md
-LICENSE
 
-# Local Development
+# =============================================================================
+# EXAMPLES - Not needed in production (400+ files)
+# =============================================================================
+examples/
+
+# =============================================================================
+# DEVELOPMENT TOOLS - Not needed in production
+# =============================================================================
+.dev_scripts/
+.pre-commit-config.yaml
+.pre-commit-config_local.yaml
+Makefile
+tools/
+asset/
+
+# =============================================================================
+# LOCAL DEVELOPMENT CONFIG
+# =============================================================================
 .env.local
 .env.development
 .env.test
 *.local
 
-# Logs
+# =============================================================================
+# LOGS & RUNTIME DATA
+# =============================================================================
 logs/
 *.log
 run_logs/
@@ -94,30 +130,81 @@ run_logs/
 web/backend/outputs/
 web/backend/uploads/
 web/backend/models/
+web/backend/data/
 
-# Temporary files
+# =============================================================================
+# TEMPORARY FILES
+# =============================================================================
 tmp/
 temp/
 *.tmp
 *.bak
 
-# Docker
-Dockerfile*
-docker-compose*.yml
+# =============================================================================
+# DOCKER FILES - Not needed inside container
+# =============================================================================
+Dockerfile
+Dockerfile.*
 !Dockerfile.secure
+docker/
+docker-compose*.yml
 
-# CI/CD
+# =============================================================================
+# CI/CD - Not needed in production
+# =============================================================================
 .github/
 .gitlab-ci.yml
 .travis.yml
 Jenkinsfile
 
-# Scripts not needed in production
+# =============================================================================
+# SCRIPTS - Only compile scripts needed
+# =============================================================================
 scripts/
 !scripts/compile_to_so.py
 !scripts/compile_backend_only.py
 !scripts/capture_versions.py
 
-# SECURITY: Private keys and decryption tools - NEVER include in Docker
+# =============================================================================
+# DEPLOY SCRIPTS - Run on RunPod/servers, NOT in Docker
+# =============================================================================
+deploy/
+
+# =============================================================================
+# REQUIREMENTS - Exclude non-essential requirement files
+# =============================================================================
+requirements/docs.txt
+requirements/tests.txt
+requirements/install_all.sh
+
+# =============================================================================
+# WEB FOLDER - Exclude build scripts and extra Dockerfiles
+# =============================================================================
+web/Dockerfile
+web/Dockerfile.*
+!web/Dockerfile.secure
+web/docker-compose.yml
+web/build-webui.sh
+web/README.md
+web/.env.example
+web/start-webui.sh
+web/entrypoint-webui.sh
+
+# =============================================================================
+# SECURITY: NEVER include in Docker
+# =============================================================================
+# Private keys - only public key needed for encryption
 keys/usf_bios_private.pem
+
+# Decryption tools - stay with US Inc only
 scripts/decrypt_logs.py
+
+# License file - not needed in production
+LICENSE
+
+# =============================================================================
+# ADDITIONAL CLEANUP
+# =============================================================================
+# TypeScript build info (regenerated on build)
+*.tsbuildinfo
+**/*.tsbuildinfo

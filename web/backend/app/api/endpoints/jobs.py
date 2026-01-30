@@ -1,6 +1,7 @@
 # Copyright (c) US Inc. All rights reserved.
 """Job management endpoints"""
 
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect, Depends
@@ -276,6 +277,7 @@ async def get_current_job():
     It checks both:
     1. In-memory job state (for normal operation)
     2. OS process check (fallback if in-memory state is lost)
+    3. Recently failed jobs (within last 2 minutes) - so user sees validation errors
     """
     from ...services.sanitized_log_service import sanitized_log_service
     
@@ -315,6 +317,41 @@ async def get_current_job():
                     "logs": logs,
                     "process_running": True,
                 }
+        
+        # Check for recently failed/completed/stopped jobs (within last 2 minutes)
+        # This ensures users see validation errors even after quick failures
+        recent_cutoff = datetime.now() - timedelta(minutes=2)
+        recent_terminal_jobs = []
+        for job in jobs:
+            if job.status in [JobStatus.FAILED, JobStatus.COMPLETED, JobStatus.STOPPED]:
+                # Check if completed_at is recent
+                if job.completed_at and job.completed_at > recent_cutoff:
+                    recent_terminal_jobs.append(job)
+                # Fallback: check started_at if completed_at not set
+                elif job.started_at and job.started_at > recent_cutoff:
+                    recent_terminal_jobs.append(job)
+        
+        # Return the most recent terminal job if any
+        if recent_terminal_jobs:
+            # Sort by completed_at or started_at, most recent first
+            recent_terminal_jobs.sort(
+                key=lambda j: j.completed_at or j.started_at or datetime.min, 
+                reverse=True
+            )
+            job = recent_terminal_jobs[0]
+            logs = await job_manager.get_logs(job.job_id, last_n=100)
+            if not logs:
+                try:
+                    logs = sanitized_log_service.get_terminal_logs(job.job_id, lines=100)
+                except Exception:
+                    logs = []
+            return {
+                "has_active_job": True,  # True so frontend shows the result
+                "job": job.model_dump(mode="json"),
+                "logs": logs,
+                "process_running": False,
+                "is_recent_terminal": True,  # Indicate this is a recently finished job
+            }
         
         # Fallback: Check if training process is running at OS level
         # This handles cases where in-memory state was lost but process continues
