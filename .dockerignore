@@ -166,7 +166,7 @@ scripts/
 !scripts/capture_versions.py
 
 # =============================================================================
-# DEPLOY SCRIPTS - Run on RunPod/servers, NOT in Docker
+# DEPLOY FOLDER - Documentation and configs for RunPod/servers, NOT in Docker
 # =============================================================================
 deploy/
 
