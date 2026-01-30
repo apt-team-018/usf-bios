@@ -1176,6 +1176,15 @@ class JobService:
             else:
                 deleted_items["terminal_log_deleted"] = False
             
+            # Delete encrypted log (US Inc internal log)
+            encrypted_log_path = encrypted_log_service.get_encrypted_log_path(job_id)
+            if os.path.exists(encrypted_log_path):
+                deleted_items["freed_space_mb"] += os.path.getsize(encrypted_log_path) / (1024 * 1024)
+                os.remove(encrypted_log_path)
+                deleted_items["encrypted_log_deleted"] = True
+            else:
+                deleted_items["encrypted_log_deleted"] = False
+            
             # Delete final model path if it exists and is different from output_dir
             if job.final_model_path and os.path.exists(job.final_model_path):
                 if job.final_model_path != job.output_dir:

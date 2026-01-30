@@ -93,8 +93,24 @@ cd "$PROJECT_ROOT"
 
 # Extract version dynamically from usf_bios/version.py if not provided
 if [ -z "$VERSION" ]; then
-    DYNAMIC_VERSION=$(python3 -c "exec(open('usf_bios/version.py').read()); print(__version__)" 2>/dev/null || echo "2.0.12")
+    DYNAMIC_VERSION=$(python3 -c "exec(open('usf_bios/version.py').read()); print(__version__)" 2>/dev/null || echo "2.0.15")
     VERSION="$DYNAMIC_VERSION"
+    echo -e "${GREEN}  Using version from version.py: ${VERSION}${NC}"
+else
+    # Version was provided - update version.py to match
+    echo -e "${YELLOW}  Updating version.py to: ${VERSION}${NC}"
+    CURRENT_DATE=$(date '+%Y-%m-%d %H:%M:%S')
+    cat > usf_bios/version.py << EOF
+# USF BIOS - AI Training & Fine-tuning Platform
+# Powered by US Inc
+# Make sure to modify __release_datetime__ to release time when making official release.
+__version__ = '${VERSION}'
+__product_name__ = 'USF BIOS'
+__company__ = 'US Inc'
+# default release datetime for branches under active development
+__release_datetime__ = '${CURRENT_DATE}'
+EOF
+    echo -e "${GREEN}  ✓ version.py updated to ${VERSION}${NC}"
 fi
 
 # Docker Hub image name

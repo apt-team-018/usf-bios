@@ -714,6 +714,7 @@ export default function Home() {
   const isFetchingModelInfo = useRef(false)
   const modelInfoAbortController = useRef<AbortController | null>(null)
   const modelInfoDebounceTimer = useRef<NodeJS.Timeout | null>(null)
+  const modelInfoFailedAt = useRef<number>(0) // Track last failure time for cooldown
 
   // Fetch datasets on mount and when on step 2
   useEffect(() => {
@@ -903,12 +904,17 @@ export default function Home() {
       return
     }
     
+    // Cooldown: don't retry within 5 seconds of a failure
+    if (modelInfoFailedAt.current && (Date.now() - modelInfoFailedAt.current) < 5000) {
+      return
+    }
+    
     // Clear any pending debounce timer
     if (modelInfoDebounceTimer.current) {
       clearTimeout(modelInfoDebounceTimer.current)
     }
     
-    // Debounce: wait 100ms before making the actual request
+    // Debounce: wait 300ms before making the actual request
     modelInfoDebounceTimer.current = setTimeout(async () => {
       // Cancel any in-flight request
       if (modelInfoAbortController.current) {
@@ -964,10 +970,16 @@ export default function Home() {
         console.error('Failed to fetch model info:', e)
         setModelContextLength(4096)
         setModelInfo(prev => ({ ...prev, isLoading: false, error: 'Failed to fetch model info' }))
+        
+        // CRITICAL: Update refs on failure to prevent infinite retry loop
+        // Also set failure timestamp for cooldown
+        lastFetchedModelPath.current = modelPath
+        lastFetchedModelSource.current = source
+        modelInfoFailedAt.current = Date.now()
       } finally {
         isFetchingModelInfo.current = false
       }
-    }, 100) // 100ms debounce
+    }, 300) // 300ms debounce (increased from 100ms)
   }, []) // NO DEPENDENCIES - completely stable callback
 
   // Fetch output path configuration from backend API
@@ -1058,6 +1070,7 @@ export default function Home() {
   const isFetchingModelType = useRef(false)
   const modelTypeAbortController = useRef<AbortController | null>(null)
   const modelTypeDebounceTimer = useRef<NodeJS.Timeout | null>(null)
+  const modelTypeFailedAt = useRef<number>(0) // Track last failure time for cooldown
   
   // Fetch model type info when model changes
   // BULLETPROOF: Uses refs, debouncing, and AbortController to prevent infinite loops
@@ -1072,12 +1085,17 @@ export default function Home() {
       return
     }
     
+    // Cooldown: don't retry within 5 seconds of a failure
+    if (modelTypeFailedAt.current && (Date.now() - modelTypeFailedAt.current) < 5000) {
+      return
+    }
+    
     // Clear any pending debounce timer
     if (modelTypeDebounceTimer.current) {
       clearTimeout(modelTypeDebounceTimer.current)
     }
     
-    // Debounce: wait 100ms before making the actual request
+    // Debounce: wait 300ms before making the actual request
     modelTypeDebounceTimer.current = setTimeout(async () => {
       // Cancel any in-flight request
       if (modelTypeAbortController.current) {
@@ -1140,10 +1158,15 @@ export default function Home() {
         if (e instanceof Error && e.name === 'AbortError') return
         
         console.error('Failed to fetch model type info:', e)
+        
+        // CRITICAL: Update ref on failure to prevent infinite retry loop
+        // Also set failure timestamp for cooldown
+        lastFetchedModelTypePath.current = modelPath
+        modelTypeFailedAt.current = Date.now()
       } finally {
         isFetchingModelType.current = false
       }
-    }, 100) // 100ms debounce
+    }, 300) // 300ms debounce (increased from 100ms)
   }, []) // NO DEPENDENCIES - completely stable callback
 
   // Validate adapter + base model compatibility for merge

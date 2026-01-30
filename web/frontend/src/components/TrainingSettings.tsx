@@ -733,18 +733,21 @@ export default function TrainingSettingsStep({ config, setConfig, availableGpus 
   // Merge provided feature flags with defaults
   const flags = { ...DEFAULT_FEATURE_FLAGS, ...featureFlags }
   
+  // Check if a training method is completely hidden (disabled at build/feature-flag level)
+  // When disabled at build level, the option should NOT be shown at all
+  const isMethodHidden = (method: 'sft' | 'pt' | 'rlhf'): boolean => {
+    if (method === 'sft' && !flags.sft) return true
+    if (method === 'pt' && !flags.pretraining) return true
+    if (method === 'rlhf' && !flags.rlhf) return true
+    return false
+  }
+  
   // Compute which training methods are disabled based on dataset type
+  // Note: This only handles dataset incompatibility, NOT feature flag disabling
+  // Feature flag disabled methods are completely hidden via isMethodHidden()
   const getMethodDisabledState = (method: 'sft' | 'pt' | 'rlhf'): { disabled: boolean; reason: string } => {
-    // Check feature flags first (system-level restriction)
-    if (method === 'sft' && !flags.sft) {
-      return { disabled: true, reason: 'SFT is not enabled on this system.' }
-    }
-    if (method === 'pt' && !flags.pretraining) {
-      return { disabled: true, reason: 'Pre-training is not enabled on this system.' }
-    }
-    if (method === 'rlhf' && !flags.rlhf) {
-      return { disabled: true, reason: 'RLHF is not enabled on this system.' }
-    }
+    // Note: Feature flag checks are now handled by isMethodHidden() - methods disabled
+    // at build level are completely hidden, not shown as disabled
     
     // Check dataset type compatibility
     if (datasetTypeInfo && datasetTypeInfo.dataset_type !== 'unknown') {
@@ -1147,7 +1150,9 @@ export default function TrainingSettingsStep({ config, setConfig, availableGpus 
           )}
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          {Object.entries(TRAINING_METHOD_CONFIG).map(([id, cfg]) => {
+          {Object.entries(TRAINING_METHOD_CONFIG)
+            .filter(([id]) => !isMethodHidden(id as 'sft' | 'pt' | 'rlhf'))
+            .map(([id, cfg]) => {
             const methodState = getMethodDisabledState(id as 'sft' | 'pt' | 'rlhf')
             const isDisabled = methodState.disabled
             const isSelected = config.training_method === id

@@ -1,6 +1,6 @@
 # USF BIOS - Docker GPU Build Guide
 
-**Version: 2.0.12**
+**Version: 2.0.15**
 
 Complete guide for building and deploying USF BIOS Docker image on GPU servers.
 
@@ -49,7 +49,7 @@ export GITHUB_TOKEN=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
 ./scripts/build-docker-gpu.sh
 
 # Or specify version manually
-./scripts/build-docker-gpu.sh 2.0.13
+./scripts/build-docker-gpu.sh 2.0.15
 ```
 
 **Build Time Estimates:**
@@ -66,14 +66,14 @@ export GITHUB_TOKEN=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
 docker login
 
 # Push the image
-docker push arpitsh018/usf-bios:2.0.12
+docker push arpitsh018/usf-bios:2.0.15
 ```
 
 ### Step 5: Deploy on RunPod
 
 1. Go to [RunPod Dashboard](https://runpod.io/console/pods)
 2. Create a new Pod with GPU (H100/A100 recommended)
-3. Set container image: `arpitsh018/usf-bios:2.0.12`
+3. Set container image: `arpitsh018/usf-bios:2.0.15`
 4. Expose port: **3000**
 5. Deploy
 
@@ -188,10 +188,10 @@ The `./scripts/build-docker-gpu.sh` script:
 ./scripts/build-docker-gpu.sh --no-push
 
 # Build specific version
-./scripts/build-docker-gpu.sh 2.0.12
+./scripts/build-docker-gpu.sh 2.0.15
 
 # Fresh build, no push, specific version
-./scripts/build-docker-gpu.sh --no-cache --no-push 2.0.12
+./scripts/build-docker-gpu.sh --no-cache --no-push 2.0.15
 
 # Show help
 ./scripts/build-docker-gpu.sh --help
@@ -276,7 +276,7 @@ usf-bios/
 │   ├── compile_to_so.py        # Cython compilation
 │   └── capture_versions.py     # Version documentation
 ├── usf_bios/
-│   ├── version.py              # Version: 2.0.12
+│   ├── version.py              # Version: 2.0.15
 │   └── system_guard.py         # Model lock configuration
 └── DOCKER-GPU-BUILD.md         # This file
 ```
@@ -287,6 +287,9 @@ usf-bios/
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.0.15 | 2026-01-30 | Enhanced encrypted logging, folder structure, step logging |
+| 2.0.14 | 2026-01-28 | Bug fixes, stability improvements |
+| 2.0.13 | 2026-01-27 | Training improvements |
 | 2.0.12 | 2026-01-25 | Clean build, cache fixes |
 | 2.0.11 | 2026-01-24 | Dynamic GPU selection, Model lock fix, Token support |
 | 2.0.10 | 2026-01-24 | Version label updates |

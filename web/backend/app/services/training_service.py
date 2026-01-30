@@ -26,6 +26,25 @@ def _debug_log(job_id: str, message: str, level: str = "DEBUG"):
     encrypted_log_service.encrypt_and_format(f"[{level}] {message}", job_id, level)
 
 
+def _log_step(job_id: str, step_name: str, details: dict = None, level: str = "INFO"):
+    """
+    Log a training step with full details to encrypted log.
+    
+    COMPLETE LOGGING: Every step is logged with all details.
+    This ensures full traceability for debugging.
+    """
+    import json
+    detail_str = ""
+    if details:
+        try:
+            detail_str = f" | Details: {json.dumps(details, default=str)}"
+        except:
+            detail_str = f" | Details: {str(details)}"
+    
+    message = f"[STEP:{step_name}]{detail_str}"
+    encrypted_log_service.encrypt_and_format(message, job_id, level)
+
+
 class TrainingService:
     """Service for running training jobs"""
     
@@ -555,41 +574,62 @@ class TrainingService:
     
     async def run_training(self, job_id: str) -> None:
         """Run the training process"""
-        _debug_log(job_id, "run_training called")
+        _log_step(job_id, "TRAINING_START", {"action": "run_training called"})
         
         job = await job_manager.get_job(job_id)
         if not job:
-            _debug_log(job_id, "Job not found in job_manager", "ERROR")
+            _log_step(job_id, "TRAINING_START", {"error": "Job not found in job_manager"}, "ERROR")
             return
         
-        _debug_log(job_id, f"Job found, config: {job.config}")
+        # Log complete job configuration
+        _log_step(job_id, "JOB_CONFIG", {
+            "job_id": job_id,
+            "name": job.name,
+            "model_path": job.config.model_path,
+            "model_source": str(getattr(job.config, 'model_source', 'local')),
+            "dataset_path": job.config.dataset_path,
+            "train_type": str(job.config.train_type),
+            "training_method": str(getattr(job.config, 'training_method', 'sft')),
+            "num_epochs": job.config.num_train_epochs,
+            "learning_rate": job.config.learning_rate,
+            "batch_size": job.config.per_device_train_batch_size,
+            "max_length": job.config.max_length,
+            "lora_rank": getattr(job.config, 'lora_rank', None),
+            "lora_alpha": getattr(job.config, 'lora_alpha', None),
+            "deepspeed": getattr(job.config, 'deepspeed', None),
+            "fsdp": getattr(job.config, 'fsdp', None),
+        })
         
         # ============================================================
         # PRE-TRAINING GPU CLEANUP: Ensure GPU memory is clean
         # This prevents OOM errors from previous training runs
         # ============================================================
+        _log_step(job_id, "GPU_CLEANUP_START", {"phase": "pre-training"})
         try:
-            _debug_log(job_id, "Performing pre-training GPU cleanup...")
             cleanup_result = await gpu_cleanup_service.async_deep_cleanup(
                 kill_orphans=True,
                 exclude_pids=[os.getpid()]
             )
+            _log_step(job_id, "GPU_CLEANUP_COMPLETE", {
+                "success": cleanup_result.get("success"),
+                "memory_freed_gb": cleanup_result.get("memory_freed_gb", 0),
+                "memory_before": cleanup_result.get("memory_before", {}),
+                "memory_after": cleanup_result.get("memory_after", {}),
+            })
             if cleanup_result.get("success"):
                 freed_gb = cleanup_result.get("memory_freed_gb", 0)
                 if freed_gb > 0:
-                    _debug_log(job_id, f"Pre-training cleanup freed {freed_gb}GB VRAM")
                     sanitized_log_service.create_terminal_log(
                         job_id, 
                         f"GPU cleanup freed {freed_gb}GB VRAM", 
                         "INFO"
                     )
-            else:
-                _debug_log(job_id, f"Pre-training cleanup warning: {cleanup_result.get('error', 'unknown')}", "WARN")
         except Exception as cleanup_err:
-            _debug_log(job_id, f"Pre-training cleanup error (non-fatal): {cleanup_err}", "WARN")
+            _log_step(job_id, "GPU_CLEANUP_ERROR", {"error": str(cleanup_err)}, "WARN")
         
         try:
             # Update status
+            _log_step(job_id, "STATUS_UPDATE", {"status": "INITIALIZING"})
             await job_manager.update_job(job_id, 
                 status=JobStatus.INITIALIZING,
                 started_at=datetime.now()
@@ -599,15 +639,19 @@ class TrainingService:
             # Write to terminal log file FIRST (this is what frontend polls)
             sanitized_log_service.create_terminal_log(job_id, "Initializing training environment...", "INFO")
             await ws_manager.send_log(job_id, "Initializing training environment...")
-            _debug_log(job_id, "Status set to INITIALIZING")
             
             # ============================================================
             # PRE-TRAINING VALIDATION - Catch issues early
             # ============================================================
+            _log_step(job_id, "VALIDATION_START", {"phase": "pre-training validation"})
             validation_errors = []
             
             # Check model path exists (for local models)
             model_source = getattr(job.config.model_source, 'value', str(job.config.model_source))
+            _log_step(job_id, "VALIDATION_MODEL", {
+                "model_source": model_source,
+                "model_path": job.config.model_path,
+            })
             if model_source == 'local':
                 model_path = job.config.model_path
                 if not os.path.exists(model_path):
@@ -681,10 +725,13 @@ class TrainingService:
             # Report validation errors
             if validation_errors:
                 error_msg = "Pre-training validation failed:\n" + "\n".join(f"  - {e}" for e in validation_errors)
+                _log_step(job_id, "VALIDATION_FAILED", {
+                    "errors": validation_errors,
+                    "error_count": len(validation_errors),
+                }, "ERROR")
                 sanitized_log_service.create_terminal_log(job_id, f"ERROR: {error_msg}", "ERROR")
                 await ws_manager.send_log(job_id, f"ERROR: {error_msg}")
                 await job_manager.add_log(job_id, f"ERROR: {error_msg}")
-                _debug_log(job_id, error_msg, "ERROR")
                 
                 await job_manager.update_job(job_id, 
                     status=JobStatus.FAILED,
@@ -694,11 +741,14 @@ class TrainingService:
                 await ws_manager.send_status(job_id, "failed")
                 return
             
+            _log_step(job_id, "VALIDATION_PASSED", {"phase": "pre-training validation complete"})
+            
             # Note: Don't show validation message or command to user - internal details
             
             # ============================================================
             # STORAGE SPACE VALIDATION - Ensure enough disk space
             # ============================================================
+            _log_step(job_id, "STORAGE_VALIDATION_START", {"phase": "storage space check"})
             import shutil
             
             def get_dir_size_gb(path: str) -> float:
@@ -902,6 +952,10 @@ class TrainingService:
             # Log total storage summary
             if not validation_errors:
                 total_required = sum(c['required_gb'] for c in storage_checks)
+                _log_step(job_id, "STORAGE_VALIDATION_PASSED", {
+                    "total_required_gb": total_required,
+                    "storage_checks": storage_checks,
+                })
                 sanitized_log_service.create_terminal_log(
                     job_id,
                     f"✓ Storage check passed. Total required: ~{total_required:.1f}GB",
@@ -912,10 +966,13 @@ class TrainingService:
             # Report storage validation errors
             if validation_errors:
                 error_msg = "Pre-training validation failed:\n" + "\n".join(f"  - {e}" for e in validation_errors)
+                _log_step(job_id, "STORAGE_VALIDATION_FAILED", {
+                    "errors": validation_errors,
+                    "storage_checks": storage_checks,
+                }, "ERROR")
                 sanitized_log_service.create_terminal_log(job_id, f"ERROR: {error_msg}", "ERROR")
                 await ws_manager.send_log(job_id, f"ERROR: {error_msg}")
                 await job_manager.add_log(job_id, f"ERROR: {error_msg}")
-                _debug_log(job_id, error_msg, "ERROR")
                 
                 await job_manager.update_job(job_id, 
                     status=JobStatus.FAILED,
@@ -931,13 +988,16 @@ class TrainingService:
             # ============================================================
             
             if merge_enabled and adapter_base_path:
+                _log_step(job_id, "ADAPTER_MERGE_START", {
+                    "adapter_path": model_path,
+                    "base_model_path": adapter_base_path,
+                })
                 sanitized_log_service.create_terminal_log(
                     job_id, 
                     "Merging adapter with base model...", 
                     "INFO"
                 )
                 await ws_manager.send_log(job_id, "Merging adapter with base model...")
-                _debug_log(job_id, f"Adapter merge mode enabled. Adapter: {model_path}, Base: {adapter_base_path}")
                 
                 try:
                     # Import merge utilities
@@ -1011,19 +1071,25 @@ class TrainingService:
                     del base_model, model, merged_model
                     torch.cuda.empty_cache()
                     
+                    _log_step(job_id, "ADAPTER_MERGE_COMPLETE", {
+                        "merged_model_path": merge_output_dir,
+                        "success": True,
+                    })
                     sanitized_log_service.create_terminal_log(
                         job_id, 
                         "✅ Adapter merged successfully. Proceeding with training on merged model.", 
                         "INFO"
                     )
                     await ws_manager.send_log(job_id, "✅ Adapter merged successfully")
-                    _debug_log(job_id, f"Adapter merge complete. Training on: {merge_output_dir}")
                     
                 except Exception as merge_err:
                     error_msg = f"Adapter merge failed: {str(merge_err)}"
+                    _log_step(job_id, "ADAPTER_MERGE_FAILED", {
+                        "error": str(merge_err),
+                        "error_type": type(merge_err).__name__,
+                    }, "ERROR")
                     sanitized_log_service.create_terminal_log(job_id, f"ERROR: {error_msg}", "ERROR")
                     await ws_manager.send_log(job_id, f"ERROR: {error_msg}")
-                    _debug_log(job_id, error_msg, "ERROR")
                     
                     await job_manager.update_job(job_id, 
                         status=JobStatus.FAILED,
@@ -1042,11 +1108,11 @@ class TrainingService:
             
             cmd = self._build_command(job.config, job_id, resume_from_checkpoint=resume_checkpoint)
             cmd_str = " ".join(cmd)
-            _debug_log(job_id, f"Built command: {cmd_str}")
-            
-            # Store full command in encrypted log only (for US Inc) - NOT shown to user
-            encrypted_log_service.encrypt_and_format(f"Command: {cmd_str}", job_id)
-            _debug_log(job_id, f"Full command: {cmd_str}")
+            _log_step(job_id, "COMMAND_BUILD", {
+                "command": cmd_str,
+                "command_args_count": len(cmd),
+                "resume_from_checkpoint": resume_checkpoint,
+            })
             
             # ============================================================
             # SHOW USER-FRIENDLY CONFIG SUMMARY (not raw command)
@@ -1159,16 +1225,31 @@ class TrainingService:
             else:
                 sanitized_log_service.create_terminal_log(job_id, "No GPUs detected. Training will use CPU.", "WARN")
                 await ws_manager.send_log(job_id, "No GPUs detected. Training will use CPU.")
+            
+            _log_step(job_id, "GPU_SELECTION", {
+                "available_gpus": available_gpus,
+                "num_gpus_to_use": num_gpus_to_use,
+                "cuda_visible_devices": training_env.get("CUDA_VISIBLE_DEVICES", "all"),
+            })
+            
+            _log_step(job_id, "SUBPROCESS_CREATE", {
+                "command_length": len(cmd),
+                "env_keys": list(training_env.keys())[:10],  # First 10 env keys
+            })
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=training_env,
             )
-            _debug_log(job_id, f"Subprocess created with PID: {process.pid}")
+            _log_step(job_id, "SUBPROCESS_STARTED", {
+                "pid": process.pid,
+                "status": "running"
+            })
             
             await job_manager.set_process(job_id, process)
             await job_manager.update_job(job_id, status=JobStatus.RUNNING)
+            _log_step(job_id, "STATUS_UPDATE", {"status": "RUNNING", "pid": process.pid})
             await ws_manager.send_status(job_id, "running")
             sanitized_log_service.create_terminal_log(job_id, "Training started...", "INFO")
             await ws_manager.send_log(job_id, "Training started...")
@@ -1211,6 +1292,10 @@ class TrainingService:
                     elapsed_hours = (now - job_start_time).total_seconds() / 3600
                     if elapsed_hours >= job_timeout_hours:
                         timeout_msg = f"Job exceeded maximum runtime ({job_timeout_hours} hours). Auto-stopping."
+                        _log_step(job_id, "TRAINING_TIMEOUT", {
+                            "elapsed_hours": elapsed_hours,
+                            "timeout_hours": job_timeout_hours,
+                        }, "ERROR")
                         sanitized_log_service.create_terminal_log(job_id, f"TIMEOUT: {timeout_msg}", "ERROR")
                         await ws_manager.send_log(job_id, f"TIMEOUT: {timeout_msg}", "error")
                         process.terminate()
@@ -1401,8 +1486,18 @@ class TrainingService:
             
             # Wait for process to complete
             return_code = await process.wait()
+            _log_step(job_id, "SUBPROCESS_COMPLETE", {
+                "return_code": return_code,
+                "success": return_code == 0,
+            })
             
             if return_code == 0:
+                _log_step(job_id, "TRAINING_COMPLETED", {
+                    "status": "success",
+                    "return_code": return_code,
+                    "total_steps": total_steps,
+                    "checkpoint_count": checkpoint_count,
+                })
                 await job_manager.update_job(job_id,
                     status=JobStatus.COMPLETED,
                     completed_at=datetime.now()
@@ -1420,6 +1515,12 @@ class TrainingService:
                 await self._cleanup_after_training(job_id, "completed")
             else:
                 # Log failure with exit code
+                _log_step(job_id, "TRAINING_FAILED", {
+                    "status": "failed",
+                    "return_code": return_code,
+                    "total_steps": total_steps,
+                    "checkpoint_count": checkpoint_count,
+                }, "ERROR")
                 error_msg = f"Training failed with exit code {return_code}"
                 sanitized_log_service.create_terminal_log(job_id, error_msg, "ERROR")
                 
@@ -1452,6 +1553,10 @@ class TrainingService:
                 await self._cleanup_after_training(job_id, "failed")
         
         except asyncio.CancelledError:
+            _log_step(job_id, "TRAINING_CANCELLED", {
+                "status": "cancelled",
+                "reason": "user_requested",
+            }, "WARN")
             await job_manager.update_job(job_id, status=JobStatus.STOPPED)
             await ws_manager.send_status(job_id, "stopped")
             sanitized_log_service.create_terminal_log(job_id, "Training stopped by user", "WARN")
@@ -1472,10 +1577,12 @@ class TrainingService:
             import traceback
             full_error = str(e)
             full_traceback = traceback.format_exc()
-            _debug_log(job_id, f"Training error: {full_error}", "ERROR")
-            _debug_log(job_id, f"Traceback: {full_traceback}", "ERROR")
-            encrypted_log_service.encrypt_and_format(f"FULL ERROR: {full_error}", job_id, "ERROR")
-            encrypted_log_service.encrypt_and_format(f"TRACEBACK: {full_traceback}", job_id, "ERROR")
+            _log_step(job_id, "TRAINING_EXCEPTION", {
+                "status": "exception",
+                "error_type": type(e).__name__,
+                "error_message": full_error,
+                "traceback": full_traceback,
+            }, "ERROR")
             
             # ============================================================
             # TERMINAL LOG: Minimal error (NO file names, NO code details)
@@ -1511,7 +1618,7 @@ class TrainingService:
         Called after training completes, fails, is cancelled, or throws an exception.
         """
         try:
-            _debug_log(job_id, f"Performing post-training cleanup (reason: {reason})...")
+            _log_step(job_id, "POST_TRAINING_CLEANUP_START", {"reason": reason})
             
             # ============================================================
             # CLEANUP MERGED MODEL TEMP DIRECTORY
@@ -1558,13 +1665,16 @@ class TrainingService:
                 exclude_pids=[os.getpid()]
             )
             
+            _log_step(job_id, "POST_TRAINING_CLEANUP_COMPLETE", {
+                "reason": reason,
+                "cleanup_result": cleanup_result,
+            })
+            
             if cleanup_result.get("success"):
                 freed_gb = cleanup_result.get("memory_freed_gb", 0)
                 mem_after = cleanup_result.get("memory_after", {})
                 used_gb = mem_after.get("total_used_gb", 0)
                 total_gb = mem_after.get("total_memory_gb", 0)
-                
-                _debug_log(job_id, f"Post-training GPU cleanup: freed {freed_gb}GB, now using {used_gb}/{total_gb}GB")
                 
                 if freed_gb > 1.0:  # Only log if significant memory was freed
                     sanitized_log_service.create_terminal_log(
@@ -1572,11 +1682,9 @@ class TrainingService:
                         f"GPU cleanup: freed {freed_gb}GB VRAM",
                         "INFO"
                     )
-            else:
-                _debug_log(job_id, f"Post-training cleanup warning: {cleanup_result.get('error', 'unknown')}", "WARN")
                 
         except Exception as e:
-            _debug_log(job_id, f"Post-training cleanup error (non-fatal): {e}", "WARN")
+            _log_step(job_id, "POST_TRAINING_CLEANUP_ERROR", {"error": str(e)}, "WARN")
     
     async def start_training(self, job_id: str) -> bool:
         """Start training in background"""

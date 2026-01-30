@@ -203,13 +203,35 @@ class JobManager:
             return False
     
     async def delete_job(self, job_id: str) -> bool:
-        """Delete a job (only if not running)"""
+        """Delete a job (only if not running)
+        
+        Also deletes associated encrypted log file.
+        """
+        from .encrypted_log_service import encrypted_log_service
+        from .sanitized_log_service import sanitized_log_service
+        import os
+        
         async with self._lock:
             if job_id in self._jobs:
                 if self._jobs[job_id].status == JobStatus.RUNNING:
                     return False
                 del self._jobs[job_id]
                 self._logs.pop(job_id, None)
+                
+                # Delete encrypted log file
+                try:
+                    encrypted_log_path = encrypted_log_service.get_encrypted_log_path(job_id)
+                    if os.path.exists(encrypted_log_path):
+                        os.remove(encrypted_log_path)
+                except Exception:
+                    pass  # Non-fatal - don't fail deletion for log cleanup
+                
+                # Delete terminal log file
+                try:
+                    sanitized_log_service.delete_terminal_log(job_id)
+                except Exception:
+                    pass  # Non-fatal
+                
                 return True
         return False
     
