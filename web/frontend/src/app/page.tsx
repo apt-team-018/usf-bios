@@ -9,7 +9,7 @@ import {
   RefreshCw, Upload, X, FileText, Check,
   HardDrive, Thermometer, Clock, Activity,
   FolderOpen, Download, Layers, ToggleLeft, ToggleRight,
-  History, Menu, Monitor, Gauge, XCircle, Lock
+  History, Menu, Monitor, Gauge, XCircle, Lock, Copy
 } from 'lucide-react'
 import TrainingSettingsStep from '@/components/TrainingSettings'
 import DatasetConfig from '@/components/DatasetConfig'
@@ -4200,7 +4200,26 @@ export default function Home() {
                   jobStatus.status === 'failed' ? 'border-red-500/50 text-red-400' : 'border-slate-700 text-slate-500'
                 }`}>
                   <span>TERMINAL OUTPUT ({trainingLogs.length} lines)</span>
-                  {jobStatus.status === 'failed' && <span className="text-red-400 font-medium">⚠ CHECK LOGS FOR ERROR DETAILS</span>}
+                  <div className="flex items-center gap-3">
+                    {jobStatus.status === 'failed' && <span className="text-red-400 font-medium">⚠ CHECK LOGS FOR ERROR DETAILS</span>}
+                    {trainingLogs.length > 0 && (
+                      <button
+                        onClick={() => {
+                          const logsText = trainingLogs.join('\n')
+                          navigator.clipboard.writeText(logsText).then(() => {
+                            showAlert('Logs copied to clipboard', 'success', 'Copied')
+                          }).catch(() => {
+                            showAlert('Failed to copy logs', 'error', 'Copy Failed')
+                          })
+                        }}
+                        className="px-2 py-0.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded text-[10px] flex items-center gap-1 transition-colors"
+                        title="Copy all logs to clipboard"
+                      >
+                        <Copy className="w-3 h-3" />
+                        Copy
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <div 
                   ref={terminalContainerRef}
@@ -4762,41 +4781,41 @@ export default function Home() {
                     </div>
                   )}
                   
-                  {/* Optional Adapter Section - Only for text-to-text and vision-language models */}
-                  {/* BLOCKED for: audio, video, text-to-image, TTS models - USF BIOS doesn't support adapters for these */}
+                  {/* Optional Adapter Merge Section - Only shown when base model is selected */}
+                  {/* This is for merging an existing adapter INTO the base model BEFORE training */}
+                  {/* NOT for LoRA training output - that creates a new adapter */}
                   {config.model_path && !modelTypeInfo?.is_adapter && 
                    modelTypeInfo?.can_do_lora && (
-                    <div className="mt-6 p-4 bg-slate-50 rounded-lg border border-slate-200">
-                      <div className="flex items-center justify-between mb-3">
+                    <div className="mt-6 p-3 bg-slate-50/50 rounded-lg border border-dashed border-slate-300">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (useExistingAdapter) {
+                            setUseExistingAdapter(false)
+                            setExistingAdapterPath('')
+                            setExistingAdapterSource('local')
+                            setExistingAdapterValidation(null)
+                          } else {
+                            setUseExistingAdapter(true)
+                          }
+                        }}
+                        className="w-full flex items-center justify-between text-left"
+                      >
                         <div className="flex items-center gap-2">
-                          <span className="text-lg">🔌</span>
-                          <span className="font-medium text-slate-800">Add Existing Adapter</span>
-                          <span className="text-xs bg-slate-200 text-slate-600 px-2 py-0.5 rounded">Optional</span>
+                          <span className="text-slate-400">{useExistingAdapter ? '▼' : '▶'}</span>
+                          <span className="text-sm text-slate-600">Have an existing adapter to merge?</span>
+                          <span className="text-xs bg-slate-200 text-slate-500 px-2 py-0.5 rounded">Optional - Skip to continue</span>
                         </div>
-                        <label className="relative inline-flex items-center cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={useExistingAdapter}
-                            onChange={(e) => {
-                              setUseExistingAdapter(e.target.checked)
-                              if (!e.target.checked) {
-                                setExistingAdapterPath('')
-                                setExistingAdapterSource('local')
-                                setExistingAdapterValidation(null)
-                              }
-                            }}
-                            className="sr-only peer"
-                          />
-                          <div className="w-11 h-6 bg-slate-300 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-                        </label>
-                      </div>
-                      
-                      <p className="text-sm text-slate-600 mb-3">
-                        Continue training on an existing LoRA/QLoRA adapter. Skip if starting fresh.
-                      </p>
+                        {useExistingAdapter && (
+                          <span className="text-xs text-blue-600">Enabled</span>
+                        )}
+                      </button>
                       
                       {useExistingAdapter && (
-                        <div className="space-y-3 mt-4">
+                        <div className="mt-3 pt-3 border-t border-slate-200 space-y-3">
+                          <p className="text-sm text-slate-600">
+                            Merge an existing LoRA/QLoRA adapter into the base model before training.
+                          </p>
                           {/* Adapter Source - follows same restrictions as base model */}
                           {(() => {
                             const supportedSources = (systemCapabilities.supported_model_sources || systemCapabilities.supported_sources || ['local']);

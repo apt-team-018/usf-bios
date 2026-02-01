@@ -535,14 +535,19 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
   }
 
   const toggleSelection = (dataset: Dataset, forceAllow: boolean = false) => {
-    // If trying to select (not deselect), check if allowed
+    // If trying to select (not deselect), check if types match
     if (!dataset.selected && !forceAllow) {
-      const { allowed, reason } = canSelectDataset(dataset)
+      const { allowed } = canSelectDataset(dataset)
       if (!allowed) {
-        if (onShowAlert) {
-          onShowAlert(reason, 'warning', 'Incompatible Dataset Type')
-        }
-        return // Block selection
+        // Different type - deselect all others and select only this one
+        const updated = datasets.map(d => ({
+          ...d,
+          selected: d.id === dataset.id
+        }))
+        setDatasets(updated)
+        const paths = updated.filter(d => d.selected).map(d => d.path)
+        onSelectionChange(paths)
+        return
       }
     }
     
@@ -628,7 +633,8 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
     return selectedDatasets[0].dataset_type || null
   }
 
-  // Check if a dataset can be selected (must match existing selection type)
+  // Check if a dataset can be selected with current selection (same type)
+  // Returns allowed=false if types differ (will trigger auto-switch behavior)
   const canSelectDataset = (dataset: Dataset): { allowed: boolean; reason: string } => {
     const selectedType = getSelectedDatasetType()
     
@@ -644,13 +650,11 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
       return { allowed: true, reason: '' }
     }
     
-    // Check if types match
+    // Check if types match - if not, selection will auto-switch (deselect others)
     if (datasetType !== selectedType) {
-      const selectedLabel = DATASET_TYPE_CONFIG[selectedType]?.label || selectedType
-      const datasetLabel = DATASET_TYPE_CONFIG[datasetType]?.label || datasetType
       return {
         allowed: false,
-        reason: `Cannot select this ${datasetLabel} dataset. You already have ${selectedLabel} datasets selected. All datasets must be the same type for training.`
+        reason: '' // No warning needed - we auto-switch now
       }
     }
     
@@ -908,31 +912,23 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
             {datasets
               .filter(dataset => typeFilter === 'all' || dataset.dataset_type === typeFilter || (typeFilter === 'unknown' && !dataset.dataset_type))
               .map(dataset => {
-              const selectability = canSelectDataset(dataset)
-              const isDisabled = !selectability.allowed && !dataset.selected
               const datasetType = dataset.dataset_type || 'unknown'
               const typeConfig = DATASET_TYPE_CONFIG[datasetType] || DATASET_TYPE_CONFIG['unknown']
               
               return (
                 <div key={dataset.id} 
-                  onClick={() => !isDisabled && toggleSelection(dataset)}
-                  title={isDisabled ? selectability.reason : undefined}
+                  onClick={() => toggleSelection(dataset)}
                   className={`flex items-center gap-3 p-3 rounded-lg border transition-all ${
-                    isDisabled 
-                      ? 'border-slate-200 bg-slate-50 cursor-not-allowed opacity-60' 
-                      : dataset.selected 
-                        ? 'border-blue-500 bg-blue-50 cursor-pointer' 
-                        : 'border-slate-200 hover:border-slate-300 bg-white cursor-pointer'
+                    dataset.selected 
+                      ? 'border-blue-500 bg-blue-50 cursor-pointer' 
+                      : 'border-slate-200 hover:border-slate-300 bg-white cursor-pointer'
                   }`}>
                   <div className={`w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 ${
-                    isDisabled 
-                      ? 'border-slate-300 bg-slate-200' 
-                      : dataset.selected 
-                        ? 'bg-blue-600 border-blue-600' 
-                        : 'border-slate-300'
+                    dataset.selected 
+                      ? 'bg-blue-600 border-blue-600' 
+                      : 'border-slate-300'
                   }`}>
                     {dataset.selected && <Check className="w-3 h-3 text-white" />}
-                    {isDisabled && <X className="w-3 h-3 text-slate-400" />}
                   </div>
                   
                   <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${getSourceColor(dataset.source)}`}>
@@ -941,7 +937,7 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
                   
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <p className={`font-medium truncate ${isDisabled ? 'text-slate-500' : 'text-slate-900'}`}>{dataset.name}</p>
+                      <p className="font-medium truncate text-slate-900">{dataset.name}</p>
                       {/* Dataset Type Badge */}
                       <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${typeConfig.bgColor} ${typeConfig.color} border ${typeConfig.borderColor}`}>
                         {typeConfig.label}
@@ -960,13 +956,6 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
                     </p>
                     <p className="text-xs text-slate-400 mt-1">{dataset.size_human} • {dataset.format}</p>
                   </div>
-                  
-                  {/* Info icon for disabled datasets */}
-                  {isDisabled && (
-                    <div className="p-2 text-amber-500 flex-shrink-0" title={selectability.reason}>
-                      <Info className="w-4 h-4" />
-                    </div>
-                  )}
                   
                   <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(dataset) }}
                     className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg flex-shrink-0">

@@ -37,34 +37,85 @@ class JobManager:
         """Check if any usf_bios training process is running on the system.
         
         This is a fallback check that works even if the in-memory state is lost.
+        Checks ALL training types supported by USF BIOS.
         """
-        try:
-            # Check for running usf_bios sft processes
-            result = subprocess.run(
-                ["pgrep", "-f", "usf_bios.*sft"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            return result.returncode == 0 and result.stdout.strip() != ""
-        except Exception:
-            return False
+        # All training method patterns - from schemas.py TrainingMethod + RLHFType
+        # Main methods: sft, pt, rlhf
+        # RLHF types: dpo, orpo, simpo, kto, cpo, rm, ppo, grpo, gkd
+        # Train types: lora, qlora, adalora, full
+        patterns = [
+            "usf_bios.*sft",
+            "usf_bios.*pt",
+            "usf_bios.*rlhf",
+            "usf_bios.*dpo",
+            "usf_bios.*orpo",
+            "usf_bios.*simpo",
+            "usf_bios.*kto",
+            "usf_bios.*cpo",
+            "usf_bios.*rm",
+            "usf_bios.*ppo",
+            "usf_bios.*grpo",
+            "usf_bios.*gkd",
+            "usf_bios.*lora",
+            "usf_bios.*qlora",
+            "usf_bios.*adalora",
+            "usf_bios.*full",
+            "usf_bios train",
+            "python.*-m usf_bios",
+        ]
+        
+        for pattern in patterns:
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-f", pattern],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    return True
+            except Exception:
+                continue
+        return False
     
     def get_running_training_pid(self) -> Optional[int]:
         """Get the PID of running usf_bios training process if any."""
-        try:
-            result = subprocess.run(
-                ["pgrep", "-f", "usf_bios.*sft"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                pids = result.stdout.strip().split('\n')
-                if pids:
-                    return int(pids[0])
-        except Exception:
-            pass
+        # All training method patterns - from schemas.py TrainingMethod + RLHFType
+        patterns = [
+            "usf_bios.*sft",
+            "usf_bios.*pt",
+            "usf_bios.*rlhf",
+            "usf_bios.*dpo",
+            "usf_bios.*orpo",
+            "usf_bios.*simpo",
+            "usf_bios.*kto",
+            "usf_bios.*cpo",
+            "usf_bios.*rm",
+            "usf_bios.*ppo",
+            "usf_bios.*grpo",
+            "usf_bios.*gkd",
+            "usf_bios.*lora",
+            "usf_bios.*qlora",
+            "usf_bios.*adalora",
+            "usf_bios.*full",
+            "usf_bios train",
+            "python.*-m usf_bios",
+        ]
+        
+        for pattern in patterns:
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-f", pattern],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    pids = result.stdout.strip().split('\n')
+                    if pids:
+                        return int(pids[0])
+            except Exception:
+                continue
         return None
     
     def _generate_name(self) -> str:

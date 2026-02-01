@@ -220,65 +220,6 @@ echo ""
 # Show image info
 docker images "${IMAGE_NAME}:${VERSION}"
 
-# ============================================================================
-# EXTRACT ALL VERSIONS FROM BUILT IMAGE
-# ============================================================================
-echo ""
-echo -e "${YELLOW}[6/8] Extracting complete version report from image...${NC}"
-echo ""
-
-VERSION_DIR="${PROJECT_ROOT}/docs/versions"
-mkdir -p "${VERSION_DIR}"
-
-# Extract version reports from the built image
-CONTAINER_ID=$(docker create ${IMAGE_NAME}:${VERSION})
-docker cp ${CONTAINER_ID}:/app/data/version_report.json "${VERSION_DIR}/version_report_v${VERSION}.json" 2>/dev/null || echo "JSON report not found"
-docker cp ${CONTAINER_ID}:/app/data/version_report.txt "${VERSION_DIR}/version_report_v${VERSION}.txt" 2>/dev/null || echo "TXT report not found"
-docker rm ${CONTAINER_ID} > /dev/null
-
-# Also run pip freeze directly to get exact versions (use --entrypoint to override default)
-echo -e "${YELLOW}[7/8] Running pip freeze to capture exact versions...${NC}"
-timeout 60 docker run --rm --entrypoint pip ${IMAGE_NAME}:${VERSION} freeze > "${VERSION_DIR}/pip_freeze_v${VERSION}.txt" 2>/dev/null || echo "pip freeze timed out or failed"
-
-# Get dpkg list for Linux packages
-timeout 30 docker run --rm --entrypoint dpkg-query ${IMAGE_NAME}:${VERSION} -W -f='${Package}=${Version}\n' > "${VERSION_DIR}/dpkg_list_v${VERSION}.txt" 2>/dev/null || echo "dpkg query timed out or failed"
-
-# Get detailed system info (quick version - no hanging imports)
-timeout 60 docker run --rm --entrypoint bash ${IMAGE_NAME}:${VERSION} -c "
-echo '# USF BIOS v${VERSION} - Complete System Information'
-echo '# Generated: \$(date)'
-echo ''
-echo '================== SYSTEM =================='
-uname -a
-cat /etc/os-release
-echo ''
-echo '================== PYTHON =================='
-python --version
-pip --version
-echo ''
-echo '================== NODE.JS =================='
-node --version
-npm --version
-echo ''
-echo '================== KEY ML PACKAGES =================='
-pip show torch transformers peft trl accelerate deepspeed flash-attn xformers bitsandbytes datasets numpy 2>/dev/null | grep -E '^(Name|Version):'
-echo ''
-echo '================== USF BIOS =================='
-python -c 'import usf_bios; print(f\"usf_bios=={usf_bios.__version__}\")' 2>/dev/null || echo 'usf_bios not found'
-echo ''
-echo '================== PIP PACKAGE COUNT =================='
-pip list 2>/dev/null | wc -l
-" > "${VERSION_DIR}/system_info_v${VERSION}.txt" 2>/dev/null || echo "system info extraction timed out"
-
-echo ""
-echo -e "${GREEN}============================================================================${NC}"
-echo -e "${GREEN}  ✓ VERSION REPORTS EXTRACTED${NC}"
-echo -e "${GREEN}  Location: ${VERSION_DIR}/${NC}"
-echo -e "${GREEN}  Files:${NC}"
-ls -la "${VERSION_DIR}"/*v${VERSION}* 2>/dev/null | awk '{print "    " $NF}'
-echo -e "${GREEN}============================================================================${NC}"
-echo ""
-
 # Push to Docker Hub (unless --no-push specified)
 if [ "$NO_PUSH" = true ]; then
     echo ""
@@ -309,13 +250,6 @@ else
     echo -e "${GREEN}  Image: ${IMAGE_NAME}:latest${NC}"
     echo -e "${GREEN}============================================================================${NC}"
 fi
-echo ""
-echo -e "${GREEN}  Version reports saved to:${NC}"
-echo "    ${VERSION_DIR}/version_report_v${VERSION}.json"
-echo "    ${VERSION_DIR}/version_report_v${VERSION}.txt"
-echo "    ${VERSION_DIR}/pip_freeze_v${VERSION}.txt"
-echo "    ${VERSION_DIR}/dpkg_list_v${VERSION}.txt"
-echo "    ${VERSION_DIR}/system_info_v${VERSION}.txt"
 echo ""
 echo -e "${YELLOW}To run:${NC}"
 echo "  docker run --gpus all -p 3000:3000 ${IMAGE_NAME}:${VERSION}"

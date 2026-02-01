@@ -277,6 +277,56 @@ class InferenceService:
                 pass
         return 0.0
     
+    def _resolve_adapter_path(self, adapter_path: str) -> Optional[str]:
+        """
+        Resolve adapter path from training output directory.
+        
+        USF BIOS saves adapters in various locations within the output directory:
+        - Directly in the output directory (adapter_config.json at root)
+        - In checkpoint subdirectories (checkpoint-*/adapter_config.json)
+        
+        Returns the resolved path or None if no valid adapter found.
+        """
+        adapter_dir = Path(adapter_path)
+        
+        # Check if path exists
+        if not adapter_dir.exists():
+            logging.warning(f"Adapter path does not exist: {adapter_path}")
+            return None
+        
+        # Check if adapter_config.json exists directly
+        if (adapter_dir / "adapter_config.json").exists():
+            logging.info(f"Found adapter at: {adapter_path}")
+            return adapter_path
+        
+        # Search for adapter in subdirectories (checkpoints)
+        # Priority: checkpoint-final > highest checkpoint number > any checkpoint
+        checkpoint_dirs = []
+        for item in adapter_dir.iterdir():
+            if item.is_dir() and (item / "adapter_config.json").exists():
+                checkpoint_dirs.append(item)
+        
+        if not checkpoint_dirs:
+            logging.warning(f"No adapter_config.json found in {adapter_path} or its subdirectories")
+            return None
+        
+        # Sort to find best checkpoint (prefer 'checkpoint-final' or highest number)
+        def checkpoint_priority(p: Path) -> tuple:
+            name = p.name.lower()
+            if 'final' in name:
+                return (0, 0)  # Highest priority
+            # Extract number if present
+            import re
+            match = re.search(r'(\d+)', name)
+            if match:
+                return (1, -int(match.group(1)))  # Higher numbers first
+            return (2, 0)  # Default
+        
+        checkpoint_dirs.sort(key=checkpoint_priority)
+        best_checkpoint = checkpoint_dirs[0]
+        logging.info(f"Found adapter in checkpoint: {best_checkpoint}")
+        return str(best_checkpoint)
+    
     def _detect_model_capabilities(self, model_path: str) -> ModelCapabilities:
         """
         Detect model capabilities based on model architecture and config.json.
@@ -752,14 +802,15 @@ class InferenceService:
                 device_map = "auto" if torch.cuda.is_available() else "cpu"
                 torch_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
                 
-                # Validate adapter path if provided
+                # Validate and resolve adapter path if provided
                 if adapter_path:
-                    adapter_dir = Path(adapter_path)
-                    if not adapter_dir.exists():
+                    adapter_path = self._resolve_adapter_path(adapter_path)
+                    if adapter_path is None:
                         return {
                             "success": False,
-                            "error": f"Adapter path does not exist: {adapter_path}"
+                            "error": f"Failed to load model with adapter: Adapter path does not exist or contains no valid adapter"
                         }
+                    adapter_dir = Path(adapter_path)
                     adapter_config = adapter_dir / "adapter_config.json"
                     if not adapter_config.exists():
                         return {
@@ -872,30 +923,20 @@ class InferenceService:
                 "error": f"Adapter loading only supported with Transformers backend. Current backend: {self._current_backend.value}"
             }
         
-        # Validate adapter path exists and contains LoRA files
+        # Resolve and validate adapter path
+        resolved_adapter_path = self._resolve_adapter_path(adapter_path)
+        if resolved_adapter_path is None:
+            return {
+                "success": False,
+                "error": f"Adapter path does not exist or contains no valid adapter: {adapter_path}"
+            }
+        adapter_path = resolved_adapter_path
         adapter_dir = Path(adapter_path)
-        if not adapter_dir.exists():
-            return {
-                "success": False,
-                "error": f"Adapter path does not exist: {adapter_path}"
-            }
-        
-        if not adapter_dir.is_dir():
-            return {
-                "success": False,
-                "error": f"Adapter path is not a directory: {adapter_path}"
-            }
         
         # Check for required LoRA adapter files
         adapter_config = adapter_dir / "adapter_config.json"
         adapter_model = adapter_dir / "adapter_model.safetensors"
         adapter_model_bin = adapter_dir / "adapter_model.bin"
-        
-        if not adapter_config.exists():
-            return {
-                "success": False,
-                "error": f"Not a valid LoRA adapter: missing adapter_config.json in {adapter_path}"
-            }
         
         if not (adapter_model.exists() or adapter_model_bin.exists()):
             return {

@@ -899,11 +899,15 @@ class TrainingService:
         if train_type_value == "qlora":
             train_type_value = "lora"  # QLoRA is LoRA + quant_bits
         
+        # Handle multiple datasets - split comma-separated paths
+        # USF BIOS expects each dataset as separate --dataset argument
+        dataset_paths = [p.strip() for p in config.dataset_path.split(',') if p.strip()]
+        
         cmd = [
             sys.executable, "-m", "usf_bios", method_value,
             "--model", config.model_path,
             "--train_type", train_type_value,
-            "--dataset", config.dataset_path,
+            "--dataset", dataset_paths[0] if dataset_paths else config.dataset_path,
             "--output_dir", output_dir,
             "--num_train_epochs", str(config.num_train_epochs),
             "--learning_rate", str(config.learning_rate),
@@ -914,6 +918,11 @@ class TrainingService:
             "--logging_steps", "1",
             "--report_to", "tensorboard",
         ]
+        
+        # Add additional datasets if multiple were provided
+        # Each additional dataset gets its own --dataset argument
+        for additional_ds in dataset_paths[1:]:
+            cmd.extend(["--dataset", additional_ds])
         
         # RLHF specific parameters
         if method_value == "rlhf":

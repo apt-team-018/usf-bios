@@ -207,9 +207,16 @@ class TrainingStatusService:
         stale_reason = None
         
         if active_job and not process_running:
-            # Job says it's running but no process - definitely stale
-            is_stale = True
-            stale_reason = "Training process not found - job may have crashed"
+            # Job says it's running but no process - check grace period first
+            # Give process 60 seconds to fully start before marking as stale
+            time_since_start = 0
+            if active_job.started_at:
+                time_since_start = (datetime.utcnow() - active_job.started_at).total_seconds()
+            
+            # Only mark as stale if process not found AFTER grace period
+            if time_since_start > 60:
+                is_stale = True
+                stale_reason = "Training process not found - job may have crashed"
         elif active_job and active_job.started_at:
             time_since_start = (datetime.utcnow() - active_job.started_at).total_seconds()
             
