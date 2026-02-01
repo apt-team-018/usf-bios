@@ -19,6 +19,7 @@ import asyncio
 import base64
 import gc
 import os
+import re
 import sys
 from datetime import datetime
 from enum import Enum
@@ -316,7 +317,6 @@ class InferenceService:
             if 'final' in name:
                 return (0, 0)  # Highest priority
             # Extract number if present
-            import re
             match = re.search(r'(\d+)', name)
             if match:
                 return (1, -int(match.group(1)))  # Higher numbers first

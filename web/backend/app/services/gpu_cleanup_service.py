@@ -24,7 +24,10 @@ CRITICAL SAFETY:
 - Only kills orphaned training subprocess processes
 """
 
+import asyncio
+import ctypes
 import gc
+import logging
 import os
 import re
 import signal
@@ -34,7 +37,20 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-import logging
+# Optional imports - imported at top for Cython but may not be available
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    psutil = None
+    PSUTIL_AVAILABLE = False
+
+try:
+    import deepspeed
+    DEEPSPEED_AVAILABLE = True
+except ImportError:
+    deepspeed = None
+    DEEPSPEED_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -631,24 +647,24 @@ class GPUCleanupService:
         
         try:
             # Get CPU memory before cleanup
-            try:
-                import psutil
-                process = psutil.Process(os.getpid())
-                mem_before = process.memory_info().rss / (1024**3)
-                result["cpu_memory_before_gb"] = round(mem_before, 2)
-                result["operations"].append("got_memory_before")
-            except ImportError:
-                pass
+            if PSUTIL_AVAILABLE:
+                try:
+                    process = psutil.Process(os.getpid())
+                    mem_before = process.memory_info().rss / (1024**3)
+                    result["cpu_memory_before_gb"] = round(mem_before, 2)
+                    result["operations"].append("got_memory_before")
+                except Exception:
+                    pass
             
             # Step 1: Clear DeepSpeed CPU memory if available
-            try:
-                import deepspeed
-                if hasattr(deepspeed, 'runtime') and hasattr(deepspeed.runtime, 'zero'):
-                    # DeepSpeed may have CPU memory pools
+            if DEEPSPEED_AVAILABLE:
+                try:
+                    if hasattr(deepspeed, 'runtime') and hasattr(deepspeed.runtime, 'zero'):
+                        # DeepSpeed may have CPU memory pools
+                        pass
+                    result["operations"].append("deepspeed_check")
+                except Exception:
                     pass
-                result["operations"].append("deepspeed_check")
-            except ImportError:
-                pass
             
             # Step 2: Clear any CPU tensors in PyTorch
             if self._torch_available:
@@ -679,13 +695,12 @@ class GPUCleanupService:
             
             # Step 4: Try to release memory back to OS (Linux only)
             try:
-                import ctypes
                 libc = ctypes.CDLL("libc.so.6")
                 # malloc_trim releases free memory back to OS
                 if hasattr(libc, 'malloc_trim'):
                     libc.malloc_trim(0)
                     result["operations"].append("malloc_trim")
-            except:
+            except Exception:
                 pass  # Not available on all systems
             
             # Step 5: Final garbage collection
@@ -694,19 +709,19 @@ class GPUCleanupService:
             result["operations"].append("final_gc")
             
             # Get CPU memory after cleanup
-            try:
-                import psutil
-                process = psutil.Process(os.getpid())
-                mem_after = process.memory_info().rss / (1024**3)
-                result["cpu_memory_after_gb"] = round(mem_after, 2)
-                
-                if result["cpu_memory_before_gb"] is not None:
-                    result["memory_freed_gb"] = round(
-                        result["cpu_memory_before_gb"] - mem_after, 2
-                    )
-                result["operations"].append("got_memory_after")
-            except ImportError:
-                pass
+            if PSUTIL_AVAILABLE:
+                try:
+                    process = psutil.Process(os.getpid())
+                    mem_after = process.memory_info().rss / (1024**3)
+                    result["cpu_memory_after_gb"] = round(mem_after, 2)
+                    
+                    if result["cpu_memory_before_gb"] is not None:
+                        result["memory_freed_gb"] = round(
+                            result["cpu_memory_before_gb"] - mem_after, 2
+                        )
+                    result["operations"].append("got_memory_after")
+                except Exception:
+                    pass
             
         except Exception as e:
             result["success"] = False
@@ -890,7 +905,6 @@ class GPUCleanupService:
             exclude_pids: PIDs to exclude from killing
             cleanup_cpu: Whether to also cleanup CPU memory (for offload scenarios)
         """
-        import asyncio
         return await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: self.deep_cleanup(kill_orphans, exclude_pids, cleanup_cpu)
@@ -900,7 +914,6 @@ class GPUCleanupService:
         """
         Async wrapper for quick_cleanup.
         """
-        import asyncio
         return await asyncio.get_event_loop().run_in_executor(
             None,
             self.quick_cleanup
@@ -911,7 +924,6 @@ class GPUCleanupService:
         Async wrapper for clear_cpu_memory.
         Use this for CPU-only cleanup (DeepSpeed/FSDP offload scenarios).
         """
-        import asyncio
         return await asyncio.get_event_loop().run_in_executor(
             None,
             self.clear_cpu_memory

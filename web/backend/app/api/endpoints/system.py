@@ -1,9 +1,38 @@
 """System metrics and status endpoints"""
+import httpx
+import importlib.util
+import json
+import logging
+import os
+import shutil
+import socket
+import subprocess
+from typing import List, Literal, Optional
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Literal, Optional
-import os
-import subprocess
+
+# Optional imports - may not be available
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    psutil = None
+    PSUTIL_AVAILABLE = False
+
+try:
+    import torch
+    TORCH_AVAILABLE = torch.cuda.is_available() if hasattr(torch, 'cuda') else False
+except ImportError:
+    torch = None
+    TORCH_AVAILABLE = False
+
+try:
+    import pynvml
+    PYNVML_AVAILABLE = True
+except ImportError:
+    pynvml = None
+    PYNVML_AVAILABLE = False
 
 from ...core.config import settings
 from ...core.capabilities import get_validator, is_system_expired, SystemExpiredError
