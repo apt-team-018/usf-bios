@@ -91,6 +91,42 @@ async def create_job(config: TrainingConfig, db: Session = Depends(get_db)):
                         _debug_log(f"Dataset validation failed: {ds_msg}", level="ERROR")
                         raise HTTPException(status_code=403, detail=ds_msg)
         
+        # ============================================================
+        # VALIDATE: Dataset type must be compatible with training method
+        # This prevents mismatches like using SFT dataset for DPO training
+        # ============================================================
+        dataset_type = getattr(config, 'dataset_type', None)
+        compatible_methods = getattr(config, 'compatible_training_methods', None)
+        compatible_rlhf = getattr(config, 'compatible_rlhf_types', None)
+        training_method = config.training_method.value if hasattr(config.training_method, 'value') else str(config.training_method) if config.training_method else 'sft'
+        rlhf_type = getattr(config, 'rlhf_type', None)
+        
+        if dataset_type and dataset_type != 'unknown' and compatible_methods:
+            # Check if training_method is compatible with dataset type
+            if training_method not in compatible_methods:
+                dataset_display = getattr(config, 'dataset_type_display', dataset_type) or dataset_type
+                method_names = {'sft': 'Supervised Fine-Tuning (SFT)', 'rlhf': 'RLHF', 'pt': 'Pre-Training'}
+                method_display = method_names.get(training_method, training_method.upper())
+                _debug_log(f"Training method mismatch: {training_method} not in {compatible_methods}", level="ERROR")
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Dataset type '{dataset_display}' is not compatible with {method_display}. "
+                           f"Compatible methods: {', '.join(compatible_methods).upper()}. "
+                           f"Please select a compatible training method or use a different dataset."
+                )
+            
+            # For RLHF, also validate rlhf_type is compatible
+            if training_method == 'rlhf' and rlhf_type and compatible_rlhf:
+                if rlhf_type not in compatible_rlhf:
+                    dataset_display = getattr(config, 'dataset_type_display', dataset_type) or dataset_type
+                    _debug_log(f"RLHF type mismatch: {rlhf_type} not in {compatible_rlhf}", level="ERROR")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"RLHF algorithm '{rlhf_type.upper()}' is not compatible with dataset type '{dataset_display}'. "
+                               f"Compatible algorithms: {', '.join(compatible_rlhf).upper()}. "
+                               f"Please select a compatible RLHF algorithm."
+                    )
+        
         # Architecture validation happens when model is loaded
         _debug_log("Creating job in job_manager...")
         job = await job_manager.create_job(config)
@@ -108,9 +144,15 @@ async def create_job(config: TrainingConfig, db: Session = Depends(get_db)):
             from ...models.db_models import TrainingJob as DBTrainingJob
             
             # Convert config to dict for JSON storage
+            # Include rlhf_type for proper metric selection in RLHF training
+            rlhf_type_val = None
+            if hasattr(config, 'rlhf_type') and config.rlhf_type:
+                rlhf_type_val = config.rlhf_type.value if hasattr(config.rlhf_type, 'value') else str(config.rlhf_type)
+            
             config_dict = {
                 "train_type": config.train_type.value if hasattr(config.train_type, 'value') else str(config.train_type),
                 "training_method": config.training_method.value if hasattr(config.training_method, 'value') else 'sft',
+                "rlhf_type": rlhf_type_val,
                 "model_path": config.model_path,
                 "dataset_path": config.dataset_path,
                 "num_train_epochs": config.num_train_epochs,
@@ -846,7 +888,27 @@ async def get_job_metrics(job_id: str, limit: int = Query(500, ge=1, le=2000), d
         
         # Get job info to determine training type
         job = await job_manager.get_job(job_id)
-        train_type = job.config.train_type.value if job and job.config else "sft"
+        
+        # Determine effective training type for metric selection
+        # Priority: rlhf_type > training_method > train_type
+        # This ensures RLHF methods (DPO, GRPO, PPO, etc.) show their specific metrics
+        train_type = "sft"  # Default
+        if job and job.config:
+            training_method = getattr(job.config, 'training_method', None)
+            method_value = training_method.value if hasattr(training_method, 'value') else str(training_method) if training_method else 'sft'
+            
+            if method_value == 'rlhf':
+                # For RLHF, use the specific rlhf_type (dpo, grpo, ppo, etc.)
+                rlhf_type = getattr(job.config, 'rlhf_type', None)
+                if rlhf_type:
+                    train_type = rlhf_type.lower() if isinstance(rlhf_type, str) else rlhf_type.value.lower() if hasattr(rlhf_type, 'value') else str(rlhf_type).lower()
+                else:
+                    train_type = 'rlhf'  # Generic RLHF if no specific type
+            elif method_value == 'pt':
+                train_type = 'pt'  # Pre-training
+            else:
+                # For SFT, use train_type (lora, qlora, full, adalora)
+                train_type = job.config.train_type.value if hasattr(job.config.train_type, 'value') else 'lora'
         
         # Define which metrics are relevant for each training type
         METRIC_CONFIG = {

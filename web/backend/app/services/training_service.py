@@ -2032,8 +2032,16 @@ class TrainingService:
             # SHOW USER-FRIENDLY CONFIG SUMMARY (not raw command)
             # ============================================================
             training_method = getattr(job.config, 'training_method', None)
-            method_display = training_method.value.upper() if hasattr(training_method, 'value') else 'SFT'
+            method_value = training_method.value if hasattr(training_method, 'value') else str(training_method) if training_method else 'sft'
+            method_display = method_value.upper()
             train_type_display = job.config.train_type.value.upper() if hasattr(job.config.train_type, 'value') else 'LORA'
+            
+            # For RLHF, show the specific algorithm type (DPO, GRPO, etc.)
+            if method_value == 'rlhf':
+                rlhf_type = getattr(job.config, 'rlhf_type', None)
+                if rlhf_type:
+                    rlhf_type_str = rlhf_type.upper() if isinstance(rlhf_type, str) else rlhf_type.value.upper() if hasattr(rlhf_type, 'value') else str(rlhf_type).upper()
+                    method_display = f"RLHF ({rlhf_type_str})"
             
             # Build config summary for user
             config_lines = [

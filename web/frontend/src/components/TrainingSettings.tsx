@@ -403,6 +403,8 @@ interface DatasetTypeInfo {
   sample_count: number
   compatible_training_methods: string[]  // ['sft'], ['rlhf'], ['pt'], or all
   incompatible_training_methods: string[]
+  compatible_rlhf_types: string[]  // ['dpo', 'orpo', 'simpo'] for offline, ['ppo', 'grpo', 'gkd'] for online
+  display_name: string  // Human-readable dataset type name
   message: string
 }
 
@@ -1238,7 +1240,14 @@ export default function TrainingSettingsStep({ config, setConfig, availableGpus 
                   dpo: flags.dpo, orpo: flags.orpo, simpo: flags.simpo,
                   kto: flags.kto, cpo: flags.cpo, rm: flags.rm
                 }
-                return algoFlags[id] ?? true
+                if (!(algoFlags[id] ?? true)) return false
+                
+                // Filter based on dataset type compatibility
+                // If dataset has compatible_rlhf_types, only show those algorithms
+                if (datasetTypeInfo?.compatible_rlhf_types && datasetTypeInfo.compatible_rlhf_types.length > 0) {
+                  return datasetTypeInfo.compatible_rlhf_types.includes(id)
+                }
+                return true
               })
               .map(([id, cfg]) => (
               <button key={id}

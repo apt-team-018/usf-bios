@@ -390,6 +390,8 @@ export default function Home() {
     sample_count: number
     compatible_training_methods: string[]
     incompatible_training_methods: string[]
+    compatible_rlhf_types: string[]
+    display_name: string
     message: string
   } | null>(null)
   const [previousDatasetType, setPreviousDatasetType] = useState<string | null>(null)
@@ -1034,6 +1036,7 @@ export default function Home() {
   }, [])
 
   // Handle dataset type change - auto-reset training method when dataset type changes
+  // ALSO handles first dataset detection (when previousDatasetType is null)
   const handleDatasetTypeChange = useCallback((typeInfo: typeof datasetTypeInfo) => {
     setDatasetTypeInfo(typeInfo)
     
@@ -1042,44 +1045,47 @@ export default function Home() {
       return
     }
     
-    // Check if dataset type changed and requires resetting training method
-    if (previousDatasetType && previousDatasetType !== typeInfo.dataset_type) {
-      // Dataset type changed - need to reset training method
-      const compatible = typeInfo.compatible_training_methods || []
-      const currentMethod = config.training_method
+    // Check if training method needs to be updated
+    // Trigger when: dataset type changed OR first dataset detected with incompatible method
+    const compatible = typeInfo.compatible_training_methods || []
+    const currentMethod = config.training_method
+    const typeChanged = previousDatasetType !== null && previousDatasetType !== typeInfo.dataset_type
+    const isFirstDataset = previousDatasetType === null
+    const needsSwitch = !compatible.includes(currentMethod)
+    
+    // Auto-switch if current method is not compatible (on type change or first detection)
+    if (needsSwitch && (typeChanged || isFirstDataset)) {
+      const newMethod = compatible[0] as 'sft' | 'pt' | 'rlhf'
       
-      // If current method is not compatible, auto-switch to first compatible method
-      if (!compatible.includes(currentMethod)) {
-        const newMethod = compatible[0] as 'sft' | 'pt' | 'rlhf'
-        
-        setConfig(prev => ({
-          ...prev,
-          training_method: newMethod,
-          // Reset RLHF type when switching to/from RLHF
-          rlhf_type: newMethod === 'rlhf' ? 'dpo' : null,
-          // PT requires full training
-          train_type: newMethod === 'pt' ? 'full' : prev.train_type
-        }))
-        
-        // Show info message to user
-        const methodNames: Record<string, string> = {
-          'sft': 'Supervised Fine-Tuning (SFT)',
-          'rlhf': 'Reinforcement Learning (RLHF)',
-          'pt': 'Pre-Training (PT)'
-        }
-        const datasetTypeNames: Record<string, string> = {
-          'sft': 'instruction-response',
-          'rlhf': 'preference data',
-          'pt': 'raw text',
-          'kto': 'binary feedback'
-        }
-        
-        showAlert(
-          `Dataset format changed to ${datasetTypeNames[typeInfo.dataset_type] || typeInfo.dataset_type}. Training method has been automatically switched to ${methodNames[newMethod]}.`,
-          'info',
-          'Training Method Updated'
-        )
+      setConfig(prev => ({
+        ...prev,
+        training_method: newMethod,
+        // Reset RLHF type when switching to/from RLHF
+        rlhf_type: newMethod === 'rlhf' ? 'dpo' : null,
+        // PT requires full training
+        train_type: newMethod === 'pt' ? 'full' : prev.train_type
+      }))
+      
+      // Show info message to user
+      const methodNames: Record<string, string> = {
+        'sft': 'Supervised Fine-Tuning (SFT)',
+        'rlhf': 'Reinforcement Learning (RLHF)',
+        'pt': 'Pre-Training (PT)'
       }
+      const datasetTypeNames: Record<string, string> = {
+        'sft': 'instruction-response',
+        'rlhf_offline': 'preference data (offline RLHF)',
+        'rlhf_online': 'prompt-only (online RLHF)',
+        'rlhf': 'preference data',
+        'pt': 'raw text',
+        'kto': 'binary feedback'
+      }
+      
+      showAlert(
+        `Dataset detected as ${datasetTypeNames[typeInfo.dataset_type] || typeInfo.dataset_type}. Training method automatically set to ${methodNames[newMethod]}.`,
+        'info',
+        'Training Method Updated'
+      )
     }
     
     setPreviousDatasetType(typeInfo.dataset_type)
@@ -1530,11 +1536,24 @@ export default function Home() {
   }, [config.training_method, config.rlhf_type, config.use_vllm, config.vllm_mode, availableGpus.length])
 
   // Poll system metrics during training or inference
+  // Also refresh metrics when training ends to show GPU cleanup
+  const wasTrainingRef = useRef(false)
   useEffect(() => {
     if (isTraining || mainTab === 'inference') {
+      wasTrainingRef.current = true
       fetchSystemMetrics()
       const interval = setInterval(fetchSystemMetrics, 3000)
       return () => clearInterval(interval)
+    } else if (wasTrainingRef.current) {
+      // Training just ended - refresh metrics multiple times to catch GPU cleanup
+      wasTrainingRef.current = false
+      fetchSystemMetrics()
+      // Keep polling for 30 seconds after training ends to catch GPU cleanup
+      const refreshTimes = [1000, 2000, 3000, 5000, 10000, 15000, 20000, 30000]
+      const timeouts = refreshTimes.map(delay => 
+        setTimeout(() => fetchSystemMetrics(), delay)
+      )
+      return () => timeouts.forEach(t => clearTimeout(t))
     }
   }, [isTraining, mainTab, fetchSystemMetrics])
 
@@ -2403,10 +2422,16 @@ export default function Home() {
       
       // Create job with combined dataset path and optional custom name
       // Include adapter merge configuration if merge mode is enabled
+      // IMPORTANT: Include dataset_type for backend validation of training method compatibility
       const jobConfig = {
         ...config,
         dataset_path: config.dataset_paths.join(','),
         name: trainingName.trim() || undefined,
+        // Dataset type info for validation - ensures training method matches dataset format
+        dataset_type: datasetTypeInfo?.dataset_type || null,
+        dataset_type_display: datasetTypeInfo?.display_name || null,
+        compatible_training_methods: datasetTypeInfo?.compatible_training_methods || null,
+        compatible_rlhf_types: datasetTypeInfo?.compatible_rlhf_types || null,
         // Adapter merge mode - merge adapter with base before training
         merge_adapter_before_training: adapterMergeMode && modelTypeInfo?.is_adapter,
         adapter_base_model_path: adapterMergeMode ? adapterBaseModelPath : undefined,

@@ -184,6 +184,12 @@ class TrainingConfig(BaseModel):
     # Dataset
     dataset_path: str = Field(..., description="Dataset path")
     
+    # Dataset type validation - sent by frontend for compatibility checks
+    dataset_type: Optional[str] = Field(default=None, description="Detected dataset type (sft, rlhf_offline, rlhf_online, pt, kto)")
+    dataset_type_display: Optional[str] = Field(default=None, description="Human-readable dataset type name")
+    compatible_training_methods: Optional[List[str]] = Field(default=None, description="Compatible training methods")
+    compatible_rlhf_types: Optional[List[str]] = Field(default=None, description="Compatible RLHF algorithms")
+    
     # Output
     output_dir: str = Field(default="output", description="Output directory")
     
