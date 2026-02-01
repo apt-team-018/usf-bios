@@ -837,9 +837,13 @@ class TrainingService:
         """Run the training process"""
         _log_step(job_id, "TRAINING_START", {"action": "run_training called"})
         
+        # IMMEDIATELY write to terminal log - this should ALWAYS appear
+        sanitized_log_service.create_terminal_log(job_id, "Training task started - preparing environment...", "INFO")
+        
         job = await job_manager.get_job(job_id)
         if not job:
             _log_step(job_id, "TRAINING_START", {"error": "Job not found in job_manager"}, "ERROR")
+            sanitized_log_service.create_terminal_log(job_id, "ERROR: Job not found - training cannot proceed", "ERROR")
             return
         
         # Log complete job configuration
@@ -891,6 +895,7 @@ class TrainingService:
         try:
             # Update status
             _log_step(job_id, "STATUS_UPDATE", {"status": "INITIALIZING"})
+            sanitized_log_service.create_terminal_log(job_id, "Setting job status to INITIALIZING...", "INFO")
             await job_manager.update_job(job_id, 
                 status=JobStatus.INITIALIZING,
                 started_at=datetime.now()
@@ -1921,6 +1926,9 @@ class TrainingService:
             _debug_log(job_id, "Job already running", "WARNING")
             return False
         
+        # IMMEDIATELY write to terminal log so frontend sees something
+        sanitized_log_service.create_terminal_log(job_id, "Starting training job...", "INFO")
+        
         # =====================================================================
         # CRITICAL SECURITY: Validate model and output path before training
         # This ensures only authorized models/paths can be used - CANNOT be bypassed
@@ -1938,28 +1946,55 @@ class TrainingService:
             
             is_valid, error_msg = validator.validate_model_path(model_path, model_source)
             if not is_valid:
-                _debug_log(job_id, f"Model validation failed", "ERROR")
-                await job_manager.fail_job(job_id, "Invalid configuration")
+                _debug_log(job_id, f"Model validation failed: {error_msg}", "ERROR")
+                sanitized_log_service.create_terminal_log(job_id, f"ERROR: Model validation failed - {error_msg}", "ERROR")
+                await job_manager.fail_job(job_id, f"Model validation failed: {error_msg}")
                 return False
             
             _debug_log(job_id, f"Model validation passed: {model_path}")
+            sanitized_log_service.create_terminal_log(job_id, "Model validation passed", "INFO")
             
             # Validate output path (when locked, user cannot customize)
             user_output_dir = getattr(job.config, 'output_dir', '') or ''
             is_valid, error_msg = validator.validate_output_path(user_output_dir)
             if not is_valid:
-                _debug_log(job_id, f"Output path validation failed", "ERROR")
-                await job_manager.fail_job(job_id, "Invalid configuration")
+                _debug_log(job_id, f"Output path validation failed: {error_msg}", "ERROR")
+                sanitized_log_service.create_terminal_log(job_id, f"ERROR: Output path validation failed - {error_msg}", "ERROR")
+                await job_manager.fail_job(job_id, f"Output path validation failed: {error_msg}")
                 return False
             
             _debug_log(job_id, f"Output path validation passed")
         except Exception as e:
             _debug_log(job_id, f"Validation error: {e}", "ERROR")
-            await job_manager.fail_job(job_id, "Invalid configuration")
+            sanitized_log_service.create_terminal_log(job_id, f"ERROR: Configuration validation failed - {str(e)}", "ERROR")
+            await job_manager.fail_job(job_id, f"Configuration validation failed: {str(e)}")
             return False
         
         _debug_log(job_id, "Creating background task...")
+        sanitized_log_service.create_terminal_log(job_id, "Launching training process...", "INFO")
+        
+        # Create task with exception callback to catch silent failures
         task = asyncio.create_task(self.run_training(job_id))
+        
+        # Add callback to handle task exceptions (prevents silent failures)
+        def handle_task_exception(t):
+            try:
+                exc = t.exception()
+                if exc:
+                    error_msg = f"Training task failed: {str(exc)}"
+                    _debug_log(job_id, error_msg, "ERROR")
+                    sanitized_log_service.create_terminal_log(job_id, f"ERROR: {error_msg}", "ERROR")
+                    # Update job status synchronously
+                    import asyncio
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(job_manager.fail_job(job_id, error_msg))
+            except asyncio.CancelledError:
+                pass
+            except Exception as cb_err:
+                _debug_log(job_id, f"Task callback error: {cb_err}", "ERROR")
+        
+        task.add_done_callback(handle_task_exception)
         self._running_tasks[job_id] = task
         _debug_log(job_id, "Background task created")
         return True

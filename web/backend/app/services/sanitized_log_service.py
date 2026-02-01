@@ -473,12 +473,17 @@ class SanitizedLogService:
         log_file = os.path.join(self.TERMINAL_LOG_BASE_PATH, f"{job_id}.terminal.log")
         
         try:
+            # Ensure directory exists (handles container/mount issues)
+            os.makedirs(self.TERMINAL_LOG_BASE_PATH, exist_ok=True)
+            
             with open(log_file, 'a') as f:
                 f.write(log_line + '\n')
                 f.flush()  # Force flush to disk for real-time reading
                 os.fsync(f.fileno())  # Ensure OS writes to disk
-        except Exception:
-            pass
+        except Exception as e:
+            # Log to stderr so it appears in container logs
+            import sys
+            print(f"[TERMINAL_LOG_ERROR] Failed to write log for job {job_id}: {e}", file=sys.stderr)
         
         return log_line
     

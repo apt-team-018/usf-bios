@@ -1483,6 +1483,7 @@ export default function Home() {
 
   // Poll for job status - CRITICAL for detecting failures
   // This is the primary way to detect when training completes/fails
+  // Polls every 1 second for fast feedback
   useEffect(() => {
     const jobId = jobStatus?.job_id
     if (!jobId || !isTraining) return
@@ -1494,17 +1495,22 @@ export default function Home() {
         const res = await fetch(`/api/jobs/${jobId}`)
         if (res.ok) {
           const job = await res.json()
-          console.log('[STATUS POLL] Job status:', job.status)
           
-          // Update status from backend
+          // Update all job info from backend
+          setJobStatus(prev => prev ? { 
+            ...prev, 
+            status: job.status,
+            error: job.error || prev.error,
+            current_step: job.current_step ?? prev.current_step,
+            total_steps: job.total_steps ?? prev.total_steps,
+            current_loss: job.current_loss ?? prev.current_loss,
+            epoch: job.epoch ?? prev.epoch,
+          } : null)
+          
+          // Check for terminal states
           if (job.status === 'completed' || job.status === 'failed' || job.status === 'stopped') {
-            console.log('[STATUS POLL] Training ended with status:', job.status)
+            console.log('[STATUS POLL] Training ended with status:', job.status, 'error:', job.error)
             setIsTraining(false)
-            setJobStatus(prev => prev ? { 
-              ...prev, 
-              status: job.status,
-              error: job.error || null
-            } : null)
           }
         }
       } catch (e) {
@@ -1515,8 +1521,8 @@ export default function Home() {
     // Check immediately
     checkJobStatus()
     
-    // Poll every 2 seconds
-    const interval = setInterval(checkJobStatus, 2000)
+    // Poll every 1 second for fast feedback
+    const interval = setInterval(checkJobStatus, 1000)
     
     return () => {
       console.log('[STATUS POLL] Stopping status polling for job:', jobId)
@@ -1684,7 +1690,10 @@ export default function Home() {
               recentLogs.includes('SESSION ENDED: FAILED') ||
               recentLogs.includes('Training failed with exit code') ||
               recentLogs.includes('[ERROR] Training failed') ||
-              recentLogs.includes('Training was interrupted or failed')
+              recentLogs.includes('Training was interrupted or failed') ||
+              recentLogs.includes('ERROR: Model validation failed') ||
+              recentLogs.includes('ERROR: Configuration validation failed') ||
+              recentLogs.includes('ERROR: Training task failed')
             )) {
               console.log('[LOG POLL] Detected training failure from logs')
               setIsTraining(false)

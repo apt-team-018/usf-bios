@@ -90,6 +90,10 @@ async def create_job(config: TrainingConfig, db: Session = Depends(get_db)):
         job = await job_manager.create_job(config)
         _debug_log(f"Job created in memory: {job.job_id}")
         
+        # Write initial log entry so frontend has something to show immediately
+        from ...services.sanitized_log_service import sanitized_log_service
+        sanitized_log_service.create_terminal_log(job.job_id, "Job created - ready to start training", "INFO")
+        
         # ============================================================
         # PERSIST TO DATABASE for training history
         # This ensures history survives server restarts
@@ -179,12 +183,17 @@ async def start_job(job_id: str):
         _debug_log(f"Job {job_id} has already completed", job_id, "WARNING")
         raise HTTPException(status_code=400, detail="Job has already completed")
     
+    # Write to terminal log immediately so frontend sees activity
+    from ...services.sanitized_log_service import sanitized_log_service
+    sanitized_log_service.create_terminal_log(job_id, "Received start command - initializing...", "INFO")
+    
     _debug_log(f"Calling training_service.start_training for {job_id}", job_id)
     success = await training_service.start_training(job_id)
     _debug_log(f"start_training returned: {success}", job_id)
     
     if not success:
         _debug_log(f"Failed to start training for {job_id}", job_id, "ERROR")
+        sanitized_log_service.create_terminal_log(job_id, "ERROR: Failed to start training - check configuration", "ERROR")
         raise HTTPException(status_code=500, detail="Failed to start training")
     
     return {"job_id": job_id, "status": "starting"}
