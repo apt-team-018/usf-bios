@@ -242,16 +242,46 @@ class JobManager:
             return False
     
     def stop_all_training_processes(self) -> bool:
-        """Stop all usf_bios training processes (emergency stop)."""
-        try:
-            result = subprocess.run(
-                ["pkill", "-f", "usf_bios.*sft"],
-                capture_output=True,
-                timeout=10
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
+        """Stop all usf_bios training processes (emergency stop).
+        
+        Kills ALL training types: SFT, RLHF (DPO, PPO, GRPO, etc.), PT, LoRA, etc.
+        """
+        # All training method patterns - must match what is_training_process_running checks
+        patterns = [
+            "usf_bios.*sft",
+            "usf_bios.*pt",
+            "usf_bios.*rlhf",
+            "usf_bios.*dpo",
+            "usf_bios.*orpo",
+            "usf_bios.*simpo",
+            "usf_bios.*kto",
+            "usf_bios.*cpo",
+            "usf_bios.*rm",
+            "usf_bios.*ppo",
+            "usf_bios.*grpo",
+            "usf_bios.*gkd",
+            "usf_bios.*lora",
+            "usf_bios.*qlora",
+            "usf_bios.*adalora",
+            "usf_bios.*full",
+            "usf_bios train",
+            "python.*-m usf_bios",
+        ]
+        
+        any_killed = False
+        for pattern in patterns:
+            try:
+                result = subprocess.run(
+                    ["pkill", "-9", "-f", pattern],  # -9 = SIGKILL for force kill
+                    capture_output=True,
+                    timeout=10
+                )
+                if result.returncode == 0:
+                    any_killed = True
+            except Exception:
+                continue
+        
+        return any_killed
     
     async def delete_job(self, job_id: str) -> bool:
         """Delete a job (only if not running)

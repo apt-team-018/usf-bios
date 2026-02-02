@@ -70,8 +70,8 @@ interface TrainingHistoryProps {
 
 // ==================== Filter Types ====================
 type StatusFilter = 'all' | 'completed' | 'failed' | 'running' | 'stopped'
-type TrainingTypeFilter = 'all' | 'lora' | 'qlora' | 'full' | 'freeze'
-type TrainingMethodFilter = 'all' | 'sft' | 'dpo' | 'ppo' | 'kto' | 'orpo'
+type TrainingTypeFilter = 'all' | 'lora' | 'qlora' | 'full' | 'adalora'
+type TrainingMethodFilter = 'all' | 'sft' | 'pt' | 'rlhf'
 type SortField = 'date' | 'name' | 'status'
 type SortOrder = 'asc' | 'desc'
 
@@ -90,17 +90,15 @@ const TRAINING_TYPE_OPTIONS: { value: TrainingTypeFilter; label: string; descrip
   { value: 'all', label: 'All Types', description: 'Show all training types' },
   { value: 'lora', label: 'LoRA', description: 'Low-Rank Adaptation' },
   { value: 'qlora', label: 'QLoRA', description: 'Quantized LoRA' },
-  { value: 'full', label: 'Full Fine-tune', description: 'Full parameter training' },
-  { value: 'freeze', label: 'Freeze', description: 'Partial layer training' }
+  { value: 'adalora', label: 'AdaLoRA', description: 'Adaptive LoRA' },
+  { value: 'full', label: 'Full Fine-tune', description: 'Full parameter training' }
 ]
 
 const TRAINING_METHOD_OPTIONS: { value: TrainingMethodFilter; label: string; description: string }[] = [
-  { value: 'all', label: 'All Methods', description: 'Show all methods' },
+  { value: 'all', label: 'All Methods', description: 'Show all training methods' },
   { value: 'sft', label: 'SFT', description: 'Supervised Fine-Tuning' },
-  { value: 'dpo', label: 'DPO', description: 'Direct Preference Optimization' },
-  { value: 'ppo', label: 'PPO', description: 'Proximal Policy Optimization' },
-  { value: 'kto', label: 'KTO', description: 'Kahneman-Tversky Optimization' },
-  { value: 'orpo', label: 'ORPO', description: 'Odds Ratio Preference Optimization' }
+  { value: 'pt', label: 'Pre-Training', description: 'Continuous Pre-Training' },
+  { value: 'rlhf', label: 'RLHF', description: 'Reinforcement Learning from Human Feedback' }
 ]
 
 // ==================== Component ====================

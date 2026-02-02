@@ -481,30 +481,47 @@ class TrainingStatusService:
         
         This is used when a training job appears stuck and needs manual intervention.
         It will:
-        1. Mark the job as failed
-        2. Clear training state
-        3. Allow new training to start
+        1. Kill all training processes (ALL types: SFT, DPO, PPO, GRPO, etc.)
+        2. Clear GPU VRAM and CPU memory
+        3. Mark the job as failed
+        4. Clear training state
+        5. Allow new training to start
         
         Returns status of the reset operation.
         """
         from .sanitized_log_service import sanitized_log_service
+        from .gpu_cleanup_service import gpu_cleanup_service
         
+        errors = []
+        target_job_id = job_id or self._status.job_id
+        
+        # Allow reset even if no active training detected (process might be orphaned)
+        if not target_job_id:
+            target_job_id = "unknown"
+        
+        # Step 1: Kill ALL training processes (force kill with SIGKILL)
+        try:
+            killed = job_manager.stop_all_training_processes()
+            if killed:
+                # Wait for processes to terminate and release resources
+                await asyncio.sleep(2.0)
+        except Exception as e:
+            errors.append(f"Process kill warning: {str(e)}")
+        
+        # Step 2: Force GPU VRAM cleanup (critical for allowing new training)
+        gpu_cleanup_result = None
+        try:
+            gpu_cleanup_result = gpu_cleanup_service.deep_cleanup(
+                kill_orphans=True,  # Kill any orphaned CUDA processes
+                cleanup_cpu=True    # Also cleanup CPU memory (DeepSpeed offload)
+            )
+            if not gpu_cleanup_result.get("success"):
+                errors.append(f"GPU cleanup warning: {gpu_cleanup_result.get('error', 'unknown')}")
+        except Exception as e:
+            errors.append(f"GPU cleanup exception: {str(e)}")
+        
+        # Step 3: Mark job as failed in job manager
         async with self._lock:
-            target_job_id = job_id or self._status.job_id
-            
-            if not target_job_id and not self._status.is_training_active:
-                return {
-                    "success": False,
-                    "message": "No active training to reset"
-                }
-            
-            # Try to stop any running training process
-            try:
-                job_manager.stop_all_training_processes()
-            except Exception as e:
-                pass  # Best effort
-            
-            # Mark job as failed if we have a job_id
             if target_job_id and target_job_id != "unknown" and not target_job_id.startswith("pid-"):
                 try:
                     await job_manager.update_job(
@@ -515,27 +532,44 @@ class TrainingStatusService:
                     )
                     sanitized_log_service.create_terminal_log(
                         target_job_id,
-                        "Training forcefully reset by user",
+                        "Training forcefully reset by user - VRAM cleared",
                         "WARN"
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    errors.append(f"Job update warning: {str(e)}")
             
-            # Clear training state
+            # Step 4: Clear training state completely
             self._status.is_training_active = False
             self._status.phase = TrainingPhase.FAILED
             self._status.error_message = "Training forcefully reset"
+            self._status.job_id = None
+            self._status.job_name = None
+            self._status.model_name = None
+            self._status.started_at = None
+            self._status.progress = TrainingProgress()
+            self._status.process_running = False
+            self._status.process_pid = None
             self._status.can_create_job = True
             self._status.can_load_inference = True
             self._status.can_start_training = True
             self._status.last_updated = datetime.utcnow()
             self._last_progress_update = None
-            
-            return {
-                "success": True,
-                "message": f"Training reset successfully. Job {target_job_id} marked as failed.",
-                "job_id": target_job_id
-            }
+        
+        # Build result with detailed info
+        result = {
+            "success": True,
+            "message": f"Training reset successfully. Job {target_job_id} marked as failed. VRAM cleared.",
+            "job_id": target_job_id,
+            "gpu_cleanup": {
+                "memory_freed_gb": gpu_cleanup_result.get("memory_freed_gb", 0) if gpu_cleanup_result else 0,
+                "cpu_memory_freed_gb": gpu_cleanup_result.get("cpu_memory_freed_gb", 0) if gpu_cleanup_result else 0,
+            } if gpu_cleanup_result else None
+        }
+        
+        if errors:
+            result["warnings"] = errors
+        
+        return result
 
 
 # Global instance

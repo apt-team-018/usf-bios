@@ -929,6 +929,18 @@ class TrainingService:
             if rlhf_type:
                 cmd.extend(["--rlhf_type", rlhf_type])
             
+            # Column mapping for offline RLHF datasets (prompt/chosen/rejected format)
+            # Maps: chosen -> response, rejected -> rejected_response
+            # This is required for USF BIOS to properly process RLHF preference datasets
+            offline_rlhf_algorithms = ["dpo", "orpo", "simpo", "cpo", "rm", "kto"]
+            if rlhf_type in offline_rlhf_algorithms:
+                import json
+                columns_mapping = {
+                    "chosen": "response",
+                    "rejected": "rejected_response"
+                }
+                cmd.extend(["--columns", json.dumps(columns_mapping)])
+            
             # Beta parameter
             if hasattr(config, 'beta') and config.beta is not None:
                 cmd.extend(["--beta", str(config.beta)])
@@ -1028,6 +1040,25 @@ class TrainingService:
                 "--lora_dropout", str(config.lora_dropout),
                 "--target_modules", config.target_modules,
             ])
+            
+            # ============================================================
+            # ADVANCED LORA OPTIONS (from USF-BIOS tuner_args.py)
+            # ============================================================
+            # RSLoRA - Rank-Stabilized LoRA for better training stability
+            if hasattr(config, 'use_rslora') and config.use_rslora:
+                cmd.extend(["--use_rslora", "true"])
+            
+            # DoRA - Weight-Decomposed LoRA for improved performance
+            if hasattr(config, 'use_dora') and config.use_dora:
+                cmd.extend(["--use_dora", "true"])
+            
+            # LoRA bias training
+            if hasattr(config, 'lora_bias') and config.lora_bias and config.lora_bias != "none":
+                cmd.extend(["--lora_bias", config.lora_bias])
+            
+            # LoRA initialization method (PiSSA, OLoRA, LoftQ, etc.)
+            if hasattr(config, 'init_weights') and config.init_weights and config.init_weights != "true":
+                cmd.extend(["--init_weights", config.init_weights])
         
         # Quantization (QLoRA uses quant_bits=4 by default)
         # If train_type was "qlora", ensure quant_bits is set
@@ -1036,6 +1067,43 @@ class TrainingService:
             cmd.extend(["--quant_bits", str(quant_bits)])
         elif config.quant_bits:
             cmd.extend(["--quant_bits", str(config.quant_bits)])
+        
+        # ============================================================
+        # MULTIMODAL FREEZE OPTIONS (from USF-BIOS tuner_args.py)
+        # For VLMs (vision-language models) like LLaVA, Qwen-VL
+        # ============================================================
+        modality = getattr(config, 'modality', None)
+        modality_value = modality.value if hasattr(modality, 'value') else str(modality) if modality else "text"
+        
+        if modality_value in ["vision", "audio", "video"]:
+            # Freeze LLM weights (train only vision/aligner)
+            if hasattr(config, 'freeze_llm') and config.freeze_llm:
+                cmd.extend(["--freeze_llm", "true"])
+            
+            # Freeze Vision Transformer weights
+            if hasattr(config, 'freeze_vit') and config.freeze_vit:
+                cmd.extend(["--freeze_vit", "true"])
+            
+            # Freeze aligner/projector weights
+            if hasattr(config, 'freeze_aligner') and config.freeze_aligner:
+                cmd.extend(["--freeze_aligner", "true"])
+        
+        # ============================================================
+        # LONG CONTEXT SUPPORT (from USF-BIOS model_args.py)
+        # RoPE scaling for extended context
+        # ============================================================
+        if hasattr(config, 'rope_scaling') and config.rope_scaling:
+            cmd.extend(["--rope_scaling", config.rope_scaling])
+        
+        if hasattr(config, 'max_model_len') and config.max_model_len:
+            cmd.extend(["--max_model_len", str(config.max_model_len)])
+        
+        # ============================================================
+        # DATASET SPLIT (from USF-BIOS data_args.py)
+        # Auto train/val split
+        # ============================================================
+        if hasattr(config, 'split_dataset_ratio') and config.split_dataset_ratio and config.split_dataset_ratio > 0:
+            cmd.extend(["--split_dataset_ratio", str(config.split_dataset_ratio)])
         
         # Attention Implementation (Flash Attention, SDPA, etc.)
         if config.attn_impl:
@@ -1064,8 +1132,12 @@ class TrainingService:
         # Optimizer parameters
         if hasattr(config, 'weight_decay') and config.weight_decay is not None:
             cmd.extend(["--weight_decay", str(config.weight_decay)])
+        if hasattr(config, 'adam_beta1') and config.adam_beta1 is not None:
+            cmd.extend(["--adam_beta1", str(config.adam_beta1)])
         if hasattr(config, 'adam_beta2') and config.adam_beta2 is not None:
             cmd.extend(["--adam_beta2", str(config.adam_beta2)])
+        if hasattr(config, 'max_grad_norm') and config.max_grad_norm is not None and config.max_grad_norm > 0:
+            cmd.extend(["--max_grad_norm", str(config.max_grad_norm)])
         
         # DeepSpeed (cannot be used with FSDP)
         if config.deepspeed:
@@ -1078,6 +1150,34 @@ class TrainingService:
         # Early stopping
         if config.early_stop_interval:
             cmd.extend(["--early_stop_interval", str(config.early_stop_interval)])
+        
+        # ============================================================
+        # STREAMING OPTIONS FOR LARGE DATASETS
+        # Verified against USF-BIOS get_dataset_kwargs() in data_args.py
+        # ============================================================
+        if getattr(config, 'streaming', False):
+            cmd.extend(["--streaming", "true"])
+            
+            # Shuffle buffer size for streaming
+            if hasattr(config, 'shuffle_buffer_size') and config.shuffle_buffer_size:
+                cmd.extend(["--shuffle_buffer_size", str(config.shuffle_buffer_size)])
+            
+            # max_steps is REQUIRED for streaming mode (dataset length unknown)
+            if hasattr(config, 'max_steps') and config.max_steps:
+                cmd.extend(["--max_steps", str(config.max_steps)])
+        
+        # ============================================================
+        # MULTIPLE DATASET MIXING OPTIONS
+        # Verified against USF-BIOS get_dataset_kwargs() in data_args.py
+        # ============================================================
+        # Interleave probabilities for multiple datasets
+        if hasattr(config, 'interleave_prob') and config.interleave_prob:
+            import json
+            cmd.extend(["--interleave_prob", json.dumps(config.interleave_prob)])
+        
+        # Stopping strategy for multiple datasets
+        if hasattr(config, 'stopping_strategy') and config.stopping_strategy:
+            cmd.extend(["--stopping_strategy", config.stopping_strategy])
         
         # HuggingFace source flag - required when model/dataset is from HuggingFace
         model_source = getattr(config, 'model_source', None)
@@ -2717,6 +2817,101 @@ class TrainingService:
                 return False
             
             _debug_log(job_id, f"Output path validation passed")
+            
+            # =====================================================================
+            # DATASET TYPE VALIDATION: Ensure algorithm is compatible with dataset
+            # Also validates that multiple datasets have compatible types
+            # =====================================================================
+            try:
+                from .algorithm_compatibility import algorithm_compatibility_service
+                from .dataset_type_service import dataset_type_service
+                
+                # Get all dataset paths (comma-separated or list)
+                dataset_path_str = getattr(job.config, 'dataset_path', '')
+                dataset_paths = [p.strip() for p in dataset_path_str.split(',') if p.strip()]
+                
+                if dataset_paths and len(dataset_paths) > 0:
+                    # =========================================================
+                    # MULTIPLE DATASET TYPE COMPATIBILITY CHECK
+                    # USF-BIOS requires all datasets to be the same type
+                    # =========================================================
+                    dataset_types = []
+                    for ds_path in dataset_paths:
+                        try:
+                            # Skip HuggingFace/ModelScope prefixes for type detection
+                            clean_path = ds_path
+                            if clean_path.upper().startswith('HF::'):
+                                clean_path = clean_path[4:]
+                            elif clean_path.upper().startswith('MS::'):
+                                clean_path = clean_path[4:]
+                            
+                            dataset_result = dataset_type_service.detect_dataset_type(ds_path)
+                            dataset_types.append({
+                                'path': ds_path,
+                                'type': dataset_result.dataset_type.value,
+                                'confidence': dataset_result.confidence
+                            })
+                        except Exception as e:
+                            _debug_log(job_id, f"Could not detect type for {ds_path}: {e}", "WARNING")
+                            dataset_types.append({
+                                'path': ds_path,
+                                'type': 'unknown',
+                                'confidence': 0.0
+                            })
+                    
+                    # Check if all datasets have the same type
+                    if len(dataset_types) > 1:
+                        unique_types = set(dt['type'] for dt in dataset_types if dt['type'] != 'unknown')
+                        if len(unique_types) > 1:
+                            # Multiple different types detected - warn user
+                            type_list = ", ".join([f"{dt['path']}: {dt['type']}" for dt in dataset_types])
+                            warning_msg = f"Multiple datasets have different types: {type_list}. USF-BIOS will concatenate them but this may cause issues."
+                            sanitized_log_service.create_terminal_log(job_id, f"WARNING: {warning_msg}", "WARNING")
+                            _debug_log(job_id, warning_msg, "WARNING")
+                        else:
+                            sanitized_log_service.create_terminal_log(
+                                job_id, 
+                                f"Multiple datasets detected ({len(dataset_paths)}), all same type: {list(unique_types)[0] if unique_types else 'unknown'}", 
+                                "INFO"
+                            )
+                    
+                    # Use first dataset's type for compatibility check
+                    dataset_type = dataset_types[0]['type'] if dataset_types else 'unknown'
+                    
+                    # Get training configuration
+                    training_method = getattr(job.config, 'training_method', None)
+                    method_value = training_method.value if hasattr(training_method, 'value') else str(training_method) if training_method else 'sft'
+                    rlhf_algorithm = getattr(job.config, 'rlhf_type', None)
+                    train_type = getattr(job.config, 'train_type', None)
+                    train_type_value = train_type.value if hasattr(train_type, 'value') else str(train_type) if train_type else 'lora'
+                    
+                    # Validate configuration compatibility
+                    validation_result = algorithm_compatibility_service.validate_training_config(
+                        dataset_type=dataset_type,
+                        training_method=method_value,
+                        rlhf_algorithm=rlhf_algorithm,
+                        training_type=train_type_value,
+                        quantization="4bit" if train_type_value == "qlora" else "none",
+                    )
+                    
+                    if not validation_result["valid"]:
+                        error_msg = "Training configuration validation failed:\n" + "\n".join(validation_result["errors"])
+                        _debug_log(job_id, f"Config validation failed: {error_msg}", "ERROR")
+                        sanitized_log_service.create_terminal_log(job_id, f"ERROR: {error_msg}", "ERROR")
+                        await job_manager.fail_job(job_id, error_msg)
+                        return False
+                    
+                    # Log any warnings
+                    for warning in validation_result.get("warnings", []):
+                        sanitized_log_service.create_terminal_log(job_id, f"WARNING: {warning}", "WARNING")
+                    
+                    _debug_log(job_id, f"Dataset type validation passed: {dataset_type} with {method_value}")
+                    sanitized_log_service.create_terminal_log(job_id, f"Dataset type validation passed ({dataset_type})", "INFO")
+            except ImportError:
+                _debug_log(job_id, "Algorithm compatibility service not available - skipping dataset type validation")
+            except Exception as e:
+                _debug_log(job_id, f"Dataset type validation error (non-blocking): {e}", "WARNING")
+            
         except Exception as e:
             _debug_log(job_id, f"Validation error: {e}", "ERROR")
             sanitized_log_service.create_terminal_log(job_id, f"ERROR: Configuration validation failed - {str(e)}", "ERROR")

@@ -194,6 +194,8 @@ interface TrainingConfig {
   training_method: 'sft' | 'pt' | 'rlhf'
   train_type: 'full' | 'lora' | 'qlora' | 'adalora'
   rlhf_type: 'dpo' | 'orpo' | 'simpo' | 'kto' | 'cpo' | 'rm' | 'ppo' | 'grpo' | 'gkd' | null
+  // Model modality
+  modality: 'text' | 'vision' | 'audio' | 'video'
   // RLHF parameters
   beta: number | null
   max_completion_length: number
@@ -230,6 +232,11 @@ interface TrainingConfig {
   lora_alpha: number
   lora_dropout: number
   target_modules: string
+  // LoRA Advanced Options (from USF-BIOS tuner_args.py)
+  use_rslora: boolean
+  use_dora: boolean
+  lora_bias: 'none' | 'all'
+  init_weights: 'true' | 'gaussian' | 'pissa' | 'olora' | 'loftq'
   quant_bits: number | null
   warmup_ratio: number
   attn_impl: string | null
@@ -239,9 +246,20 @@ interface TrainingConfig {
   use_liger_kernel: boolean
   packing: boolean
   sequence_parallel_size: number
+  // Multimodal freeze options (for VLMs)
+  freeze_llm: boolean
+  freeze_vit: boolean
+  freeze_aligner: boolean
+  // Long context support
+  rope_scaling: 'linear' | 'dynamic' | 'yarn' | null
+  max_model_len: number | null
+  // Dataset split
+  split_dataset_ratio: number
   lr_scheduler_type: string
   weight_decay: number
+  adam_beta1: number
   adam_beta2: number
+  max_grad_norm: number
   gpu_ids: number[] | null
   num_gpus: number | null
   // API Tokens for private models/datasets (optional)
@@ -397,7 +415,7 @@ interface FeatureFlags {
 
 // Dataset type info from detection
 interface DatasetTypeInfo {
-  dataset_type: string  // sft, rlhf, pt, kto, unknown
+  dataset_type: string  // sft, pt, rlhf_offline_preference, rlhf_offline_binary, rlhf_online, unknown
   confidence: number
   detected_fields: string[]
   sample_count: number
@@ -757,8 +775,14 @@ export default function TrainingSettingsStep({ config, setConfig, availableGpus 
       if (incompatible.includes(method)) {
         const datasetTypeName = {
           'sft': 'SFT (instruction-response)',
-          'rlhf': 'RLHF (preference data)',
           'pt': 'Pre-training (raw text)',
+          // RLHF Offline
+          'rlhf_offline_preference': 'RLHF Offline - Preference (DPO/ORPO/SimPO/CPO/RM)',
+          'rlhf_offline_binary': 'RLHF Offline - Binary Feedback (KTO)',
+          // RLHF Online
+          'rlhf_online': 'RLHF Online (PPO/GRPO/GKD)',
+          // Legacy compatibility
+          'rlhf': 'RLHF (preference data)',
           'kto': 'KTO (binary feedback)'
         }[datasetTypeInfo.dataset_type] || datasetTypeInfo.dataset_type
         
@@ -975,13 +999,21 @@ export default function TrainingSettingsStep({ config, setConfig, availableGpus 
 
   const applyDefaults = (type: TrainingConfig['train_type']) => {
     const tc = PARAM_CONFIG[type] || {}
+    const isLoraType = ['lora', 'qlora', 'adalora'].includes(type)
+    
     setConfig(prev => ({
-      ...prev, train_type: type,
+      ...prev, 
+      train_type: type,
       lora_rank: tc.rank?.default ?? prev.lora_rank,
       lora_alpha: tc.alpha?.default ?? prev.lora_alpha,
       lora_dropout: tc.dropout?.default ?? prev.lora_dropout,
       quant_bits: type === 'qlora' ? 4 : null,
       learning_rate: type === 'full' ? 0.00002 : commonConfig.learning_rate.default,
+      // Reset LoRA-specific options when switching to Full fine-tuning
+      use_rslora: isLoraType ? prev.use_rslora : false,
+      use_dora: isLoraType ? prev.use_dora : false,
+      lora_bias: isLoraType ? prev.lora_bias : 'none',
+      init_weights: isLoraType ? prev.init_weights : 'true',
     }))
   }
 
@@ -1640,6 +1672,119 @@ export default function TrainingSettingsStep({ config, setConfig, availableGpus 
               </div>
             )}
           </div>
+          
+          {/* Advanced LoRA Options */}
+          <div className="mt-4 pt-4 border-t border-purple-200">
+            <div className="flex items-center gap-2 mb-3">
+              <Sparkles className="w-4 h-4 text-purple-600" />
+              <span className="font-medium text-sm text-purple-700">Advanced LoRA Options</span>
+              <Tooltip text="Experimental LoRA variants for improved training. RSLoRA stabilizes training, DoRA improves performance." />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {/* RSLoRA - Mutually exclusive with DoRA */}
+              <label className={`flex items-center gap-3 p-3 rounded-lg border bg-white cursor-pointer transition-colors ${
+                config.use_dora ? 'border-slate-200 opacity-50 cursor-not-allowed' : 'border-purple-200 hover:bg-purple-50'
+              }`}>
+                <input type="checkbox" 
+                  checked={config.use_rslora}
+                  disabled={config.use_dora}
+                  onChange={(e) => setConfig(p => ({ ...p, use_rslora: e.target.checked }))}
+                  className="w-4 h-4 text-purple-600 rounded focus:ring-purple-500" />
+                <div>
+                  <span className="font-medium text-sm text-slate-700">RSLoRA</span>
+                  <p className="text-xs text-slate-500">Rank-stabilized LoRA</p>
+                  {config.use_dora && <p className="text-xs text-amber-600">Cannot use with DoRA</p>}
+                </div>
+              </label>
+              {/* DoRA - Mutually exclusive with RSLoRA */}
+              <label className={`flex items-center gap-3 p-3 rounded-lg border bg-white cursor-pointer transition-colors ${
+                config.use_rslora ? 'border-slate-200 opacity-50 cursor-not-allowed' : 'border-purple-200 hover:bg-purple-50'
+              }`}>
+                <input type="checkbox" 
+                  checked={config.use_dora}
+                  disabled={config.use_rslora}
+                  onChange={(e) => setConfig(p => ({ ...p, use_dora: e.target.checked }))}
+                  className="w-4 h-4 text-purple-600 rounded focus:ring-purple-500" />
+                <div>
+                  <span className="font-medium text-sm text-slate-700">DoRA</span>
+                  <p className="text-xs text-slate-500">Weight-decomposed LoRA</p>
+                  {config.use_rslora && <p className="text-xs text-amber-600">Cannot use with RSLoRA</p>}
+                </div>
+              </label>
+              {/* LoRA Bias */}
+              <div>
+                <label className="text-xs font-medium text-slate-600 mb-1 block">LoRA Bias</label>
+                <select 
+                  value={config.lora_bias}
+                  onChange={(e) => setConfig(p => ({ ...p, lora_bias: e.target.value as 'none' | 'all' }))}
+                  className="w-full px-3 py-2 border border-purple-200 rounded-lg bg-white text-sm">
+                  <option value="none">None (default)</option>
+                  <option value="all">All (train biases)</option>
+                </select>
+              </div>
+            </div>
+            
+            {/* LoRA Initialization Method */}
+            <div className="mt-3">
+              <div className="flex items-center gap-2 mb-2">
+                <label className="text-xs font-medium text-slate-600">Initialization Method</label>
+                <Tooltip text="Advanced LoRA weight initialization. PiSSA and OLoRA provide better convergence for some tasks." />
+              </div>
+              <select 
+                value={config.init_weights}
+                onChange={(e) => setConfig(p => ({ ...p, init_weights: e.target.value as 'true' | 'gaussian' | 'pissa' | 'olora' | 'loftq' }))}
+                className="w-full px-3 py-2 border border-purple-200 rounded-lg bg-white text-sm">
+                <option value="true">Default</option>
+                <option value="gaussian">Gaussian</option>
+                <option value="pissa">PiSSA (Principal Singular Value)</option>
+                <option value="olora">OLoRA (Orthogonal)</option>
+                <option value="loftq">LoftQ (Quantization-Aware)</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Multimodal Freeze Options - Only show for vision/audio/video */}
+      {config.modality && config.modality !== 'text' && (
+        <div className="bg-gradient-to-r from-cyan-50 to-blue-50 rounded-lg p-4 border border-cyan-200">
+          <h4 className="font-medium text-slate-900 mb-4 flex items-center gap-2">
+            <span className="px-2 py-1 bg-cyan-100 text-cyan-700 rounded text-xs font-semibold">🎯</span>
+            Multimodal Freeze Options
+          </h4>
+          <p className="text-xs text-slate-600 mb-3">Control which components to freeze during multimodal training. Freezing reduces memory and focuses learning.</p>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <label className="flex items-center gap-3 p-3 rounded-lg border border-cyan-200 bg-white cursor-pointer hover:bg-cyan-50 transition-colors">
+              <input type="checkbox" 
+                checked={config.freeze_llm}
+                onChange={(e) => setConfig(p => ({ ...p, freeze_llm: e.target.checked }))}
+                className="w-4 h-4 text-cyan-600 rounded focus:ring-cyan-500" />
+              <div>
+                <span className="font-medium text-sm text-slate-700">Freeze LLM</span>
+                <p className="text-xs text-slate-500">Train only vision/audio</p>
+              </div>
+            </label>
+            <label className="flex items-center gap-3 p-3 rounded-lg border border-cyan-200 bg-white cursor-pointer hover:bg-cyan-50 transition-colors">
+              <input type="checkbox" 
+                checked={config.freeze_vit}
+                onChange={(e) => setConfig(p => ({ ...p, freeze_vit: e.target.checked }))}
+                className="w-4 h-4 text-cyan-600 rounded focus:ring-cyan-500" />
+              <div>
+                <span className="font-medium text-sm text-slate-700">Freeze ViT</span>
+                <p className="text-xs text-slate-500">Keep vision encoder frozen</p>
+              </div>
+            </label>
+            <label className="flex items-center gap-3 p-3 rounded-lg border border-cyan-200 bg-white cursor-pointer hover:bg-cyan-50 transition-colors">
+              <input type="checkbox" 
+                checked={config.freeze_aligner}
+                onChange={(e) => setConfig(p => ({ ...p, freeze_aligner: e.target.checked }))}
+                className="w-4 h-4 text-cyan-600 rounded focus:ring-cyan-500" />
+              <div>
+                <span className="font-medium text-sm text-slate-700">Freeze Aligner</span>
+                <p className="text-xs text-slate-500">Keep projector frozen</p>
+              </div>
+            </label>
+          </div>
         </div>
       )}
 
@@ -1921,6 +2066,90 @@ export default function TrainingSettingsStep({ config, setConfig, availableGpus 
             <option value="polynomial">Polynomial</option>
             <option value="cosine_with_min_lr">Cosine with Min LR</option>
           </select>
+        </div>
+
+        {/* Long Context / RoPE Scaling */}
+        <div className="mt-4 pt-4 border-t border-emerald-200">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="font-medium text-sm text-slate-700">Long Context Support</span>
+            <Tooltip text="RoPE scaling for extended context lengths beyond model default. Use with caution - may affect quality." />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">RoPE Scaling</label>
+              <select 
+                value={config.rope_scaling || ''}
+                onChange={(e) => setConfig(p => ({ ...p, rope_scaling: (e.target.value || null) as 'linear' | 'dynamic' | 'yarn' | null }))}
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm">
+                <option value="">None (default)</option>
+                <option value="linear">Linear</option>
+                <option value="dynamic">Dynamic</option>
+                <option value="yarn">YaRN (recommended)</option>
+              </select>
+            </div>
+            {config.rope_scaling && (
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Max Model Length</label>
+                <input type="number" 
+                  value={config.max_model_len || ''} 
+                  onChange={(e) => setConfig(p => ({ ...p, max_model_len: e.target.value ? parseInt(e.target.value) : null }))}
+                  placeholder="e.g., 32768"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm" />
+                <p className="text-xs text-slate-500 mt-1">Target context length for RoPE scaling</p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Dataset Split */}
+        <div className="mt-4 pt-4 border-t border-emerald-200">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="font-medium text-sm text-slate-700">Auto Train/Validation Split</span>
+            <Tooltip text="Automatically split dataset into training and validation sets." />
+          </div>
+          <div className="flex items-center gap-4">
+            <input type="range" 
+              min="0" max="0.3" step="0.05"
+              value={config.split_dataset_ratio}
+              onChange={(e) => setConfig(p => ({ ...p, split_dataset_ratio: parseFloat(e.target.value) }))}
+              className="flex-1 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer" />
+            <span className="text-sm font-medium text-slate-700 w-16 text-right">
+              {config.split_dataset_ratio === 0 ? 'Disabled' : `${(config.split_dataset_ratio * 100).toFixed(0)}%`}
+            </span>
+          </div>
+          <p className="text-xs text-slate-500 mt-1">
+            {config.split_dataset_ratio > 0 
+              ? `${(config.split_dataset_ratio * 100).toFixed(0)}% of data will be used for validation`
+              : 'No validation split - all data used for training'}
+          </p>
+        </div>
+
+        {/* Training Stability */}
+        <div className="mt-4 pt-4 border-t border-emerald-200">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="font-medium text-sm text-slate-700">Training Stability</span>
+            <Tooltip text="Parameters to improve training stability and prevent exploding gradients." />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">Max Gradient Norm</label>
+              <input type="number" 
+                min="0" max="10" step="0.1"
+                value={config.max_grad_norm} 
+                onChange={(e) => setConfig(p => ({ ...p, max_grad_norm: parseFloat(e.target.value) || 1.0 }))}
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm" />
+              <p className="text-xs text-slate-500 mt-1">Gradient clipping (0 = disabled, 1.0 = default)</p>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">Weight Decay</label>
+              <input type="number" 
+                min="0" max="1" step="0.01"
+                value={config.weight_decay} 
+                onChange={(e) => setConfig(p => ({ ...p, weight_decay: parseFloat(e.target.value) || 0.1 }))}
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm" />
+              <p className="text-xs text-slate-500 mt-1">L2 regularization (0.1 = default)</p>
+            </div>
+          </div>
         </div>
 
         {/* GPU Selection */}

@@ -4,8 +4,9 @@ import { useState, useRef, useEffect } from 'react'
 import { 
   Upload, X, FileText, Check, Trash2, RefreshCw, 
   Database, Cloud, FolderOpen, Loader2, AlertCircle,
-  Plus, ExternalLink, Info
+  Plus, ExternalLink, Info, Download, ChevronDown, ChevronUp, BookOpen
 } from 'lucide-react'
+import SampleDatasetsViewer from './SampleDatasetsViewer'
 
 type DatasetSource = 'upload' | 'huggingface' | 'modelscope' | 'local_path'
 
@@ -95,6 +96,9 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
   const [uploadName, setUploadName] = useState('')
   const [uploadFile, setUploadFile] = useState<File | null>(null)
   const [isUploading, setIsUploading] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState(0)
+  const [uploadStatus, setUploadStatus] = useState<'idle' | 'uploading' | 'processing' | 'success' | 'error'>('idle')
+  const [uploadResult, setUploadResult] = useState<{ samples: number; size: string } | null>(null)
   const [uploadError, setUploadError] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
   
@@ -123,6 +127,9 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
   
   // Dataset type filter
   const [typeFilter, setTypeFilter] = useState<string>('all')
+  
+  // Sample datasets viewer modal
+  const [showSampleViewer, setShowSampleViewer] = useState(false)
 
   // Fetch system capabilities and datasets on mount
   useEffect(() => {
@@ -394,20 +401,40 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
     
     setIsUploading(true)
     setUploadError('')
+    setUploadStatus('uploading')
+    setUploadProgress(0)
+    setUploadResult(null)
+    
     try {
       // Check name availability first
       const nameAvailable = await checkNameAvailable(uploadName.trim())
       if (!nameAvailable) {
         setUploadError(`Dataset name "${uploadName}" is already in use. Please choose a different name.`)
         setIsUploading(false)
+        setUploadStatus('error')
         return
       }
+
+      // Simulate progress for better UX (actual upload progress would need XMLHttpRequest)
+      const progressInterval = setInterval(() => {
+        setUploadProgress(prev => {
+          if (prev >= 90) {
+            clearInterval(progressInterval)
+            return 90
+          }
+          return prev + Math.random() * 15
+        })
+      }, 200)
 
       const formData = new FormData()
       formData.append('file', uploadFile)
       const res = await fetch(`/api/datasets/upload?dataset_name=${encodeURIComponent(uploadName.trim())}`, {
         method: 'POST', body: formData
       })
+      
+      clearInterval(progressInterval)
+      setUploadProgress(95)
+      setUploadStatus('processing')
       
       if (!res.ok) {
         let errorDetail = `Upload failed (HTTP ${res.status})`
@@ -422,18 +449,31 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
       
       const data = await res.json()
       if (data.success) {
-        setUploadName('')
-        setUploadFile(null)
-        if (fileInputRef.current) fileInputRef.current.value = ''
+        setUploadProgress(100)
+        setUploadStatus('success')
+        setUploadResult({
+          samples: data.total_samples || 0,
+          size: data.size_human || `${(uploadFile.size / 1024).toFixed(1)} KB`
+        })
+        
+        // Refresh datasets immediately
         await fetchDatasets()
-        // Show success message if callback available
-        if (onShowAlert) {
-          onShowAlert(`Dataset "${uploadName}" uploaded successfully with ${data.total_samples || 'unknown'} samples.`, 'success', 'Upload Complete')
-        }
+        
+        // Clear form after delay to show success state (no alert modal needed - inline success shown)
+        setTimeout(() => {
+          setUploadName('')
+          setUploadFile(null)
+          if (fileInputRef.current) fileInputRef.current.value = ''
+          setUploadStatus('idle')
+          setUploadProgress(0)
+          setUploadResult(null)
+        }, 3000)
       } else {
+        setUploadStatus('error')
         setUploadError(data.detail || data.error || 'Upload failed - please check file format')
       }
     } catch (e: any) {
+      setUploadStatus('error')
       setUploadError(formatUploadError(e, 'Upload'))
     } finally {
       setIsUploading(false)
@@ -706,6 +746,31 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
         <p className="text-slate-600 text-sm">Add datasets from multiple sources for training</p>
       </div>
 
+      {/* Sample Datasets Viewer Modal */}
+      <SampleDatasetsViewer 
+        isOpen={showSampleViewer} 
+        onClose={() => setShowSampleViewer(false)} 
+      />
+
+      {/* Sample Datasets Button */}
+      <button
+        onClick={() => setShowSampleViewer(true)}
+        className="w-full flex items-center justify-between p-3 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg hover:from-blue-100 hover:to-indigo-100 transition-all group"
+      >
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 bg-blue-600 rounded-lg flex items-center justify-center group-hover:scale-105 transition-transform">
+            <BookOpen className="w-5 h-5 text-white" />
+          </div>
+          <div className="text-left">
+            <span className="font-medium text-blue-900 block">Dataset Format Examples & Documentation</span>
+            <span className="text-xs text-blue-700">
+              Download examples, view format specifications, and read complete documentation
+            </span>
+          </div>
+        </div>
+        <ChevronDown className="w-5 h-5 text-blue-600 group-hover:translate-y-0.5 transition-transform" />
+      </button>
+
       {/* Source Tabs */}
       <div className="flex flex-wrap gap-2 p-1 bg-slate-100 rounded-lg">
         {SOURCE_TABS.map(tab => (
@@ -746,12 +811,88 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
                 TSV, Parquet, Excel files are not supported. Use JSONL for large datasets.
               </p>
             </div>
-            {uploadFile && <p className="text-sm text-slate-600">Selected: <strong>{uploadFile.name}</strong></p>}
-            {uploadError && <p className="text-sm text-red-600 flex items-center gap-1"><AlertCircle className="w-4 h-4" />{uploadError}</p>}
+            {/* File Info & Progress */}
+            {uploadFile && (
+              <div className="bg-white border border-slate-200 rounded-lg p-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                    <FileText className="w-5 h-5 text-blue-600" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium text-slate-900 truncate">{uploadFile.name}</p>
+                    <p className="text-xs text-slate-500">
+                      {(uploadFile.size / 1024 / 1024).toFixed(2)} MB
+                      {uploadFile.name.endsWith('.jsonl') && ' • JSONL format'}
+                      {uploadFile.name.endsWith('.json') && ' • JSON format'}
+                      {uploadFile.name.endsWith('.csv') && ' • CSV format'}
+                    </p>
+                  </div>
+                  {!isUploading && uploadStatus !== 'success' && (
+                    <button 
+                      onClick={() => {
+                        setUploadFile(null)
+                        setUploadStatus('idle')
+                        setUploadProgress(0)
+                        setUploadResult(null)
+                        setUploadError('')
+                        if (fileInputRef.current) fileInputRef.current.value = ''
+                      }}
+                      className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+                
+                {/* Upload Progress Bar - show during upload or on success */}
+                {(isUploading || uploadStatus === 'success') && (
+                  <div className="mt-3">
+                    <div className="flex items-center justify-between text-xs text-slate-600 mb-1">
+                      <span className={uploadStatus === 'success' ? 'text-green-600 font-medium' : ''}>
+                        {uploadStatus === 'uploading' && 'Uploading...'}
+                        {uploadStatus === 'processing' && 'Processing dataset...'}
+                        {uploadStatus === 'success' && '✓ Upload complete!'}
+                      </span>
+                      <span className={uploadStatus === 'success' ? 'text-green-600' : ''}>
+                        {Math.round(uploadProgress)}%
+                      </span>
+                    </div>
+                    <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+                      <div 
+                        className={`h-full transition-all duration-300 rounded-full ${
+                          uploadStatus === 'success' ? 'bg-green-500' : 'bg-blue-500'
+                        }`}
+                        style={{ width: `${uploadProgress}%` }}
+                      />
+                    </div>
+                    
+                    {/* Success Result - show sample count and size */}
+                    {uploadStatus === 'success' && uploadResult && (
+                      <div className="mt-2 flex items-center gap-2 text-green-600">
+                        <Check className="w-4 h-4" />
+                        <span className="text-sm">
+                          {uploadResult.samples.toLocaleString()} samples • {uploadResult.size}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+            
+            {uploadError && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
+                  <p className="text-sm text-red-700 whitespace-pre-line">{uploadError}</p>
+                </div>
+              </div>
+            )}
+            
             <button onClick={uploadDataset} disabled={!uploadFile || !uploadName.trim() || isUploading}
-              className="w-full py-2 bg-blue-600 text-white rounded-lg font-medium disabled:opacity-50 hover:bg-blue-700 transition-colors flex items-center justify-center gap-2">
+              className="w-full py-2.5 bg-blue-600 text-white rounded-lg font-medium disabled:opacity-50 hover:bg-blue-700 transition-colors flex items-center justify-center gap-2">
               {isUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
-              {isUploading ? 'Uploading...' : 'Upload Dataset'}
+              {isUploading ? (uploadStatus === 'processing' ? 'Processing...' : 'Uploading...') : 'Upload Dataset'}
             </button>
           </div>
         )}
@@ -907,11 +1048,33 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
             <p>No datasets registered yet</p>
             <p className="text-sm">Add a dataset using the form above</p>
           </div>
-        ) : (
+        ) : (() => {
+          const filteredDatasets = datasets.filter(dataset => 
+            typeFilter === 'all' || dataset.dataset_type === typeFilter || (typeFilter === 'unknown' && !dataset.dataset_type)
+          )
+          
+          if (filteredDatasets.length === 0) {
+            const typeLabel = DATASET_TYPE_CONFIG[typeFilter]?.label || typeFilter
+            return (
+              <div className="text-center py-8 bg-amber-50 rounded-lg border border-dashed border-amber-200">
+                <AlertCircle className="w-10 h-10 mx-auto mb-2 text-amber-400" />
+                <p className="text-amber-700 font-medium">No {typeLabel} datasets available</p>
+                <p className="text-sm text-amber-600 mt-1">
+                  Upload a dataset with {typeLabel.toLowerCase()} format or select a different filter
+                </p>
+                <button 
+                  onClick={() => setTypeFilter('all')}
+                  className="mt-3 text-sm text-blue-600 hover:text-blue-700 font-medium"
+                >
+                  Show all datasets
+                </button>
+              </div>
+            )
+          }
+          
+          return (
           <div className="space-y-2 max-h-72 overflow-y-auto">
-            {datasets
-              .filter(dataset => typeFilter === 'all' || dataset.dataset_type === typeFilter || (typeFilter === 'unknown' && !dataset.dataset_type))
-              .map(dataset => {
+            {filteredDatasets.map(dataset => {
               const datasetType = dataset.dataset_type || 'unknown'
               const typeConfig = DATASET_TYPE_CONFIG[datasetType] || DATASET_TYPE_CONFIG['unknown']
               
@@ -950,11 +1113,17 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
                     </p>
                   </div>
                   
-                  <div className="text-right flex-shrink-0 hidden sm:block">
+                  <div className="text-right flex-shrink-0">
                     <p className={`text-xs font-medium px-2 py-0.5 rounded-full inline-block ${getSourceColor(dataset.source)}`}>
                       {getSourceLabel(dataset.source)}
                     </p>
-                    <p className="text-xs text-slate-400 mt-1">{dataset.size_human} • {dataset.format}</p>
+                    <p className="text-xs text-slate-400 mt-1 hidden sm:block">
+                      {dataset.total_samples > 0 && `${dataset.total_samples.toLocaleString()} samples • `}
+                      {dataset.size_human} • {dataset.format}
+                    </p>
+                    <p className="text-xs text-slate-400 mt-1 sm:hidden">
+                      {dataset.total_samples > 0 ? `${dataset.total_samples.toLocaleString()}` : dataset.size_human}
+                    </p>
                   </div>
                   
                   <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(dataset) }}
@@ -965,7 +1134,8 @@ export default function DatasetConfig({ selectedPaths, onSelectionChange, onShow
               )
             })}
           </div>
-        )}
+          )
+        })()}
 
         {selectedCount === 0 && datasets.length > 0 && (
           <p className="text-sm text-amber-600 mt-2 flex items-center gap-1">

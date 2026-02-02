@@ -102,10 +102,13 @@ interface AvailableBackends {
   sglang: boolean
 }
 
+type AlertType = 'error' | 'success' | 'warning' | 'info'
+
 interface InferencePanelProps {
   systemMetrics: SystemMetrics
   onRefreshMetrics: () => void
   lockedModels?: { name: string; path: string; modality: string }[]
+  onShowAlert?: (message: string, type: AlertType, title?: string) => void
 }
 
 // ============================================================
@@ -631,7 +634,7 @@ const MessageBubble = ({ message, toolResults }: { message: ChatMessage; toolRes
 // MAIN COMPONENT
 // ============================================================
 
-export default function InferencePanel({ systemMetrics, onRefreshMetrics, lockedModels }: InferencePanelProps) {
+export default function InferencePanel({ systemMetrics, onRefreshMetrics, lockedModels, onShowAlert }: InferencePanelProps) {
   // Sidebar state
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [isMobile, setIsMobile] = useState(false)
@@ -852,11 +855,16 @@ export default function InferencePanel({ systemMetrics, onRefreshMetrics, locked
         setLoadingMessage('')
       } else {
         setLoadingMessage('')
-        alert(data.error || 'Failed to load model')
+        if (onShowAlert) {
+          onShowAlert(data.error || 'Failed to load model', 'error', 'Model Load Failed')
+        }
       }
     } catch (e) {
       console.error('Failed to load model:', e)
       setLoadingMessage('')
+      if (onShowAlert) {
+        onShowAlert('An unexpected error occurred while loading the model', 'error', 'Model Load Failed')
+      }
     } finally {
       setIsModelLoading(false)
     }
@@ -887,10 +895,15 @@ export default function InferencePanel({ systemMetrics, onRefreshMetrics, locked
         }])
         setAdapterPath('')
       } else {
-        alert(data.error || 'Failed to load adapter')
+        if (onShowAlert) {
+          onShowAlert(data.error || 'Failed to load adapter', 'error', 'Adapter Load Failed')
+        }
       }
     } catch (e) {
       console.error('Failed to load adapter:', e)
+      if (onShowAlert) {
+        onShowAlert('An unexpected error occurred while loading the adapter', 'error', 'Adapter Load Failed')
+      }
     } finally {
       setIsModelLoading(false)
       setLoadingMessage('')

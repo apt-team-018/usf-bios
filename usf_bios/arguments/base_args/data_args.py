@@ -43,9 +43,9 @@ class DataArguments:
             Note: For CPT/SFT, shuffling occurs at both the dataset level (controlled by this flag) and the dataloader
             level.
         val_dataset_shuffle (bool): Whether to shuffle the validation dataset. Defaults to False.
-        streaming (bool): Enables streaming to read and process the dataset on-the-fly. `--max_steps` must be set as the
-            dataset length is unknown. This allows preprocessing to overlap with training but can become a bottleneck
-            with a large `world_size` as preprocessing only runs on rank 0. Defaults to False.
+        streaming (bool): Enables streaming to read and process the dataset on-the-fly. When using streaming,
+            `--max_steps` MUST be set because the dataset length is unknown. This allows preprocessing to 
+            overlap with training but can become a bottleneck with large `world_size`. Defaults to False.
         interleave_prob (Optional[List[float]]): If set, combines datasets using `interleave_datasets` with the
             provided probabilities instead of `concatenate_datasets`. Typically used for streaming. Defaults to None.
         stopping_strategy (str): The stopping strategy for `interleave_datasets`. Can be "first_exhausted" or

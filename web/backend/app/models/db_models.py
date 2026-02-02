@@ -35,6 +35,16 @@ class DatasetSource(str, enum.Enum):
     LOCAL = "local"             # Local file path
 
 
+class DatasetTypeEnum(str, enum.Enum):
+    """Dataset types based on format - determines compatible training methods"""
+    SFT = "sft"                                          # Supervised Fine-Tuning (messages format)
+    PT = "pt"                                            # Pre-Training (raw text)
+    RLHF_OFFLINE_PREFERENCE = "rlhf_offline_preference"  # Offline RLHF preference (prompt/chosen/rejected)
+    RLHF_OFFLINE_BINARY = "rlhf_offline_binary"          # Offline RLHF binary feedback (prompt/completion/label) - KTO
+    RLHF_ONLINE = "rlhf_online"                          # Online RLHF (prompt only) - PPO/GRPO/GKD
+    UNKNOWN = "unknown"                                  # Could not determine type
+
+
 class ModelSource(str, enum.Enum):
     HUGGINGFACE = "huggingface" # HuggingFace Hub
     MODELSCOPE = "modelscope"   # ModelScope
@@ -59,6 +69,13 @@ class Dataset(Base):
     file_name = Column(String(255), nullable=True)  # Made nullable for HF/MS datasets
     file_size = Column(Integer, nullable=False, default=0)
     file_format = Column(String(50), nullable=True)  # Made nullable for HF/MS datasets
+    
+    # Dataset type detection - determines compatible training methods
+    dataset_type = Column(String(50), default=DatasetTypeEnum.UNKNOWN.value, nullable=False, index=True)
+    dataset_type_confidence = Column(Float, default=0.0)  # 0.0 to 1.0 confidence score
+    compatible_training_methods = Column(JSON, nullable=True)  # ['sft'], ['rlhf'], ['pt'], etc.
+    compatible_rlhf_algorithms = Column(JSON, nullable=True)  # ['dpo', 'orpo'], ['kto'], ['ppo', 'grpo'], etc.
+    detected_fields = Column(JSON, nullable=True)  # Fields found in dataset samples
     
     num_samples = Column(Integer, nullable=True)
     num_columns = Column(Integer, nullable=True)

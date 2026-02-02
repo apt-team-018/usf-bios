@@ -68,7 +68,99 @@ class Modality(str, Enum):
 
 
 # ============================================================================
-# INCOMPATIBLE COMBINATIONS - Used for validation
+# FEATURE DEPENDENCIES & UI CONTROL
+# ============================================================================
+# This defines which features depend on which selections, used for:
+# 1. Dynamic UI enable/disable
+# 2. Backend validation
+# 3. Auto-nullify when dependencies change
+# ============================================================================
+
+FEATURE_DEPENDENCIES = {
+    # ========== TRAINING METHOD DEPENDENCIES ==========
+    "rlhf_type": {
+        "depends_on": {"training_method": "rlhf"},
+        "nullify_when_invalid": True,
+        "message": "RLHF type is only applicable when training method is RLHF"
+    },
+    "beta": {
+        "depends_on": {"training_method": "rlhf", "rlhf_type": ["dpo", "kto", "simpo", "cpo"]},
+        "nullify_when_invalid": True,
+        "message": "Beta parameter is only for DPO/KTO/SimPO/CPO"
+    },
+    "use_vllm": {
+        "depends_on": {"training_method": "rlhf", "rlhf_type": ["grpo", "ppo", "gkd"]},
+        "nullify_when_invalid": True,
+        "message": "vLLM is only for online RL (GRPO/PPO/GKD)"
+    },
+    "vllm_mode": {
+        "depends_on": {"use_vllm": True},
+        "nullify_when_invalid": True,
+        "message": "vLLM mode requires vLLM to be enabled"
+    },
+    
+    # ========== TRAIN TYPE DEPENDENCIES ==========
+    "lora_rank": {
+        "depends_on": {"train_type": ["lora", "qlora", "adalora"]},
+        "message": "LoRA rank is only for LoRA/QLoRA/AdaLoRA"
+    },
+    "lora_alpha": {
+        "depends_on": {"train_type": ["lora", "qlora", "adalora"]},
+        "message": "LoRA alpha is only for LoRA/QLoRA/AdaLoRA"
+    },
+    "lora_dropout": {
+        "depends_on": {"train_type": ["lora", "qlora", "adalora"]},
+        "message": "LoRA dropout is only for LoRA/QLoRA/AdaLoRA"
+    },
+    "use_rslora": {
+        "depends_on": {"train_type": ["lora", "qlora", "adalora"]},
+        "nullify_when_invalid": True,
+        "message": "RSLoRA is only for LoRA training"
+    },
+    "use_dora": {
+        "depends_on": {"train_type": ["lora", "qlora", "adalora"]},
+        "nullify_when_invalid": True,
+        "message": "DoRA is only for LoRA training"
+    },
+    "quant_bits": {
+        "depends_on": {"train_type": "qlora"},
+        "nullify_when_invalid": True,
+        "message": "Quantization bits is only for QLoRA"
+    },
+    
+    # ========== MULTIMODAL DEPENDENCIES ==========
+    "freeze_llm": {
+        "depends_on": {"modality": ["vision", "audio", "video"]},
+        "message": "Freeze LLM is only for multimodal models"
+    },
+    "freeze_vit": {
+        "depends_on": {"modality": ["vision", "audio", "video"]},
+        "message": "Freeze ViT is only for multimodal models"
+    },
+    "freeze_aligner": {
+        "depends_on": {"modality": ["vision", "audio", "video"]},
+        "message": "Freeze aligner is only for multimodal models"
+    },
+    
+    # ========== STREAMING DEPENDENCIES ==========
+    "max_steps": {
+        "required_when": {"streaming": True},
+        "message": "max_steps is REQUIRED when streaming is enabled"
+    },
+    "shuffle_buffer_size": {
+        "depends_on": {"streaming": True},
+        "message": "Shuffle buffer is only for streaming mode"
+    },
+    
+    # ========== ROPE SCALING DEPENDENCIES ==========
+    "max_model_len": {
+        "depends_on": {"rope_scaling": ["linear", "dynamic", "yarn"]},
+        "message": "Max model length is used with RoPE scaling"
+    },
+}
+
+# ============================================================================
+# INCOMPATIBLE COMBINATIONS - Mutually exclusive options
 # ============================================================================
 INCOMPATIBLE_COMBINATIONS = {
     # DeepSpeed and FSDP cannot be used together
@@ -83,13 +175,105 @@ INCOMPATIBLE_COMBINATIONS = {
         "condition": lambda config: config.use_liger_kernel and config.packing,
         "message": "Liger kernel does not support packing yet"
     },
+    # RSLoRA and DoRA cannot be used together
+    ("use_rslora", "use_dora"): {
+        "condition": lambda config: config.use_rslora and config.use_dora,
+        "message": "RSLoRA and DoRA cannot be used together"
+    },
+}
+
+# ============================================================================
+# RLHF ALGORITHM METADATA - For dynamic UI
+# ============================================================================
+RLHF_ALGORITHM_METADATA = {
+    "dpo": {
+        "name": "DPO",
+        "full_name": "Direct Preference Optimization",
+        "category": "offline",
+        "requires_ref_model": True,
+        "requires_vllm": False,
+        "dataset_type": "preference",  # messages + rejected_messages
+        "description": "Simple and stable preference optimization without reward model"
+    },
+    "orpo": {
+        "name": "ORPO",
+        "full_name": "Odds Ratio Preference Optimization",
+        "category": "offline",
+        "requires_ref_model": False,
+        "requires_vllm": False,
+        "dataset_type": "preference",
+        "description": "Combines SFT and preference optimization in one step"
+    },
+    "simpo": {
+        "name": "SimPO",
+        "full_name": "Simple Preference Optimization",
+        "category": "offline",
+        "requires_ref_model": False,
+        "requires_vllm": False,
+        "dataset_type": "preference",
+        "description": "Simplified DPO with length-normalized rewards"
+    },
+    "kto": {
+        "name": "KTO",
+        "full_name": "Kahneman-Tversky Optimization",
+        "category": "offline",
+        "requires_ref_model": True,
+        "requires_vllm": False,
+        "dataset_type": "binary",  # messages + label (0/1)
+        "description": "Works with binary feedback (thumbs up/down)"
+    },
+    "cpo": {
+        "name": "CPO",
+        "full_name": "Contrastive Preference Optimization",
+        "category": "offline",
+        "requires_ref_model": False,
+        "requires_vllm": False,
+        "dataset_type": "preference",
+        "description": "Contrastive learning approach for preference"
+    },
+    "rm": {
+        "name": "RM",
+        "full_name": "Reward Model Training",
+        "category": "offline",
+        "requires_ref_model": False,
+        "requires_vllm": False,
+        "dataset_type": "preference",
+        "description": "Train a reward model for scoring responses"
+    },
+    "ppo": {
+        "name": "PPO",
+        "full_name": "Proximal Policy Optimization",
+        "category": "online",
+        "requires_ref_model": True,
+        "requires_vllm": True,
+        "dataset_type": "prompt",  # messages only (model generates)
+        "description": "Classic RLHF with reward model"
+    },
+    "grpo": {
+        "name": "GRPO",
+        "full_name": "Group Relative Policy Optimization",
+        "category": "online",
+        "requires_ref_model": True,
+        "requires_vllm": True,
+        "dataset_type": "prompt",
+        "description": "Efficient online RL without reward model"
+    },
+    "gkd": {
+        "name": "GKD",
+        "full_name": "Generalized Knowledge Distillation",
+        "category": "online",
+        "requires_ref_model": False,
+        "requires_vllm": True,
+        "dataset_type": "prompt",
+        "description": "Knowledge distillation with online sampling"
+    },
 }
 
 # RLHF algorithms that require reference model
 RLHF_REQUIRES_REF_MODEL = ["dpo", "kto", "ppo", "grpo"]
 
 # RLHF algorithms that support vLLM (online RL)
-RLHF_SUPPORTS_VLLM = ["grpo", "gkd"]
+RLHF_SUPPORTS_VLLM = ["grpo", "ppo", "gkd"]
 
 # RLHF algorithms that are online (require model sampling during training)
 RLHF_ONLINE_ALGORITHMS = ["grpo", "ppo", "gkd"]
@@ -206,6 +390,14 @@ class TrainingConfig(BaseModel):
     lora_dropout: float = Field(default=0.05, ge=0, le=1)
     target_modules: str = Field(default="all-linear")
     
+    # LoRA Advanced Options (from USF-BIOS tuner_args.py)
+    use_rslora: bool = Field(default=False, description="Use Rank-Stabilized LoRA for better training stability")
+    use_dora: bool = Field(default=False, description="Use DoRA (Weight-Decomposed LoRA) for improved performance")
+    lora_bias: Literal["none", "all"] = Field(default="none", description="LoRA bias training: 'none' or 'all'")
+    init_weights: Literal["true", "gaussian", "pissa", "olora", "loftq"] = Field(
+        default="true", description="LoRA initialization method: true (default), gaussian, pissa, olora, loftq"
+    )
+    
     # QLoRA specific
     quant_bits: Optional[int] = Field(default=None, description="4 or 8 for QLoRA")
     
@@ -243,6 +435,25 @@ class TrainingConfig(BaseModel):
     # Optimization - Sequence Parallelism
     sequence_parallel_size: int = Field(default=1, ge=1, description="Sequence parallel size (1 = disabled)")
     
+    # Multimodal Model Options (from USF-BIOS tuner_args.py)
+    # For VLMs like LLaVA, Qwen-VL, etc.
+    freeze_llm: bool = Field(default=False, description="Freeze LLM weights for multimodal training (train only vision/aligner)")
+    freeze_vit: bool = Field(default=True, description="Freeze Vision Transformer weights (default: True for VLMs)")
+    freeze_aligner: bool = Field(default=True, description="Freeze aligner/projector weights (default: True)")
+    
+    # Long Context Support (from USF-BIOS model_args.py)
+    rope_scaling: Optional[Literal["linear", "dynamic", "yarn"]] = Field(
+        default=None, description="RoPE scaling for long context: 'linear', 'dynamic', or 'yarn'"
+    )
+    max_model_len: Optional[int] = Field(
+        default=None, ge=1, description="Override max model length (for RoPE scaling)"
+    )
+    
+    # Dataset Split (from USF-BIOS data_args.py)
+    split_dataset_ratio: float = Field(
+        default=0.0, ge=0, le=0.5, description="Auto split dataset into train/val (e.g., 0.1 = 10% for validation)"
+    )
+    
     # Learning Rate Scheduler
     lr_scheduler_type: Literal["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup", "cosine_with_min_lr"] = Field(
         default="cosine", description="Learning rate scheduler type"
@@ -250,7 +461,9 @@ class TrainingConfig(BaseModel):
     
     # Optimizer parameters
     weight_decay: float = Field(default=0.1, ge=0, le=1, description="Weight decay for optimizer")
+    adam_beta1: float = Field(default=0.9, ge=0, le=1, description="Adam beta1 parameter")
     adam_beta2: float = Field(default=0.95, ge=0, le=1, description="Adam beta2 parameter")
+    max_grad_norm: float = Field(default=1.0, ge=0, description="Maximum gradient norm for clipping (0 = disabled)")
     
     # GPU Selection
     # None or empty = use all available GPUs (auto-detect)
@@ -267,12 +480,23 @@ class TrainingConfig(BaseModel):
     hf_token: Optional[str] = Field(default=None, description="HuggingFace token for private models/datasets")
     ms_token: Optional[str] = Field(default=None, description="ModelScope token for private models/datasets")
     
-    # Dataset streaming for large datasets (billions of samples)
+    # Dataset streaming for large datasets (billions of samples, 100TB+)
     # When enabled, dataset is read on-the-fly without loading into memory
-    # Requires max_steps to be set (dataset length unknown in streaming mode)
-    streaming: bool = Field(default=False, description="Enable streaming for large datasets")
-    max_steps: Optional[int] = Field(default=None, ge=1, description="Max training steps (required when streaming=True)")
+    # IMPORTANT: --max_steps MUST be set when streaming=True (dataset length unknown)
+    streaming: bool = Field(default=False, description="Enable streaming for large datasets (requires max_steps)")
+    max_steps: Optional[int] = Field(default=None, ge=1, description="Max training steps (REQUIRED when streaming=True)")
     shuffle_buffer_size: int = Field(default=1000, ge=1, description="Buffer size for shuffling in streaming mode")
+    
+    # Multiple dataset mixing options (when using multiple datasets)
+    # These are passed directly to USF-BIOS load_dataset() function
+    interleave_prob: Optional[List[float]] = Field(
+        default=None, 
+        description="Probability weights for interleaving multiple datasets (e.g., [0.7, 0.3])"
+    )
+    stopping_strategy: Literal["first_exhausted", "all_exhausted"] = Field(
+        default="first_exhausted",
+        description="Strategy for multiple datasets: 'first_exhausted' or 'all_exhausted'"
+    )
     
     # Adapter merge mode - merge LoRA/QLoRA adapter with base model before training
     # This enables full fine-tuning and RLHF on adapters by merging them first

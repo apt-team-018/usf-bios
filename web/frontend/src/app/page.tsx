@@ -113,6 +113,11 @@ interface TrainingConfig {
   lora_alpha: number
   lora_dropout: number
   target_modules: string
+  // LoRA Advanced Options (from USF-BIOS tuner_args.py)
+  use_rslora: boolean
+  use_dora: boolean
+  lora_bias: 'none' | 'all'
+  init_weights: 'true' | 'gaussian' | 'pissa' | 'olora' | 'loftq'
   quant_bits: number | null
   torch_dtype: string
   warmup_ratio: number
@@ -123,19 +128,30 @@ interface TrainingConfig {
   use_liger_kernel: boolean
   packing: boolean
   sequence_parallel_size: number
+  // Multimodal freeze options (for VLMs)
+  freeze_llm: boolean
+  freeze_vit: boolean
+  freeze_aligner: boolean
+  // Long context support
+  rope_scaling: 'linear' | 'dynamic' | 'yarn' | null
+  max_model_len: number | null
+  // Dataset split
+  split_dataset_ratio: number
   lr_scheduler_type: string
   weight_decay: number
+  adam_beta1: number
   adam_beta2: number
+  max_grad_norm: number
   gpu_ids: number[] | null
   num_gpus: number | null
   early_stop_interval: number | null
   // API Tokens for private models/datasets (optional)
-  hf_token: string | null  // HuggingFace token for private models/datasets
-  ms_token: string | null  // ModelScope token for private models/datasets
+  hf_token: string | null
+  ms_token: string | null
   // Dataset streaming for large datasets (billions of samples)
-  streaming: boolean  // Enable streaming mode for datasets that don't fit in memory
-  max_steps: number | null  // Required when streaming=true (dataset length unknown)
-  shuffle_buffer_size: number  // Buffer size for shuffling in streaming mode
+  streaming: boolean
+  max_steps: number | null
+  shuffle_buffer_size: number
 }
 
 interface JobStatus {
@@ -343,6 +359,11 @@ export default function Home() {
     lora_alpha: 32,
     lora_dropout: 0.05,
     target_modules: 'all-linear',
+    // LoRA Advanced Options (from USF-BIOS tuner_args.py)
+    use_rslora: false,
+    use_dora: false,
+    lora_bias: 'none',
+    init_weights: 'true',
     quant_bits: null,
     torch_dtype: 'bfloat16',
     warmup_ratio: 0.03,
@@ -353,9 +374,20 @@ export default function Home() {
     use_liger_kernel: false,
     packing: false,
     sequence_parallel_size: 1,
+    // Multimodal freeze options (for VLMs)
+    freeze_llm: false,
+    freeze_vit: true,
+    freeze_aligner: true,
+    // Long context support
+    rope_scaling: null,
+    max_model_len: null,
+    // Dataset split
+    split_dataset_ratio: 0,
     lr_scheduler_type: 'cosine',
     weight_decay: 0.1,
+    adam_beta1: 0.9,
     adam_beta2: 0.95,
+    max_grad_norm: 1.0,
     gpu_ids: null,
     num_gpus: null,
     early_stop_interval: null,
@@ -811,11 +843,16 @@ export default function Home() {
           // Auto-select first model if single model locked
           if (data.models.length === 1) {
             const model = data.models[0]
+            const newModality = model.modality || 'text'
             setConfig(prev => ({
               ...prev,
               model_path: model.path,
               model_source: model.source,
-              modality: model.modality || 'text'
+              modality: newModality,
+              // Reset multimodal freeze options when switching to text modality
+              freeze_llm: newModality === 'text' ? false : prev.freeze_llm,
+              freeze_vit: newModality === 'text' ? true : prev.freeze_vit,
+              freeze_aligner: newModality === 'text' ? true : prev.freeze_aligner,
             }))
           }
         }
@@ -1036,7 +1073,7 @@ export default function Home() {
   }, [])
 
   // Handle dataset type change - auto-reset training method when dataset type changes
-  // ALSO handles first dataset detection (when previousDatasetType is null)
+  // ALWAYS switch training method to match dataset type for compatibility
   const handleDatasetTypeChange = useCallback((typeInfo: typeof datasetTypeInfo) => {
     setDatasetTypeInfo(typeInfo)
     
@@ -1045,28 +1082,38 @@ export default function Home() {
       return
     }
     
-    // Check if training method needs to be updated
-    // Trigger when: dataset type changed OR first dataset detected with incompatible method
     const compatible = typeInfo.compatible_training_methods || []
-    const currentMethod = config.training_method
-    const typeChanged = previousDatasetType !== null && previousDatasetType !== typeInfo.dataset_type
-    const isFirstDataset = previousDatasetType === null
-    const needsSwitch = !compatible.includes(currentMethod)
+    const newMethod = compatible[0] as 'sft' | 'pt' | 'rlhf'
     
-    // Auto-switch if current method is not compatible (on type change or first detection)
-    if (needsSwitch && (typeChanged || isFirstDataset)) {
-      const newMethod = compatible[0] as 'sft' | 'pt' | 'rlhf'
+    // ALWAYS auto-switch training method to match dataset type
+    // Use functional update to get current config value (avoids stale closure)
+    setConfig(prev => {
+      // Skip if already on correct method
+      if (compatible.includes(prev.training_method)) {
+        // But ensure rlhf_type is set for RLHF datasets
+        if (prev.training_method === 'rlhf' && !prev.rlhf_type) {
+          // Set default rlhf_type based on dataset's compatible algorithms
+          const defaultRlhfType = typeInfo.compatible_rlhf_types?.[0] || 'dpo'
+          return { ...prev, rlhf_type: defaultRlhfType as any }
+        }
+        return prev
+      }
       
-      setConfig(prev => ({
+      // Switch to compatible method
+      const defaultRlhfType = newMethod === 'rlhf' 
+        ? (typeInfo.compatible_rlhf_types?.[0] || 'dpo') 
+        : null
+      
+      return {
         ...prev,
         training_method: newMethod,
-        // Reset RLHF type when switching to/from RLHF
-        rlhf_type: newMethod === 'rlhf' ? 'dpo' : null,
-        // PT requires full training
+        rlhf_type: defaultRlhfType as any,
         train_type: newMethod === 'pt' ? 'full' : prev.train_type
-      }))
-      
-      // Show info message to user
+      }
+    })
+    
+    // Show info message only when dataset type actually changes
+    if (previousDatasetType !== typeInfo.dataset_type) {
       const methodNames: Record<string, string> = {
         'sft': 'Supervised Fine-Tuning (SFT)',
         'rlhf': 'Reinforcement Learning (RLHF)',
@@ -1082,14 +1129,14 @@ export default function Home() {
       }
       
       showAlert(
-        `Dataset detected as ${datasetTypeNames[typeInfo.dataset_type] || typeInfo.dataset_type}. Training method automatically set to ${methodNames[newMethod]}.`,
+        `Dataset detected as ${datasetTypeNames[typeInfo.dataset_type] || typeInfo.dataset_type}. Training method set to ${methodNames[newMethod]}.`,
         'info',
         'Training Method Updated'
       )
     }
     
     setPreviousDatasetType(typeInfo.dataset_type)
-  }, [previousDatasetType, config.training_method, showAlert])
+  }, [previousDatasetType, showAlert])
 
   // Ref to track last fetched model type path (prevents infinite loops)
   const lastFetchedModelTypePath = useRef<string | null>(null)
@@ -1865,16 +1912,24 @@ export default function Home() {
   }, [isTraining, jobStatus, trainingLogs.length])
 
   // Force reset stuck training
-  const forceResetTraining = async () => {
-    if (!confirm('This will forcefully reset the stuck training. The job will be marked as failed. Continue?')) {
-      return
-    }
-    
+  const forceResetTraining = () => {
+    showConfirm({
+      title: 'Force Reset Training',
+      message: 'This will forcefully reset the stuck training. The job will be marked as failed. Continue?',
+      type: 'danger',
+      confirmText: 'Reset Training',
+      onConfirm: executeForceReset
+    })
+  }
+  
+  const executeForceReset = async () => {
+    setConfirmModal(prev => ({ ...prev, isLoading: true }))
     setIsResettingTraining(true)
     try {
       const res = await fetch('/api/jobs/force-reset', { method: 'POST' })
       if (res.ok) {
         const data = await res.json()
+        closeConfirm()
         showAlert(data.message || 'Training reset successfully', 'success', 'Reset Complete')
         setIsTraining(false)
         setIsTrainingStuck(false)
@@ -1885,10 +1940,12 @@ export default function Home() {
         }
       } else {
         const err = await res.json().catch(() => ({}))
+        closeConfirm()
         showAlert(err.detail || 'Failed to reset training', 'error', 'Reset Failed')
       }
     } catch (e) {
       console.error('Force reset failed:', e)
+      closeConfirm()
       showAlert('Failed to reset training', 'error', 'Reset Failed')
     } finally {
       setIsResettingTraining(false)
@@ -3606,10 +3663,22 @@ export default function Home() {
 
       <main className="max-w-6xl mx-auto px-4 py-6">
         
+        {/* ===================== LOADING STATE - CHECKING ACTIVE TRAINING ===================== */}
+        {/* Show loading spinner while checking for active training on page load */}
+        {mainTab === 'train' && isCheckingActiveTraining && (
+          <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-8">
+            <div className="flex flex-col items-center justify-center py-12">
+              <Loader2 className="w-12 h-12 text-blue-500 animate-spin mb-4" />
+              <h3 className="text-lg font-semibold text-slate-900 mb-2">Loading Training Status</h3>
+              <p className="text-slate-500 text-sm">Checking for active training sessions...</p>
+            </div>
+          </div>
+        )}
+
         {/* ===================== TRAINING VIEW - PROGRESS OR RESULT ===================== */}
         {/* Show when on training tab AND (training is active OR have job result) */}
         {/* NEVER show on Inference tab - user must be on train tab */}
-        {mainTab === 'train' && (isTraining || (jobStatus && (jobStatus.status === 'completed' || jobStatus.status === 'failed' || jobStatus.status === 'stopped'))) && jobStatus && (
+        {mainTab === 'train' && !isCheckingActiveTraining && (isTraining || (jobStatus && (jobStatus.status === 'completed' || jobStatus.status === 'failed' || jobStatus.status === 'stopped'))) && jobStatus && (
           <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-4 sm:p-6">
             <div className="space-y-4">
               {/* Model Info Banner - Shows which model is being trained */}
@@ -4410,8 +4479,8 @@ export default function Home() {
         />
 
         {/* ===================== TRAINING TAB ===================== */}
-        {/* Only show when NOT training and no job result to display */}
-        {mainTab === 'train' && !isTraining && !jobStatus && (
+        {/* Only show when NOT training, no job result, and not checking for active training */}
+        {mainTab === 'train' && !isCheckingActiveTraining && !isTraining && !jobStatus && (
           <>
             {currentStep <= 4 && (
               <div className="mb-6">
@@ -4483,7 +4552,11 @@ export default function Home() {
                               ...prev,
                               model_path: model.path,
                               model_source: model.source,
-                              modality: model.modality
+                              modality: model.modality,
+                              // Reset freeze options based on modality
+                              freeze_llm: model.modality === 'text' ? false : prev.freeze_llm,
+                              freeze_vit: model.modality === 'text' ? true : prev.freeze_vit,
+                              freeze_aligner: model.modality === 'text' ? true : prev.freeze_aligner,
                             }))}
                             className={`p-4 rounded-lg border-2 text-left transition-all ${
                               config.model_path === model.path 
@@ -5193,6 +5266,7 @@ export default function Home() {
             systemMetrics={systemMetrics}
             onRefreshMetrics={fetchSystemMetrics}
             lockedModels={lockedModels.map(m => ({ name: m.name, path: m.path, modality: m.modality }))}
+            onShowAlert={showAlert}
           />
         )}
       </main>

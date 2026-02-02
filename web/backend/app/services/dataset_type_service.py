@@ -51,6 +51,41 @@ class FileFormatConfig:
     """
     Production-ready file format configuration.
     
+    =============================================================================
+    SCALABILITY FOR MASSIVE DATASETS (100TB+, Billions of Rows)
+    =============================================================================
+    
+    RECOMMENDED APPROACH BY DATA SIZE:
+    ----------------------------------
+    | Size        | Method              | Type Detection        | Training      |
+    |-------------|---------------------|----------------------|---------------|
+    | < 50GB      | Direct Upload       | Sample first 100 rows| Full loading  |
+    | 50GB-1TB    | Local Path          | Stream first 100 rows| Streaming     |
+    | 1TB-100TB+  | Local Path          | Stream first 100 rows| Streaming     |
+    | Any size    | HuggingFace/MS Hub  | Stream 10 samples    | Streaming     |
+    
+    UPLOAD LIMITS:
+    -------------
+    - Direct Upload: 50GB max (memory constraint)
+    - Chunked Upload: 100GB max (streaming to disk)
+    - Local Path: UNLIMITED (just reference path)
+    - HuggingFace/ModelScope: UNLIMITED (streaming from hub)
+    
+    TYPE DETECTION FOR MASSIVE FILES:
+    ---------------------------------
+    - Local files: Streams first 100 rows only (memory-safe)
+    - HuggingFace/ModelScope: Streams 10 samples only
+    - NEVER loads full dataset for type detection
+    
+    TRAINING WITH MASSIVE DATASETS:
+    -------------------------------
+    For datasets with billions of samples:
+    - Use JSONL format with --streaming true
+    - Set --max_steps (required since dataset length is unknown)
+    - Use --shuffle_buffer_size for randomization (default: 1000)
+    
+    =============================================================================
+    
     VERIFIED FROM USF BIOS SOURCE CODE:
     =====================================
     See usf_bios/dataset/loader.py:50-57 for format mapping:
@@ -71,11 +106,6 @@ class FileFormatConfig:
     - Local files (usf_bios/dataset/loader.py:52)
     - HuggingFace Hub (usf_bios/hub/hub.py:436)
     - ModelScope (usf_bios/hub/hub.py:307)
-    
-    For datasets with billions of samples:
-    - Use JSONL format with --streaming true
-    - Set --max_steps (required since dataset length is unknown)
-    - Use --shuffle_buffer_size for randomization (default: 1000)
     
     NOT SUPPORTED by USF BIOS:
     - TSV (no explicit delimiter handling)
@@ -227,14 +257,455 @@ class FileFormatConfig:
         return True, "", file_format
 
 
+# ==============================================================================
+# VALID MESSAGE ROLES - FROM USF-BIOS preprocessor/core.py:80
+# ==============================================================================
+# USF-BIOS validates: role in {'system', 'user', 'tool_call', 'tool_response', 'tool', 'assistant'}
+# Note: 'tool' and 'tool_response' are equivalent (compatibility alias)
+# Note: 'developer' role is NOT directly supported - use 'system' with model_identity
+# ==============================================================================
+VALID_MESSAGE_ROLES = {
+    "system",        # System prompt / instructions
+    "user",          # User input
+    "assistant",     # Model response
+    "tool",          # Tool/function response (alias for tool_response)
+    "tool_call",     # Model calling a tool/function
+    "tool_response", # Response from tool execution
+}
+
+# Tool calling message structure (for function/tool calling datasets)
+TOOL_CALL_STRUCTURE = {
+    "role": "tool_call",
+    "content": {
+        "type": "object",
+        "description": "Can be string (JSON) or object with function call details",
+        "properties": {
+            "name": {"type": "string", "description": "Function name"},
+            "arguments": {"type": "object", "description": "Function arguments"}
+        }
+    }
+}
+
+TOOL_RESPONSE_STRUCTURE = {
+    "role": "tool",  # or "tool_response"
+    "content": {"type": "string", "description": "JSON string of tool result"}
+}
+
+# ==============================================================================
+# STANDARD FORMAT SPECIFICATIONS
+# ==============================================================================
+# Naming Convention: {TRAINING_METHOD}_{MODALITY}_{VARIANT}
+#   - TRAINING_METHOD: sft, pt, rlhf_pref (preference), rlhf_binary, rlhf_online
+#   - MODALITY: text (default, omitted), vision, audio, video
+#   - VARIANT: optional specifier (e.g., alpaca, sharegpt, tool_calling)
+#
+# These specifications are verified against USF-BIOS:
+#   preprocessor/core.py: _pair_keys = ['messages', 'images', 'videos', 'audios', 'tools', 'objects']
+#   preprocessor/core.py: standard_keys includes prefixes: 'rejected_', 'positive_', 'negative_'
+#   preprocessor/core.py:80: Valid roles = {'system', 'user', 'tool_call', 'tool_response', 'tool', 'assistant'}
+#   template/template_inputs.py: tools field for function definitions
+#   agent_template/base.py: Tool calling/function calling support
+# ==============================================================================
+
+FORMAT_SPECIFICATIONS = {
+    # ==========================================================================
+    # SFT FORMATS (Supervised Fine-Tuning)
+    # ==========================================================================
+    "sft_messages": {
+        "id": "sft_messages",
+        "display_name": "SFT - Messages (ChatML/ShareGPT)",
+        "description": "Standard chat format with role-based messages",
+        "training_method": "sft",
+        "modality": "text",
+        "required_fields": ["messages"],
+        "optional_fields": ["system"],
+        "field_structure": {
+            "messages": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["role", "content"],
+                    "properties": {
+                        "role": {"type": "string", "enum": ["system", "user", "assistant", "tool", "tool_call", "tool_response"]},
+                        "content": {"type": "string"},
+                        "loss": {"type": "float", "optional": True, "description": "Loss weight for this message"}
+                    }
+                },
+                "min_items": 1
+            }
+        },
+        "example": '{"messages": [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"}]}',
+        "usf_bios_ref": "preprocessor/core.py:_check_messages()"
+    },
+    "sft_alpaca": {
+        "id": "sft_alpaca",
+        "display_name": "SFT - Alpaca (Instruction/Output)",
+        "description": "Stanford Alpaca format with instruction and output",
+        "training_method": "sft",
+        "modality": "text",
+        "required_fields": ["instruction", "output"],
+        "optional_fields": ["input", "system"],
+        "field_structure": {
+            "instruction": {"type": "string", "min_length": 1},
+            "output": {"type": "string", "min_length": 1},
+            "input": {"type": "string", "optional": True}
+        },
+        "example": '{"instruction": "Explain AI", "input": "", "output": "AI is..."}',
+        "usf_bios_ref": "preprocessor/core.py:ResponsePreprocessor"
+    },
+    "sft_query_response": {
+        "id": "sft_query_response",
+        "display_name": "SFT - Query/Response",
+        "description": "Simple query and response pairs",
+        "training_method": "sft",
+        "modality": "text",
+        "required_fields": ["query", "response"],
+        "optional_fields": ["system"],
+        "field_structure": {
+            "query": {"type": "string", "min_length": 1},
+            "response": {"type": "string", "min_length": 1}
+        },
+        "example": '{"query": "What is 2+2?", "response": "4"}',
+        "usf_bios_ref": "preprocessor/core.py:ResponsePreprocessor"
+    },
+    
+    # ==========================================================================
+    # SFT TOOL CALLING / FUNCTION CALLING FORMAT
+    # ==========================================================================
+    "sft_tool_calling": {
+        "id": "sft_tool_calling",
+        "display_name": "SFT - Tool/Function Calling",
+        "description": "Training data for tool/function calling with tool_call and tool roles",
+        "training_method": "sft",
+        "modality": "text",
+        "required_fields": ["messages"],
+        "optional_fields": ["tools", "system"],
+        "field_structure": {
+            "messages": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["role", "content"],
+                    "properties": {
+                        "role": {"type": "string", "enum": ["system", "user", "assistant", "tool", "tool_call", "tool_response"]},
+                        "content": {"type": "string_or_object", "description": "String or JSON object for tool calls"}
+                    }
+                },
+                "must_contain_roles": ["tool_call"],
+                "description": "Must contain at least one tool_call message"
+            },
+            "tools": {
+                "type": "array",
+                "optional": True,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "enum": ["function"]},
+                        "function": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "description": {"type": "string"},
+                                "parameters": {"type": "object"}
+                            }
+                        }
+                    }
+                },
+                "description": "Function/tool definitions (OpenAI format)"
+            }
+        },
+        "example": '{"messages": [{"role": "user", "content": "What is the weather?"}, {"role": "tool_call", "content": "{\\"name\\": \\"get_weather\\", \\"arguments\\": {\\"city\\": \\"NYC\\"}}"}, {"role": "tool", "content": "{\\"temp\\": 72}"}, {"role": "assistant", "content": "It is 72°F"}], "tools": [...]}',
+        "usf_bios_ref": "agent_template/base.py, template/template_inputs.py:tools"
+    },
+    
+    # ==========================================================================
+    # SFT MULTIMODAL FORMATS
+    # ==========================================================================
+    "sft_vision": {
+        "id": "sft_vision",
+        "display_name": "SFT - Vision (Image + Text)",
+        "description": "Multimodal SFT with images for VLMs like LLaVA, Qwen-VL",
+        "training_method": "sft",
+        "modality": "vision",
+        "required_fields": ["messages", "images"],
+        "optional_fields": ["objects"],
+        "field_structure": {
+            "messages": {"type": "array", "items": {"type": "object", "required": ["role", "content"]}},
+            "images": {
+                "type": "array_or_string",
+                "items": {"type": "string_or_object"},
+                "description": "Image paths, URLs, base64, or PIL-like objects"
+            }
+        },
+        "example": '{"messages": [...], "images": ["path/to/image.jpg"]}',
+        "usf_bios_ref": "preprocessor/core.py:_cast_mm_data()"
+    },
+    "sft_audio": {
+        "id": "sft_audio",
+        "display_name": "SFT - Audio (Audio + Text)",
+        "description": "Multimodal SFT with audio for models like Qwen-Audio",
+        "training_method": "sft",
+        "modality": "audio",
+        "required_fields": ["messages", "audios"],
+        "optional_fields": [],
+        "field_structure": {
+            "messages": {"type": "array", "items": {"type": "object", "required": ["role", "content"]}},
+            "audios": {"type": "array_or_string", "items": {"type": "string"}}
+        },
+        "example": '{"messages": [...], "audios": ["path/to/audio.wav"]}',
+        "usf_bios_ref": "preprocessor/core.py:_cast_mm_data()"
+    },
+    "sft_video": {
+        "id": "sft_video",
+        "display_name": "SFT - Video (Video + Text)",
+        "description": "Multimodal SFT with video",
+        "training_method": "sft",
+        "modality": "video",
+        "required_fields": ["messages", "videos"],
+        "optional_fields": [],
+        "field_structure": {
+            "messages": {"type": "array", "items": {"type": "object", "required": ["role", "content"]}},
+            "videos": {"type": "array_or_string", "items": {"type": "string"}}
+        },
+        "example": '{"messages": [...], "videos": ["path/to/video.mp4"]}',
+        "usf_bios_ref": "preprocessor/core.py:_cast_mm_data()"
+    },
+    
+    # ==========================================================================
+    # PRE-TRAINING FORMAT
+    # ==========================================================================
+    "pt_text": {
+        "id": "pt_text",
+        "display_name": "Pre-Training - Raw Text",
+        "description": "Plain text for continued pre-training (NO multimodal support)",
+        "training_method": "pt",
+        "modality": "text",
+        "required_fields": ["text"],
+        "optional_fields": [],
+        "field_structure": {
+            "text": {"type": "string", "min_length": 1}
+        },
+        "example": '{"text": "This is a long document for pre-training..."}',
+        "usf_bios_ref": "sft.py:342-345 (text only)",
+        "restrictions": ["No multimodal support - text only"]
+    },
+    
+    # ==========================================================================
+    # RLHF PREFERENCE FORMATS (DPO, ORPO, SimPO, CPO, RM)
+    # ==========================================================================
+    "rlhf_pref_messages": {
+        "id": "rlhf_pref_messages",
+        "display_name": "RLHF Preference - Rejected Messages",
+        "description": "Preference pairs with chosen and rejected message arrays",
+        "training_method": "rlhf",
+        "rlhf_types": ["dpo", "orpo", "simpo", "cpo", "rm"],
+        "modality": "text",
+        "required_fields": ["messages", "rejected_messages"],
+        "optional_fields": [],
+        "field_structure": {
+            "messages": {"type": "array", "description": "Chosen (preferred) conversation"},
+            "rejected_messages": {"type": "array", "description": "Rejected conversation"}
+        },
+        "example": '{"messages": [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Good answer"}], "rejected_messages": [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Bad answer"}]}',
+        "usf_bios_ref": "preprocessor/core.py:standard_keys"
+    },
+    "rlhf_pref_response": {
+        "id": "rlhf_pref_response",
+        "display_name": "RLHF Preference - Rejected Response",
+        "description": "Preference with chosen messages and rejected response string",
+        "training_method": "rlhf",
+        "rlhf_types": ["dpo", "orpo", "simpo", "cpo", "rm"],
+        "modality": "text",
+        "required_fields": ["messages", "rejected_response"],
+        "optional_fields": [],
+        "field_structure": {
+            "messages": {"type": "array", "description": "Chosen conversation (last message is chosen response)"},
+            "rejected_response": {"type": "string", "description": "Rejected response (must differ from last message)"}
+        },
+        "example": '{"messages": [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Good"}], "rejected_response": "Bad"}',
+        "usf_bios_ref": "preprocessor/core.py:_check_rejected_response()"
+    },
+    "rlhf_pref_simple": {
+        "id": "rlhf_pref_simple",
+        "display_name": "RLHF Preference - Simple (prompt/chosen/rejected)",
+        "description": "Simple preference format with prompt and chosen/rejected response strings (HuggingFace DPO format)",
+        "training_method": "rlhf",
+        "rlhf_types": ["dpo", "orpo", "simpo", "cpo", "rm"],
+        "modality": "text",
+        "required_fields": ["prompt", "chosen", "rejected"],
+        "optional_fields": [],
+        "field_structure": {
+            "prompt": {"type": "string", "description": "User prompt/question"},
+            "chosen": {"type": "string", "description": "Preferred (chosen) response"},
+            "rejected": {"type": "string", "description": "Non-preferred (rejected) response"}
+        },
+        "example": '{"prompt": "What is 2+2?", "chosen": "2+2 equals 4.", "rejected": "I don\'t know."}',
+        "usf_bios_ref": "dataset_info.json: zhihu_rlhf_3k, orca_dpo_pairs, Human-Like-DPO-Dataset",
+        "notes": "USF-BIOS auto-maps: prompt→query, chosen→response, rejected→rejected_response"
+    },
+    
+    # ==========================================================================
+    # RLHF PREFERENCE MULTIMODAL FORMATS
+    # ==========================================================================
+    "rlhf_pref_vision": {
+        "id": "rlhf_pref_vision",
+        "display_name": "RLHF Preference - Vision",
+        "description": "Vision RLHF with images and rejected_images",
+        "training_method": "rlhf",
+        "rlhf_types": ["dpo", "orpo", "simpo", "cpo", "rm"],
+        "modality": "vision",
+        "required_fields": ["messages", "rejected_messages", "images"],
+        "optional_fields": ["rejected_images"],
+        "field_structure": {
+            "messages": {"type": "array"},
+            "rejected_messages": {"type": "array"},
+            "images": {"type": "array_or_string"},
+            "rejected_images": {"type": "array_or_string", "optional": True}
+        },
+        "example": '{"messages": [...], "rejected_messages": [...], "images": ["img.jpg"]}',
+        "usf_bios_ref": "preprocessor/core.py:_cast_mm_data() handles rejected_images"
+    },
+    "rlhf_pref_audio": {
+        "id": "rlhf_pref_audio",
+        "display_name": "RLHF Preference - Audio",
+        "description": "Audio RLHF with audios field",
+        "training_method": "rlhf",
+        "rlhf_types": ["dpo", "orpo", "simpo", "cpo", "rm"],
+        "modality": "audio",
+        "required_fields": ["messages", "rejected_messages", "audios"],
+        "optional_fields": ["rejected_audios"],
+        "field_structure": {
+            "messages": {"type": "array"},
+            "rejected_messages": {"type": "array"},
+            "audios": {"type": "array_or_string"}
+        },
+        "example": '{"messages": [...], "rejected_messages": [...], "audios": ["audio.wav"]}',
+        "usf_bios_ref": "preprocessor/core.py:standard_keys"
+    },
+    "rlhf_pref_video": {
+        "id": "rlhf_pref_video",
+        "display_name": "RLHF Preference - Video",
+        "description": "Video RLHF with videos field",
+        "training_method": "rlhf",
+        "rlhf_types": ["dpo", "orpo", "simpo", "cpo", "rm"],
+        "modality": "video",
+        "required_fields": ["messages", "rejected_messages", "videos"],
+        "optional_fields": ["rejected_videos"],
+        "field_structure": {
+            "messages": {"type": "array"},
+            "rejected_messages": {"type": "array"},
+            "videos": {"type": "array_or_string"}
+        },
+        "example": '{"messages": [...], "rejected_messages": [...], "videos": ["video.mp4"]}',
+        "usf_bios_ref": "preprocessor/core.py:standard_keys"
+    },
+    
+    # ==========================================================================
+    # RLHF BINARY FORMAT (KTO)
+    # ==========================================================================
+    "rlhf_binary_kto": {
+        "id": "rlhf_binary_kto",
+        "display_name": "RLHF Binary - KTO (Messages + Label)",
+        "description": "Binary feedback with label (0=bad, 1=good) for KTO",
+        "training_method": "rlhf",
+        "rlhf_types": ["kto"],
+        "modality": "text",
+        "required_fields": ["messages", "label"],
+        "optional_fields": [],
+        "field_structure": {
+            "messages": {"type": "array", "items": {"type": "object", "required": ["role", "content"]}},
+            "label": {"type": "integer_or_boolean", "enum": [0, 1, True, False], "description": "1/True=desirable, 0/False=undesirable"}
+        },
+        "example": '{"messages": [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"}], "label": 1}',
+        "usf_bios_ref": "pipelines/train/kto.py:KTOPreprocessor"
+    },
+    
+    # ==========================================================================
+    # RLHF ONLINE FORMAT (PPO, GRPO, GKD)
+    # ==========================================================================
+    "rlhf_online_prompt": {
+        "id": "rlhf_online_prompt",
+        "display_name": "RLHF Online - Prompt Only (PPO/GRPO/GKD)",
+        "description": "Prompts for online RL - model generates responses during training",
+        "training_method": "rlhf",
+        "rlhf_types": ["ppo", "grpo", "gkd"],
+        "modality": "text",
+        "required_fields": ["messages"],
+        "optional_fields": [],
+        "field_structure": {
+            "messages": {
+                "type": "array",
+                "description": "Prompt messages (no assistant response - model will generate)",
+                "items": {"type": "object", "required": ["role", "content"]}
+            }
+        },
+        "example": '{"messages": [{"role": "user", "content": "Solve this math problem..."}]}',
+        "usf_bios_ref": "rlhf_args.py:rlhf_type in ['ppo', 'grpo', 'gkd']"
+    },
+}
+
+# Valid roles for messages (from USF-BIOS preprocessor/core.py line 80)
+VALID_MESSAGE_ROLES = {"system", "user", "assistant", "tool", "tool_call", "tool_response"}
+
+
 class DatasetType(str, Enum):
-    """Dataset types for training"""
-    SFT = "sft"                    # Supervised Fine-Tuning (messages format)
-    RLHF_OFFLINE = "rlhf_offline"  # Offline RLHF (preference data: prompt/chosen/rejected)
-    RLHF_ONLINE = "rlhf_online"    # Online RLHF (prompt only, generates responses)
-    PT = "pt"                      # Pre-Training (raw text)
-    KTO = "kto"                    # KTO specific format (prompt + completion + label)
-    UNKNOWN = "unknown"            # Cannot determine type
+    """Dataset types with standard naming convention.
+    
+    NAMING CONVENTION: {training_method}_{modality}_{variant}
+    - Training Method: sft, pt, rlhf_pref, rlhf_binary, rlhf_online
+    - Modality: (text is default/omitted), vision, audio, video
+    - Variant: optional (alpaca, sharegpt, etc.)
+    
+    VERIFIED AGAINST USF-BIOS:
+    - preprocessor/core.py: _pair_keys, standard_keys, _check_messages()
+    - Valid roles: system, user, assistant, tool, tool_call, tool_response
+    """
+    # ========== SFT (Supervised Fine-Tuning) ==========
+    SFT = "sft"                      # Text-only SFT (messages/alpaca/query-response)
+    SFT_TOOL_CALLING = "sft_tool_calling"  # SFT with tool_call/tool roles
+    SFT_VISION = "sft_vision"        # SFT + images
+    SFT_AUDIO = "sft_audio"          # SFT + audios  
+    SFT_VIDEO = "sft_video"          # SFT + videos
+    
+    # ========== PT (Pre-Training) ==========
+    PT = "pt"                        # Raw text only (NO multimodal per USF-BIOS)
+    
+    # ========== RLHF Preference (DPO/ORPO/SimPO/CPO/RM) ==========
+    RLHF_PREF = "rlhf_pref"          # Text preference (messages + rejected_messages/response)
+    RLHF_PREF_VISION = "rlhf_pref_vision"  # Vision preference + images
+    RLHF_PREF_AUDIO = "rlhf_pref_audio"    # Audio preference + audios
+    RLHF_PREF_VIDEO = "rlhf_pref_video"    # Video preference + videos
+    
+    # ========== RLHF Binary (KTO) ==========
+    RLHF_BINARY = "rlhf_binary"      # Binary feedback (messages + label)
+    
+    # ========== RLHF Online (PPO/GRPO/GKD) ==========
+    RLHF_ONLINE = "rlhf_online"      # Prompt only (model generates responses)
+    
+    # ========== UNKNOWN ==========
+    UNKNOWN = "unknown"              # Cannot determine format
+    
+    # Legacy aliases for backward compatibility
+    RLHF_OFFLINE_PREFERENCE = "rlhf_pref"  # Alias
+    RLHF_OFFLINE_BINARY = "rlhf_binary"    # Alias
+    RLHF_OFFLINE_VISION = "rlhf_pref_vision"  # Alias
+    RLHF_OFFLINE_AUDIO = "rlhf_pref_audio"    # Alias
+    RLHF_OFFLINE_VIDEO = "rlhf_pref_video"    # Alias
+    
+    @classmethod
+    def is_rlhf(cls, dataset_type: 'DatasetType') -> bool:
+        """Check if dataset type is any RLHF variant"""
+        return dataset_type.value.startswith('rlhf_')
+    
+    @classmethod
+    def is_rlhf_offline(cls, dataset_type: 'DatasetType') -> bool:
+        """Check if dataset type is offline RLHF"""
+        return dataset_type.value.startswith('rlhf_offline_')
+    
+    @classmethod
+    def is_rlhf_online(cls, dataset_type: 'DatasetType') -> bool:
+        """Check if dataset type is online RLHF"""
+        return dataset_type.value.startswith('rlhf_online')
 
 
 # Legacy constants - now using FileFormatConfig
@@ -331,49 +802,139 @@ class ModelTypeInfo:
         }
 
 
-# Training method compatibility matrix
+# ============================================================================
+# ALL TRAINING METHODS - Source of truth for what methods exist
+# Incompatible = ALL_TRAINING_METHODS - compatible (derived automatically)
+# ============================================================================
+ALL_TRAINING_METHODS = {"sft", "pt", "rlhf"}
+
+# All RLHF algorithms - source of truth
+ALL_RLHF_ALGORITHMS = {"dpo", "orpo", "simpo", "kto", "cpo", "rm", "ppo", "grpo", "gkd"}
+
+def get_incompatible_methods(compatible: list) -> list:
+    """Derive incompatible methods from compatible list. Future-proof."""
+    return list(ALL_TRAINING_METHODS - set(compatible))
+
+def get_incompatible_rlhf(compatible_rlhf: list) -> list:
+    """Derive incompatible RLHF algorithms from compatible list."""
+    return list(ALL_RLHF_ALGORITHMS - set(compatible_rlhf))
+
+
+# Training method compatibility matrix - Maps dataset types to compatible training methods
+# NOTE: Only "compatible" is defined. Incompatible is derived: ALL - compatible
 TRAINING_METHOD_COMPATIBILITY = {
+    # ========== SFT (TEXT) ==========
     DatasetType.SFT: {
         "compatible": ["sft"],
-        "incompatible": ["pt", "rlhf"],
-        "rlhf_types": [],
+        "rlhf_types": [],  # No RLHF algorithms compatible
         "display_name": "SFT (Instruction-Response)",
-        "message": "SFT dataset detected. Only Supervised Fine-Tuning is available."
+        "message": "SFT dataset detected. Only Supervised Fine-Tuning is available.",
+        "modality": "text",
     },
-    DatasetType.RLHF_OFFLINE: {
+    
+    # ========== SFT TOOL CALLING ==========
+    DatasetType.SFT_TOOL_CALLING: {
+        "compatible": ["sft"],
+        "rlhf_types": [],
+        "display_name": "SFT Tool/Function Calling",
+        "message": "Tool calling SFT dataset detected. Contains tool_call/tool roles for function calling training.",
+        "modality": "text",
+        "format_id": "sft_tool_calling",
+    },
+    
+    # ========== SFT (MULTIMODAL) ==========
+    DatasetType.SFT_VISION: {
+        "compatible": ["sft"],
+        "rlhf_types": [],
+        "display_name": "SFT Vision (Image + Text)",
+        "message": "Vision SFT dataset detected. Use with vision-language models (LLaVA, Qwen-VL, etc.).",
+        "modality": "vision",
+    },
+    DatasetType.SFT_AUDIO: {
+        "compatible": ["sft"],
+        "rlhf_types": [],
+        "display_name": "SFT Audio (Audio + Text)",
+        "message": "Audio SFT dataset detected. Use with audio-language models (Qwen-Audio, etc.).",
+        "modality": "audio",
+    },
+    DatasetType.SFT_VIDEO: {
+        "compatible": ["sft"],
+        "rlhf_types": [],
+        "display_name": "SFT Video (Video + Text)",
+        "message": "Video SFT dataset detected. Use with video-language models.",
+        "modality": "video",
+    },
+    
+    # ========== PRE-TRAINING ==========
+    DatasetType.PT: {
+        "compatible": ["pt"],
+        "rlhf_types": [],
+        "display_name": "Pre-Training (Raw Text)",
+        "message": "Pre-training dataset detected. Only Pre-Training is available.",
+        "modality": "text",
+    },
+    
+    # ========== RLHF PREFERENCE (DPO/ORPO/SimPO/CPO/RM) ==========
+    DatasetType.RLHF_PREF: {
         "compatible": ["rlhf"],
-        "incompatible": ["sft", "pt"],
-        "rlhf_types": ["dpo", "orpo", "simpo", "kto", "cpo", "rm"],  # Offline algorithms
-        "display_name": "RLHF Offline (Preference Data)",
-        "message": "Offline RLHF preference dataset detected. Compatible with DPO, ORPO, SimPO, KTO, CPO, RM."
+        "rlhf_types": ["dpo", "orpo", "simpo", "cpo", "rm"],  # Only these RLHF algorithms
+        "display_name": "RLHF Preference (DPO/ORPO/SimPO/CPO/RM)",
+        "message": "RLHF preference dataset detected. Compatible with DPO, ORPO, SimPO, CPO, RM.",
+        "modality": "text",
+        "format_id": "rlhf_pref_messages",
     },
+    DatasetType.RLHF_PREF_VISION: {
+        "compatible": ["rlhf"],
+        "rlhf_types": ["dpo", "orpo", "simpo", "cpo", "rm"],
+        "display_name": "RLHF Preference - Vision",
+        "message": "Vision RLHF preference dataset. Use with VLMs (LLaVA, Qwen-VL, etc.).",
+        "modality": "vision",
+        "format_id": "rlhf_pref_vision",
+    },
+    DatasetType.RLHF_PREF_AUDIO: {
+        "compatible": ["rlhf"],
+        "rlhf_types": ["dpo", "orpo", "simpo", "cpo", "rm"],
+        "display_name": "RLHF Preference - Audio",
+        "message": "Audio RLHF preference dataset. Use with audio models (Qwen-Audio, etc.).",
+        "modality": "audio",
+        "format_id": "rlhf_pref_audio",
+    },
+    DatasetType.RLHF_PREF_VIDEO: {
+        "compatible": ["rlhf"],
+        "rlhf_types": ["dpo", "orpo", "simpo", "cpo", "rm"],
+        "display_name": "RLHF Preference - Video",
+        "message": "Video RLHF preference dataset. Use with video models.",
+        "modality": "video",
+        "format_id": "rlhf_pref_video",
+    },
+    
+    # ========== RLHF BINARY (KTO) ==========
+    DatasetType.RLHF_BINARY: {
+        "compatible": ["rlhf"],
+        "rlhf_types": ["kto"],  # ONLY KTO
+        "display_name": "RLHF Binary Feedback (KTO)",
+        "message": "Binary feedback dataset. Compatible with KTO (Kahneman-Tversky Optimization).",
+        "modality": "text",
+        "format_id": "rlhf_binary_kto",
+    },
+    
+    # ========== RLHF - ONLINE ==========
     DatasetType.RLHF_ONLINE: {
         "compatible": ["rlhf"],
-        "incompatible": ["sft", "pt"],
-        "rlhf_types": ["ppo", "grpo", "gkd"],  # Online algorithms
+        "rlhf_types": ["ppo", "grpo", "gkd"],  # Only online algorithms
+        "modality": "text",
         "display_name": "RLHF Online (Generation Required)",
         "message": "Online RLHF dataset detected. Compatible with PPO, GRPO, GKD."
     },
-    DatasetType.PT: {
-        "compatible": ["pt"],
-        "incompatible": ["sft", "rlhf"],
-        "rlhf_types": [],
-        "display_name": "Pre-Training (Raw Text)",
-        "message": "Pre-training dataset detected. Only Pre-Training is available."
-    },
-    DatasetType.KTO: {
-        "compatible": ["rlhf"],
-        "incompatible": ["sft", "pt"],
-        "rlhf_types": ["kto"],
-        "display_name": "KTO (Binary Feedback)",
-        "message": "KTO dataset detected. Only KTO training is available."
-    },
+    
+    # ========== UNKNOWN - STRICTLY REJECTED ==========
+    # IMPORTANT: Unknown datasets are NOT allowed for upload or registration
     DatasetType.UNKNOWN: {
-        "compatible": ["sft", "pt", "rlhf"],
-        "incompatible": [],
-        "rlhf_types": [],
-        "display_name": "Unknown Format",
-        "message": "Could not determine dataset type. All training methods available."
+        "compatible": [],  # NO training methods allowed - ALL are incompatible
+        "rlhf_types": [],  # NO RLHF algorithms allowed
+        "display_name": "Unknown Format (REJECTED)",
+        "message": "Dataset type could not be determined. Upload/registration rejected. Please use a supported format.",
+        "is_valid": False,
     },
 }
 
@@ -381,23 +942,47 @@ TRAINING_METHOD_COMPATIBILITY = {
 class DatasetTypeService:
     """Service for detecting dataset types and validating training compatibility"""
     
-    # Field patterns for each dataset type
-    SFT_FIELDS = {"messages"}
-    SFT_ALT_FIELDS = {"instruction", "input", "output"}  # Alpaca format
-    SFT_QUERY_FIELDS = {"query", "response"}  # Query-response format
+    # ========================================================================
+    # FIELD PATTERNS - VERIFIED AGAINST USF-BIOS preprocessor/core.py
+    # ========================================================================
+    # USF-BIOS standard_keys: messages, images, videos, audios, tools, objects
+    #   + prefixes: rejected_, positive_, negative_
+    #   + special: rejected_response, label, channel, margin
+    # ========================================================================
     
-    # Offline RLHF: has chosen/rejected pairs for preference learning
-    RLHF_OFFLINE_FIELDS = {"prompt", "chosen", "rejected"}
-    RLHF_OFFLINE_ALT_FIELDS = {"question", "chosen", "rejected"}
+    # SFT formats (all converted to messages internally by USF-BIOS)
+    SFT_FIELDS = {"messages"}                                    # Native messages format
+    SFT_ALT_FIELDS = {"instruction", "output"}                   # Alpaca format (input optional)
+    SFT_QUERY_FIELDS = {"query", "response"}                     # Query-response format
     
-    # Online RLHF: has prompt + reward signal, needs to generate responses
-    RLHF_ONLINE_FIELDS = {"prompt"}  # Just prompt, model generates completions
-    RLHF_ONLINE_WITH_REWARD = {"prompt", "reward"}  # Prompt + reward function
+    # RLHF Preference: messages + rejected_messages OR messages + rejected_response
+    # USF-BIOS: _check_rejected_response() validates rejected_response field
+    RLHF_PREFERENCE_FIELDS = {"messages", "rejected_messages"}   # Primary preference format
+    RLHF_PREFERENCE_ALT_FIELDS = {"messages", "rejected_response"}  # Alternative format
     
-    KTO_FIELDS = {"prompt", "completion", "label"}  # KTO specific
+    # RLHF Simple Preference: prompt/chosen/rejected strings (common HuggingFace format)
+    # USF-BIOS: Supported via column mapping (prompt→query, chosen→response, rejected→rejected_response)
+    # See dataset_info.json examples: zhihu_rlhf_3k, orca_dpo_pairs, Human-Like-DPO-Dataset
+    RLHF_PREF_SIMPLE_FIELDS = {"prompt", "chosen", "rejected"}   # HuggingFace DPO format
     
-    PT_FIELDS = {"text"}
-    PT_ALT_FIELDS = {"content"}
+    # KTO: messages + label (binary: 0=undesirable, 1=desirable)
+    # USF-BIOS: KTOPreprocessor in kto.py uses messages + label
+    KTO_FIELDS = {"messages", "label"}                           # KTO binary feedback
+    
+    # Online RLHF: just messages (GRPO/PPO/GKD generate completions)
+    RLHF_ONLINE_FIELDS = {"messages"}                            # Same as SFT, used for online RLHF
+    
+    # Pre-training: raw text
+    PT_FIELDS = {"text"}                                         # Primary PT format
+    PT_ALT_FIELDS = {"content"}                                  # Alternative PT format
+    
+    # ========== MULTIMODAL FIELDS ==========
+    # Vision: image/images field with path, URL, base64, or PIL Image
+    VISION_FIELDS = {"image", "images", "image_url", "image_path", "img", "picture", "photo"}
+    # Audio: audio field with path, URL, or array
+    AUDIO_FIELDS = {"audio", "audio_path", "audio_url", "speech", "wav", "sound"}
+    # Video: video field with path or URL
+    VIDEO_FIELDS = {"video", "videos", "video_path", "video_url", "clip"}
     
     def detect_dataset_type(self, dataset_path: str, feature_flags: Optional[Dict[str, bool]] = None) -> DatasetTypeInfo:
         """
@@ -774,60 +1359,507 @@ class DatasetTypeService:
     # See usf_bios/dataset/loader.py for supported formats: jsonl, json, csv, txt
     
     def _detect_from_samples(self, samples: List[Dict], total: int, file_size: int = 0) -> DatasetTypeInfo:
-        """Detect dataset type from sample data"""
+        """
+        Detect dataset type from sample data with DEEP STRUCTURE VALIDATION.
+        
+        PRODUCTION-READY: Handles all dataset types including multimodal:
+        - SFT: messages format (text or multimodal)
+        - SFT Vision: messages + image/images field
+        - SFT Audio: messages + audio field
+        - SFT Video: messages + video field
+        - PT: raw text for pre-training
+        - RLHF Preference: prompt/chosen/rejected
+        - RLHF Binary (KTO): prompt/completion/label
+        - RLHF Online: prompt only
+        - Alpaca: instruction/input/output
+        """
         if not samples:
             return self._create_unknown_result("No samples to analyze")
+        
+        # Handle edge case: sample is not a dict
+        if not isinstance(samples[0], dict):
+            return self._create_unknown_result(
+                f"Invalid sample format: expected dict, got {type(samples[0]).__name__}. "
+                "Each row must be a JSON object."
+            )
         
         # Get all fields from first sample
         first_sample = samples[0]
         fields = set(first_sample.keys())
         
-        # Check for Offline RLHF preference data (most specific first)
-        # Has prompt + chosen + rejected for preference learning
-        if self.RLHF_OFFLINE_FIELDS.issubset(fields) or self.RLHF_OFFLINE_ALT_FIELDS.issubset(fields):
-            detected_fields = list(self.RLHF_OFFLINE_FIELDS & fields) or list(self.RLHF_OFFLINE_ALT_FIELDS & fields)
-            return self._create_result(DatasetType.RLHF_OFFLINE, detected_fields, total, 1.0, file_size)
+        # Handle edge case: empty fields
+        if not fields:
+            return self._create_unknown_result("Sample has no fields. Each row must have at least one field.")
         
-        # Check for KTO format (prompt + completion + label)
+        # Collect validation warnings for structure issues
+        validation_warnings = []
+        
+        # ================================================================
+        # DETECT MODALITY (vision/audio/video/text)
+        # ================================================================
+        modality, media_fields = self._detect_modality(fields, samples)
+        
+        # ================================================================
+        # CHECK RLHF PREFERENCE (messages + rejected_messages/rejected_response)
+        # USF-BIOS: preprocessor/core.py standard_keys includes rejected_messages, rejected_response
+        # ================================================================
+        if self.RLHF_PREFERENCE_FIELDS.issubset(fields) or self.RLHF_PREFERENCE_ALT_FIELDS.issubset(fields):
+            has_rejected_messages = "rejected_messages" in fields
+            has_rejected_response = "rejected_response" in fields
+            
+            detected_fields = ["messages"]
+            if has_rejected_messages:
+                detected_fields.append("rejected_messages")
+            if has_rejected_response:
+                detected_fields.append("rejected_response")
+            
+            # DEEP VALIDATION: Check messages structure
+            valid_structure = True
+            for sample in samples[:5]:
+                messages = sample.get("messages")
+                
+                # Validate messages is a list
+                if not isinstance(messages, list) or len(messages) == 0:
+                    valid_structure = False
+                    validation_warnings.append("'messages' field should be a non-empty array")
+                    break
+                
+                # Validate rejected_messages if present
+                if has_rejected_messages:
+                    rejected = sample.get("rejected_messages")
+                    if not isinstance(rejected, list) or len(rejected) == 0:
+                        valid_structure = False
+                        validation_warnings.append("'rejected_messages' field should be a non-empty array")
+                        break
+                
+                # Validate rejected_response if present
+                if has_rejected_response:
+                    rejected = sample.get("rejected_response")
+                    if not isinstance(rejected, str) or not rejected:
+                        valid_structure = False
+                        validation_warnings.append("'rejected_response' field should be a non-empty string")
+                        break
+            
+            confidence = 1.0 if valid_structure else 0.7
+            
+            # Check for multimodal RLHF (with images/audio/video)
+            # USF-BIOS supports: rejected_images, rejected_videos, rejected_audios
+            if modality == "vision":
+                rlhf_type = DatasetType.RLHF_PREF_VISION
+                detected_fields = detected_fields + media_fields
+            elif modality == "audio":
+                rlhf_type = DatasetType.RLHF_PREF_AUDIO
+                detected_fields = detected_fields + media_fields
+            elif modality == "video":
+                rlhf_type = DatasetType.RLHF_PREF_VIDEO
+                detected_fields = detected_fields + media_fields
+            else:
+                rlhf_type = DatasetType.RLHF_PREF
+            
+            result = self._create_result(rlhf_type, detected_fields, total, confidence, file_size)
+            result.validation_warnings = validation_warnings
+            return result
+        
+        # ================================================================
+        # CHECK RLHF SIMPLE PREFERENCE (prompt/chosen/rejected strings)
+        # Common HuggingFace DPO format - USF-BIOS supports via column mapping
+        # See dataset_info.json: zhihu_rlhf_3k, orca_dpo_pairs, Human-Like-DPO-Dataset
+        # ================================================================
+        if self.RLHF_PREF_SIMPLE_FIELDS.issubset(fields):
+            detected_fields = ["prompt", "chosen", "rejected"]
+            
+            # DEEP VALIDATION: Check that all fields are strings
+            valid_structure = True
+            for sample in samples[:5]:
+                prompt = sample.get("prompt")
+                chosen = sample.get("chosen")
+                rejected = sample.get("rejected")
+                
+                # Validate prompt is a string
+                if not isinstance(prompt, str) or not prompt.strip():
+                    valid_structure = False
+                    validation_warnings.append("'prompt' field should be a non-empty string")
+                    break
+                
+                # Validate chosen is a string
+                if not isinstance(chosen, str) or not chosen.strip():
+                    valid_structure = False
+                    validation_warnings.append("'chosen' field should be a non-empty string")
+                    break
+                
+                # Validate rejected is a string
+                if not isinstance(rejected, str) or not rejected.strip():
+                    valid_structure = False
+                    validation_warnings.append("'rejected' field should be a non-empty string")
+                    break
+                
+                # Validate chosen != rejected (should be different)
+                if chosen.strip() == rejected.strip():
+                    validation_warnings.append("Warning: 'chosen' and 'rejected' are identical in some samples")
+            
+            confidence = 1.0 if valid_structure else 0.7
+            
+            # Check for multimodal (though simple format is usually text-only)
+            if modality == "vision":
+                rlhf_type = DatasetType.RLHF_PREF_VISION
+                detected_fields = detected_fields + media_fields
+            elif modality == "audio":
+                rlhf_type = DatasetType.RLHF_PREF_AUDIO
+                detected_fields = detected_fields + media_fields
+            elif modality == "video":
+                rlhf_type = DatasetType.RLHF_PREF_VIDEO
+                detected_fields = detected_fields + media_fields
+            else:
+                rlhf_type = DatasetType.RLHF_PREF
+            
+            result = self._create_result(rlhf_type, detected_fields, total, confidence, file_size)
+            result.validation_warnings = validation_warnings
+            # Add note about USF-BIOS column mapping
+            if not result.validation_warnings:
+                result.validation_warnings = []
+            result.validation_warnings.append(
+                "Note: USF-BIOS will auto-map this format (prompt→query, chosen→response, rejected→rejected_response)"
+            )
+            return result
+        
+        # ================================================================
+        # CHECK KTO (messages + label)
+        # USF-BIOS: kto.py uses messages + label (binary: 0/1)
+        # ================================================================
         if self.KTO_FIELDS.issubset(fields):
-            return self._create_result(DatasetType.KTO, list(self.KTO_FIELDS), total, 1.0, file_size)
+            valid_structure = True
+            for sample in samples[:5]:
+                messages = sample.get("messages")
+                label = sample.get("label")
+                
+                # Validate messages is a list
+                if not isinstance(messages, list) or len(messages) == 0:
+                    valid_structure = False
+                    validation_warnings.append("'messages' field should be a non-empty array")
+                    break
+                # Validate label is boolean or 0/1
+                if not isinstance(label, (bool, int)) or (isinstance(label, int) and label not in [0, 1]):
+                    valid_structure = False
+                    validation_warnings.append("'label' field should be boolean (true/false) or 0/1")
+                    break
+            
+            confidence = 1.0 if valid_structure else 0.7
+            result = self._create_result(DatasetType.RLHF_BINARY, ["messages", "label"], total, confidence, file_size)
+            result.validation_warnings = validation_warnings
+            return result
         
-        # Check for Online RLHF format (prompt only, or prompt + reward)
-        # This is for algorithms that generate their own completions (PPO, GRPO, GKD)
-        if self.RLHF_ONLINE_WITH_REWARD.issubset(fields):
-            return self._create_result(DatasetType.RLHF_ONLINE, list(self.RLHF_ONLINE_WITH_REWARD & fields), total, 1.0, file_size)
+        # NOTE: RLHF_ONLINE detection is done AFTER SFT check below
+        # Online RLHF (GRPO/PPO/GKD) uses the same format as SFT (messages)
+        # The training method selection determines if it's SFT or online RLHF
         
-        # Check for SFT messages format
+        # ================================================================
+        # CHECK SFT MESSAGES FORMAT
+        # ================================================================
         if "messages" in fields:
             messages = first_sample.get("messages", [])
             if isinstance(messages, list) and messages:
-                # Validate messages have role/content
-                if all(isinstance(m, dict) and "role" in m and "content" in m for m in messages[:3]):
-                    return self._create_result(DatasetType.SFT, ["messages"], total, 1.0, file_size)
+                # DEEP VALIDATION: Check messages structure across multiple samples
+                valid_structure = True
+                for sample in samples[:5]:
+                    msgs = sample.get("messages", [])
+                    if not isinstance(msgs, list):
+                        valid_structure = False
+                        validation_warnings.append("'messages' field should be an array")
+                        break
+                    
+                    for msg in msgs[:10]:  # Check first 10 messages per sample
+                        if not isinstance(msg, dict):
+                            valid_structure = False
+                            validation_warnings.append("Each message should be an object with 'role' and 'content'")
+                            break
+                        if "role" not in msg:
+                            valid_structure = False
+                            validation_warnings.append("Message missing 'role' field")
+                            break
+                        if "content" not in msg:
+                            valid_structure = False
+                            validation_warnings.append("Message missing 'content' field")
+                            break
+                        # Validate role is valid
+                        role = msg.get("role", "")
+                        valid_roles = {"system", "user", "assistant", "tool", "function", "tool_call", "tool_response"}
+                        if role not in valid_roles:
+                            validation_warnings.append(f"Unusual role '{role}' found (expected: system/user/assistant)")
+                        # Validate content is string
+                        if not isinstance(msg.get("content"), (str, list)):
+                            validation_warnings.append("Message 'content' should be string or array")
+                    
+                    if not valid_structure:
+                        break
+                
+                confidence = 1.0 if valid_structure and not validation_warnings else 0.9
+                
+                # Check for tool calling roles in messages
+                has_tool_calling = False
+                for sample in samples[:10]:
+                    msgs = sample.get("messages", [])
+                    if isinstance(msgs, list):
+                        for msg in msgs:
+                            if isinstance(msg, dict) and msg.get("role") in {"tool_call", "tool", "tool_response"}:
+                                has_tool_calling = True
+                                break
+                    if has_tool_calling:
+                        break
+                
+                # Determine SFT type based on modality and tool calling
+                if has_tool_calling and modality == "text":
+                    # Tool calling dataset (text only for now)
+                    sft_type = DatasetType.SFT_TOOL_CALLING
+                    detected_fields = ["messages", "tool_call"]
+                    if "tools" in fields:
+                        detected_fields.append("tools")
+                elif modality == "vision":
+                    sft_type = DatasetType.SFT_VISION
+                    detected_fields = ["messages"] + media_fields
+                elif modality == "audio":
+                    sft_type = DatasetType.SFT_AUDIO
+                    detected_fields = ["messages"] + media_fields
+                elif modality == "video":
+                    sft_type = DatasetType.SFT_VIDEO
+                    detected_fields = ["messages"] + media_fields
+                else:
+                    sft_type = DatasetType.SFT
+                    detected_fields = ["messages"]
+                
+                result = self._create_result(sft_type, detected_fields, total, confidence, file_size)
+                result.validation_warnings = validation_warnings[:5]  # Limit warnings
+                return result
         
-        # Check for Alpaca-style instruction format (SFT)
+        # ================================================================
+        # CHECK ALPACA FORMAT (instruction/input/output)
+        # ================================================================
         if self.SFT_ALT_FIELDS.issubset(fields):
-            return self._create_result(DatasetType.SFT, list(self.SFT_ALT_FIELDS & fields), total, 0.9, file_size)
+            valid_structure = True
+            for sample in samples[:5]:
+                instruction = sample.get("instruction")
+                output = sample.get("output")
+                
+                if not isinstance(instruction, str):
+                    valid_structure = False
+                    validation_warnings.append("'instruction' field should be a string")
+                    break
+                if not isinstance(output, str):
+                    valid_structure = False
+                    validation_warnings.append("'output' field should be a string")
+                    break
+            
+            confidence = 0.9 if valid_structure else 0.7
+            
+            # Determine SFT type based on modality
+            if modality == "vision":
+                sft_type = DatasetType.SFT_VISION
+                detected_fields = list(self.SFT_ALT_FIELDS & fields) + media_fields
+            elif modality == "audio":
+                sft_type = DatasetType.SFT_AUDIO
+                detected_fields = list(self.SFT_ALT_FIELDS & fields) + media_fields
+            elif modality == "video":
+                sft_type = DatasetType.SFT_VIDEO
+                detected_fields = list(self.SFT_ALT_FIELDS & fields) + media_fields
+            else:
+                sft_type = DatasetType.SFT
+                detected_fields = list(self.SFT_ALT_FIELDS & fields)
+            
+            result = self._create_result(sft_type, detected_fields, total, confidence, file_size)
+            result.validation_warnings = validation_warnings
+            return result
         
-        # Check for query-response format (SFT)
+        # ================================================================
+        # CHECK QUERY-RESPONSE FORMAT (SFT)
+        # ================================================================
         if self.SFT_QUERY_FIELDS.issubset(fields):
-            return self._create_result(DatasetType.SFT, list(self.SFT_QUERY_FIELDS & fields), total, 0.9, file_size)
+            valid_structure = True
+            for sample in samples[:5]:
+                query = sample.get("query")
+                response = sample.get("response")
+                
+                if not isinstance(query, str):
+                    valid_structure = False
+                    validation_warnings.append("'query' field should be a string")
+                    break
+                if not isinstance(response, str):
+                    valid_structure = False
+                    validation_warnings.append("'response' field should be a string")
+                    break
+            
+            confidence = 0.9 if valid_structure else 0.7
+            
+            # Determine SFT type based on modality
+            if modality == "vision":
+                sft_type = DatasetType.SFT_VISION
+                detected_fields = list(self.SFT_QUERY_FIELDS & fields) + media_fields
+            elif modality == "audio":
+                sft_type = DatasetType.SFT_AUDIO
+                detected_fields = list(self.SFT_QUERY_FIELDS & fields) + media_fields
+            elif modality == "video":
+                sft_type = DatasetType.SFT_VIDEO
+                detected_fields = list(self.SFT_QUERY_FIELDS & fields) + media_fields
+            else:
+                sft_type = DatasetType.SFT
+                detected_fields = list(self.SFT_QUERY_FIELDS & fields)
+            
+            result = self._create_result(sft_type, detected_fields, total, confidence, file_size)
+            result.validation_warnings = validation_warnings
+            return result
         
-        # Check for pre-training text format
+        # ================================================================
+        # CHECK PRE-TRAINING TEXT FORMAT
+        # ================================================================
         if self.PT_FIELDS.issubset(fields) or self.PT_ALT_FIELDS.issubset(fields):
             detected_fields = list(self.PT_FIELDS & fields) or list(self.PT_ALT_FIELDS & fields)
-            return self._create_result(DatasetType.PT, detected_fields, total, 0.8, file_size)
+            text_field = "text" if "text" in fields else "content"
+            
+            valid_structure = True
+            for sample in samples[:5]:
+                text_value = sample.get(text_field)
+                
+                if not isinstance(text_value, str):
+                    valid_structure = False
+                    validation_warnings.append(f"'{text_field}' field should be a string")
+                    break
+                if len(text_value.strip()) == 0:
+                    validation_warnings.append(f"'{text_field}' field contains empty text")
+            
+            confidence = 0.8 if valid_structure else 0.5
+            result = self._create_result(DatasetType.PT, detected_fields, total, confidence, file_size)
+            result.validation_warnings = validation_warnings
+            return result
         
-        # Check for Online RLHF - prompt only (less specific, check last)
-        # Only prompt field with no response/output fields indicates online RL
+        # ================================================================
+        # CHECK ONLINE RLHF - PROMPT ONLY (less specific, check last)
+        # ================================================================
         if "prompt" in fields and "chosen" not in fields and "rejected" not in fields and "response" not in fields:
-            return self._create_result(DatasetType.RLHF_ONLINE, ["prompt"], total, 0.7, file_size)
+            valid_structure = True
+            for sample in samples[:5]:
+                prompt = sample.get("prompt")
+                if not self._is_valid_text_or_messages(prompt):
+                    valid_structure = False
+                    validation_warnings.append("'prompt' field should be string or messages array")
+                    break
+            
+            confidence = 0.7 if valid_structure else 0.5
+            result = self._create_result(DatasetType.RLHF_ONLINE, ["prompt"], total, confidence, file_size)
+            result.validation_warnings = validation_warnings
+            return result
         
         # Fallback: check if there's instruction-like content
         if "instruction" in fields:
-            return self._create_result(DatasetType.SFT, ["instruction"], total, 0.7, file_size)
+            instruction = first_sample.get("instruction")
+            if isinstance(instruction, str):
+                return self._create_result(DatasetType.SFT, ["instruction"], total, 0.7, file_size)
         
         return self._create_unknown_result("Could not determine dataset type from fields")
+    
+    def _is_valid_text_or_messages(self, value: Any) -> bool:
+        """
+        Check if value is valid text content (string) or messages array.
+        
+        Valid formats:
+        - String: "Hello, how can I help?"
+        - Messages array: [{"role": "user", "content": "..."}]
+        """
+        if isinstance(value, str):
+            return True
+        if isinstance(value, list):
+            # Check if it's a messages array
+            if all(isinstance(m, dict) and "role" in m and "content" in m for m in value[:3]):
+                return True
+        return False
+    
+    def _detect_modality(self, fields: set, samples: List[Dict]) -> Tuple[str, List[str]]:
+        """
+        Detect modality from fields and sample content.
+        
+        Returns:
+            Tuple of (modality: str, detected_media_fields: List[str])
+            modality is one of: 'text', 'vision', 'audio', 'video'
+        """
+        detected_media_fields = []
+        
+        # Check for vision fields
+        vision_fields_found = self.VISION_FIELDS & fields
+        if vision_fields_found:
+            # Validate that vision field contains valid data
+            for field in vision_fields_found:
+                for sample in samples[:3]:
+                    value = sample.get(field)
+                    if self._is_valid_media_content(value, "vision"):
+                        detected_media_fields.append(field)
+                        break
+            if detected_media_fields:
+                return "vision", detected_media_fields
+        
+        # Check for audio fields
+        audio_fields_found = self.AUDIO_FIELDS & fields
+        if audio_fields_found:
+            for field in audio_fields_found:
+                for sample in samples[:3]:
+                    value = sample.get(field)
+                    if self._is_valid_media_content(value, "audio"):
+                        detected_media_fields.append(field)
+                        break
+            if detected_media_fields:
+                return "audio", detected_media_fields
+        
+        # Check for video fields
+        video_fields_found = self.VIDEO_FIELDS & fields
+        if video_fields_found:
+            for field in video_fields_found:
+                for sample in samples[:3]:
+                    value = sample.get(field)
+                    if self._is_valid_media_content(value, "video"):
+                        detected_media_fields.append(field)
+                        break
+            if detected_media_fields:
+                return "video", detected_media_fields
+        
+        return "text", []
+    
+    def _is_valid_media_content(self, value: Any, media_type: str) -> bool:
+        """
+        Check if value is valid media content (image/audio/video).
+        
+        Valid formats:
+        - String: file path, URL, or base64 encoded data
+        - List: array of paths/URLs (for multiple images)
+        - Dict: with 'path' or 'bytes' key
+        - None: skip this sample
+        """
+        if value is None:
+            return False
+        
+        # String - path, URL, or base64
+        if isinstance(value, str):
+            # Check if it looks like a path, URL, or base64
+            if value.startswith(('http://', 'https://', '/', './', 'data:')):
+                return True
+            # Check common image extensions
+            if media_type == "vision" and any(value.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']):
+                return True
+            # Check common audio extensions
+            if media_type == "audio" and any(value.lower().endswith(ext) for ext in ['.wav', '.mp3', '.flac', '.ogg', '.m4a']):
+                return True
+            # Check common video extensions
+            if media_type == "video" and any(value.lower().endswith(ext) for ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm']):
+                return True
+            # Could be base64 or relative path
+            if len(value) > 10:
+                return True
+        
+        # List - multiple media items
+        if isinstance(value, list) and len(value) > 0:
+            # Check if items are valid
+            return any(self._is_valid_media_content(item, media_type) for item in value[:3])
+        
+        # Dict with path or bytes
+        if isinstance(value, dict):
+            return 'path' in value or 'bytes' in value or 'url' in value
+        
+        return False
     
     def _create_result(
         self, 
@@ -840,13 +1872,17 @@ class DatasetTypeService:
         """Create a DatasetTypeInfo result with all fields properly initialized"""
         compat = TRAINING_METHOD_COMPATIBILITY.get(dataset_type, TRAINING_METHOD_COMPATIBILITY[DatasetType.UNKNOWN])
         
+        # Derive incompatible from compatible (future-proof)
+        compatible = compat["compatible"]
+        incompatible = get_incompatible_methods(compatible)
+        
         return DatasetTypeInfo(
             dataset_type=dataset_type,
             confidence=confidence,
             detected_fields=detected_fields,
             sample_count=sample_count,
-            compatible_training_methods=compat["compatible"],
-            incompatible_training_methods=compat["incompatible"],
+            compatible_training_methods=compatible,
+            incompatible_training_methods=incompatible,
             compatible_rlhf_types=compat.get("rlhf_types", []),
             display_name=compat.get("display_name", dataset_type.value),
             message=compat["message"],
@@ -862,13 +1898,17 @@ class DatasetTypeService:
     def _create_unknown_result(self, message: str, format_warning: Optional[str] = None) -> DatasetTypeInfo:
         """Create an unknown type result with all fields properly initialized"""
         compat = TRAINING_METHOD_COMPATIBILITY[DatasetType.UNKNOWN]
+        # UNKNOWN has empty compatible list, so ALL methods are incompatible
+        compatible = compat["compatible"]
+        incompatible = get_incompatible_methods(compatible)
+        
         return DatasetTypeInfo(
             dataset_type=DatasetType.UNKNOWN,
             confidence=0.0,
             detected_fields=[],
             sample_count=0,
-            compatible_training_methods=compat["compatible"],
-            incompatible_training_methods=compat["incompatible"],
+            compatible_training_methods=compatible,
+            incompatible_training_methods=incompatible,
             compatible_rlhf_types=compat.get("rlhf_types", []),
             display_name=compat.get("display_name", "Unknown"),
             message=message,
@@ -915,8 +1955,8 @@ class DatasetTypeService:
             if not feature_flags.get("pretraining", True):
                 return False, "Pre-training is not enabled on this system. Cannot upload pre-training datasets.", type_info
         
-        # Offline RLHF dataset (DPO, ORPO, etc.)
-        elif dataset_type == DatasetType.RLHF_OFFLINE:
+        # RLHF Preference dataset (DPO, ORPO, SimPO, CPO, RM)
+        elif dataset_type == DatasetType.RLHF_PREF:
             if not feature_flags.get("rlhf", True):
                 return False, "RLHF training is not enabled on this system. Cannot upload RLHF datasets.", type_info
             if not feature_flags.get("rlhf_offline", True):
@@ -929,8 +1969,8 @@ class DatasetTypeService:
             if not feature_flags.get("rlhf_online", True):
                 return False, "Online RLHF (PPO, GRPO, GKD) is not enabled on this system. Cannot upload online RLHF datasets.", type_info
         
-        # KTO dataset
-        elif dataset_type == DatasetType.KTO:
+        # RLHF Binary Feedback dataset (KTO)
+        elif dataset_type == DatasetType.RLHF_BINARY:
             if not feature_flags.get("rlhf", True):
                 return False, "RLHF training is not enabled on this system. Cannot upload KTO datasets.", type_info
             if not feature_flags.get("kto", True):
@@ -1118,15 +2158,29 @@ class DatasetTypeService:
         errors = []
         
         # Check dataset-training method compatibility
+        # Incompatible = NOT in compatible list (derived, future-proof)
         compat = TRAINING_METHOD_COMPATIBILITY.get(dataset_type, TRAINING_METHOD_COMPATIBILITY[DatasetType.UNKNOWN])
-        if training_method in compat["incompatible"]:
+        compatible = compat["compatible"]
+        if training_method not in compatible:
             method_name = {"sft": "SFT", "pt": "Pre-Training", "rlhf": "RLHF"}.get(training_method, training_method)
             type_name = {"sft": "SFT", "rlhf": "RLHF preference", "pt": "Pre-training", "kto": "KTO"}.get(dataset_type.value, dataset_type.value)
             errors.append(f"{method_name} is not compatible with {type_name} datasets. {compat['message']}")
         
-        # Check KTO-specific validation
-        if dataset_type == DatasetType.KTO and rlhf_type and rlhf_type != "kto":
-            errors.append(f"KTO dataset format is only compatible with KTO algorithm. Please select KTO or use a standard RLHF preference dataset.")
+        # Check KTO-specific validation (RLHF_BINARY only works with KTO algorithm)
+        if dataset_type == DatasetType.RLHF_BINARY and rlhf_type and rlhf_type != "kto":
+            errors.append(f"Binary feedback dataset (messages+label) is only compatible with KTO algorithm.")
+        
+        # Check RLHF_PREF specific validation (doesn't work with KTO)
+        if dataset_type == DatasetType.RLHF_PREF and rlhf_type == "kto":
+            errors.append(f"Preference dataset (messages+rejected) is not compatible with KTO. Use binary feedback dataset (messages+label).")
+        
+        # Check RLHF_ONLINE specific validation
+        if dataset_type == DatasetType.RLHF_ONLINE and rlhf_type and rlhf_type not in ["ppo", "grpo", "gkd"]:
+            errors.append(f"Online RLHF dataset only works with PPO, GRPO, or GKD. Selected: {rlhf_type}.")
+        
+        # Check offline algorithms trying to use online dataset
+        if dataset_type == DatasetType.RLHF_ONLINE and rlhf_type in ["dpo", "orpo", "simpo", "cpo", "rm", "kto"]:
+            errors.append(f"{rlhf_type.upper()} requires pre-collected data. Use a preference or binary feedback dataset instead of prompt-only.")
         
         # Check model-training type compatibility
         if model_type == ModelType.LORA or model_type == ModelType.QLORA:
@@ -1165,6 +2219,137 @@ class DatasetTypeService:
             "sample_rows_for_detection": FileFormatConfig.SAMPLE_ROWS_FOR_DETECTION,
             "large_file_threshold_gb": FileFormatConfig.LARGE_FILE_THRESHOLD_GB,
         }
+    
+    def detect_hub_dataset_type(
+        self,
+        dataset_id: str,
+        source: str = "huggingface",
+        subset: Optional[str] = None,
+        split: str = "train",
+        num_samples: int = 10,
+        timeout_seconds: int = 30
+    ) -> DatasetTypeInfo:
+        """
+        Detect dataset type from HuggingFace or ModelScope by streaming a small sample.
+        
+        Downloads only the first N samples to detect the dataset type without
+        downloading the entire dataset. This allows immediate type detection
+        for showing available training options in the UI.
+        
+        Args:
+            dataset_id: HuggingFace or ModelScope dataset ID (e.g., "tatsu-lab/alpaca")
+            source: "huggingface" or "modelscope"
+            subset: Optional subset/config name
+            split: Split to sample from (default: "train")
+            num_samples: Number of samples to download for detection (default: 10)
+            timeout_seconds: Timeout for the operation (default: 30)
+            
+        Returns:
+            DatasetTypeInfo with detected type and compatibility information
+        """
+        try:
+            samples = []
+            
+            if source == "huggingface":
+                samples = self._sample_huggingface_dataset(
+                    dataset_id, subset, split, num_samples, timeout_seconds
+                )
+            elif source == "modelscope":
+                samples = self._sample_modelscope_dataset(
+                    dataset_id, subset, split, num_samples, timeout_seconds
+                )
+            else:
+                return self._create_unknown_result(f"Unsupported source: {source}")
+            
+            if not samples:
+                return self._create_unknown_result(
+                    f"Could not fetch samples from {source}:{dataset_id}. "
+                    "The dataset may not exist or requires authentication."
+                )
+            
+            # Detect type from samples
+            return self._detect_from_samples(samples, len(samples), 0)
+            
+        except Exception as e:
+            logger.error(f"Error detecting hub dataset type: {e}")
+            return self._create_unknown_result(f"Error accessing {source} dataset: {str(e)}")
+    
+    def _sample_huggingface_dataset(
+        self,
+        dataset_id: str,
+        subset: Optional[str],
+        split: str,
+        num_samples: int,
+        timeout_seconds: int
+    ) -> List[Dict[str, Any]]:
+        """Stream samples from HuggingFace dataset."""
+        samples = []
+        try:
+            from datasets import load_dataset
+            
+            # Use streaming to avoid downloading entire dataset
+            load_kwargs = {
+                "path": dataset_id,
+                "split": split,
+                "streaming": True,
+                "trust_remote_code": True,
+            }
+            if subset:
+                load_kwargs["name"] = subset
+            
+            dataset = load_dataset(**load_kwargs)
+            
+            # Take only num_samples
+            for i, sample in enumerate(dataset):
+                if i >= num_samples:
+                    break
+                samples.append(dict(sample))
+            
+            logger.info(f"Sampled {len(samples)} rows from HuggingFace:{dataset_id}")
+            
+        except ImportError:
+            logger.error("datasets library not installed")
+        except Exception as e:
+            logger.error(f"Error sampling HuggingFace dataset {dataset_id}: {e}")
+        
+        return samples
+    
+    def _sample_modelscope_dataset(
+        self,
+        dataset_id: str,
+        subset: Optional[str],
+        split: str,
+        num_samples: int,
+        timeout_seconds: int
+    ) -> List[Dict[str, Any]]:
+        """Stream samples from ModelScope dataset."""
+        samples = []
+        try:
+            from modelscope.msdatasets import MsDataset
+            
+            load_kwargs = {
+                "dataset_name": dataset_id,
+                "split": split,
+            }
+            if subset:
+                load_kwargs["subset_name"] = subset
+            
+            dataset = MsDataset.load(**load_kwargs)
+            
+            # Take only num_samples
+            for i, sample in enumerate(dataset):
+                if i >= num_samples:
+                    break
+                samples.append(dict(sample))
+            
+            logger.info(f"Sampled {len(samples)} rows from ModelScope:{dataset_id}")
+            
+        except ImportError:
+            logger.error("modelscope library not installed")
+        except Exception as e:
+            logger.error(f"Error sampling ModelScope dataset {dataset_id}: {e}")
+        
+        return samples
 
 
 # Global instance

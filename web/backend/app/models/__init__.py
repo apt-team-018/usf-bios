@@ -12,7 +12,7 @@ from .schemas import (
 )
 
 from .db_models import (
-    Dataset, DatasetStatus, DatasetSource,
+    Dataset, DatasetStatus, DatasetSource, DatasetTypeEnum,
     RegisteredModel, ModelSource as ModelSourceDB,
     TrainingJob, JobStatus,
     TrainingMetric, Checkpoint, TrainingLog,

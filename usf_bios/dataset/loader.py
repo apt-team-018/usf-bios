@@ -20,6 +20,449 @@ from .register import DATASET_MAPPING, DatasetMeta, SubsetDataset
 logger = get_logger()
 
 
+def get_dataset_num_samples(
+    dataset_id: str,
+    split: str = "train",
+    subset: Optional[str] = None,
+    source: str = "huggingface",
+    fallback_stream_count: bool = True,
+    count_all: bool = False,
+    stream_count_limit: int = 100000,
+) -> Optional[int]:
+    """
+    Get the number of samples in a HuggingFace/ModelScope dataset.
+    
+    IMPORTANT: Not all datasets have metadata with num_examples!
+    This function tries multiple methods:
+    1. First, try to get from dataset metadata (fast, but not always available)
+    2. If metadata not available and fallback_stream_count=True, stream-count samples
+    3. Returns None only if all methods fail
+    
+    Args:
+        dataset_id: Dataset identifier (e.g., 'tatsu-lab/alpaca')
+        split: Dataset split to query (default: 'train')
+        subset: Optional subset/config name
+        source: 'huggingface' or 'modelscope'
+        fallback_stream_count: If True, count by streaming when metadata unavailable
+        count_all: If True, count ALL samples without limit (may take hours for huge datasets)
+        stream_count_limit: Max samples to count when streaming (ignored if count_all=True)
+        
+    Returns:
+        Number of samples if available, None if cannot determine
+        
+    Note:
+        - When count_all=True: Always returns exact count (may take long time)
+        - When count_all=False and metadata unavailable: returns minimum estimate
+    """
+    num_samples = None
+    metadata_available = False
+    
+    # ========== METHOD 1: Try to get from metadata (fast) ==========
+    if source == "huggingface":
+        try:
+            from datasets import load_dataset_builder
+            
+            builder_kwargs = {"path": dataset_id, "trust_remote_code": True}
+            if subset:
+                builder_kwargs["name"] = subset
+            
+            builder = load_dataset_builder(**builder_kwargs)
+            info = builder.info
+            
+            if info and info.splits and split in info.splits:
+                num_examples = info.splits[split].num_examples
+                if num_examples is not None and num_examples > 0:
+                    logger.info(f"[Metadata] Dataset '{dataset_id}' has {num_examples:,} samples in '{split}' split")
+                    return num_examples
+                else:
+                    logger.debug(f"Dataset '{dataset_id}' metadata exists but num_examples is None/0")
+            else:
+                logger.debug(f"Dataset '{dataset_id}' has no split info in metadata")
+                
+        except Exception as e:
+            logger.debug(f"Could not get HuggingFace metadata for {dataset_id}: {e}")
+    
+    elif source == "modelscope":
+        try:
+            from modelscope.msdatasets import MsDataset
+            
+            # ModelScope: Try to get dataset info
+            # Note: ModelScope API may vary, this is best-effort
+            try:
+                from modelscope.hub.api import HubApi
+                api = HubApi()
+                dataset_info = api.get_dataset(dataset_id)
+                if hasattr(dataset_info, 'num_samples') and dataset_info.num_samples:
+                    logger.info(f"[Metadata] ModelScope '{dataset_id}' has {dataset_info.num_samples:,} samples")
+                    return dataset_info.num_samples
+            except Exception:
+                pass
+                
+        except ImportError:
+            logger.debug("ModelScope not installed")
+        except Exception as e:
+            logger.debug(f"Could not get ModelScope metadata for {dataset_id}: {e}")
+    
+    # ========== METHOD 2: Fallback - stream and count ==========
+    if fallback_stream_count and num_samples is None:
+        effective_limit = None if count_all else stream_count_limit
+        limit_msg = "no limit - counting ALL" if count_all else f"limit: {stream_count_limit:,}"
+        logger.info(f"Metadata not available for '{dataset_id}', counting by streaming ({limit_msg})...")
+        
+        try:
+            count = 0
+            last_log = 0
+            
+            if source == "huggingface":
+                from datasets import load_dataset as hf_load
+                
+                load_kwargs = {
+                    "path": dataset_id,
+                    "split": split,
+                    "streaming": True,
+                    "trust_remote_code": True,
+                }
+                if subset:
+                    load_kwargs["name"] = subset
+                
+                ds = hf_load(**load_kwargs)
+                for _ in ds:
+                    count += 1
+                    # Progress logging for large counts
+                    if count_all and count - last_log >= 1_000_000:
+                        logger.info(f"  Counting... {count:,} samples so far")
+                        last_log = count
+                    if not count_all and count >= stream_count_limit:
+                        logger.warning(
+                            f"Dataset '{dataset_id}' has >= {stream_count_limit:,} samples. "
+                            f"Stopped at limit. Set count_all=True to count ALL samples."
+                        )
+                        break
+                        
+            elif source == "modelscope":
+                from modelscope.msdatasets import MsDataset
+                
+                load_kwargs = {"dataset_name": dataset_id, "split": split}
+                if subset:
+                    load_kwargs["subset_name"] = subset
+                
+                ds = MsDataset.load(**load_kwargs)
+                for _ in ds:
+                    count += 1
+                    if count_all and count - last_log >= 1_000_000:
+                        logger.info(f"  Counting... {count:,} samples so far")
+                        last_log = count
+                    if not count_all and count >= stream_count_limit:
+                        logger.warning(
+                            f"ModelScope '{dataset_id}' has >= {stream_count_limit:,} samples. "
+                            f"Stopped at limit. Set count_all=True to count ALL samples."
+                        )
+                        break
+            
+            if count > 0:
+                is_exact = count_all or count < stream_count_limit
+                if is_exact:
+                    logger.info(f"✓ [Stream-count] Dataset '{dataset_id}' has exactly {count:,} samples")
+                else:
+                    logger.info(f"⚠ [Stream-count] Dataset '{dataset_id}' has >= {count:,} samples (limit reached)")
+                return count
+                
+        except Exception as e:
+            logger.warning(f"Failed to stream-count dataset {dataset_id}: {e}")
+    
+    return None
+
+
+def count_local_dataset_samples(
+    dataset_path: str,
+    max_count: Optional[int] = None,
+    show_progress: bool = True,
+) -> int:
+    """
+    Count samples in a local dataset file by streaming through it.
+    
+    For massive datasets (100TB+, billions of rows), this provides an accurate 
+    count without loading the full dataset into memory.
+    
+    Supports: JSONL, JSON, CSV, TXT, Parquet
+    
+    Args:
+        dataset_path: Path to local dataset file
+        max_count: Stop counting after this many samples (for estimation)
+        show_progress: Log progress for large files
+        
+    Returns:
+        Number of samples counted (0 if error)
+        
+    Example:
+        >>> # Count all samples in a 100TB JSONL file
+        >>> total = count_local_dataset_samples('/data/massive_dataset.jsonl')
+        >>> print(f"Total samples: {total:,}")  # e.g., 50,000,000,000
+    """
+    if not os.path.exists(dataset_path):
+        logger.error(f"File not found: {dataset_path}")
+        return 0
+    
+    count = 0
+    ext = os.path.splitext(dataset_path)[1].lower()
+    file_size = os.path.getsize(dataset_path)
+    file_size_gb = file_size / (1024 ** 3)
+    
+    logger.info(f"Counting samples in {dataset_path} ({file_size_gb:.2f} GB)...")
+    
+    try:
+        # ========== JSONL - Line counting (fastest) ==========
+        if ext == '.jsonl':
+            with open(dataset_path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    if line.strip() and line.strip() != '':
+                        count += 1
+                        if max_count and count >= max_count:
+                            break
+                    # Progress logging for large files
+                    if show_progress and count % 10_000_000 == 0:
+                        logger.info(f"  Counted {count:,} samples so far...")
+        
+        # ========== JSON - Must parse (limited to 2GB files) ==========
+        elif ext == '.json':
+            import json
+            if file_size_gb > 2.0:
+                logger.warning(f"JSON file is {file_size_gb:.1f}GB - may run out of memory. Use JSONL for large files.")
+            with open(dataset_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                count = len(data) if isinstance(data, list) else 1
+        
+        # ========== CSV - Row counting ==========
+        elif ext == '.csv':
+            with open(dataset_path, 'r', encoding='utf-8', errors='ignore') as f:
+                # Skip header
+                next(f, None)
+                for line in f:
+                    if line.strip():
+                        count += 1
+                        if max_count and count >= max_count:
+                            break
+                    if show_progress and count % 10_000_000 == 0:
+                        logger.info(f"  Counted {count:,} samples so far...")
+        
+        # ========== TXT - Line counting ==========
+        elif ext == '.txt':
+            with open(dataset_path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    if line.strip():
+                        count += 1
+                        if max_count and count >= max_count:
+                            break
+                    if show_progress and count % 10_000_000 == 0:
+                        logger.info(f"  Counted {count:,} samples so far...")
+        
+        # ========== Parquet - Use pyarrow for row count ==========
+        elif ext == '.parquet':
+            try:
+                import pyarrow.parquet as pq
+                parquet_file = pq.ParquetFile(dataset_path)
+                count = parquet_file.metadata.num_rows
+                logger.info(f"  Parquet metadata: {count:,} rows")
+            except ImportError:
+                logger.warning("pyarrow not installed, cannot count Parquet rows")
+            except Exception as e:
+                logger.warning(f"Error reading Parquet metadata: {e}")
+        
+        # ========== Other formats - Use HuggingFace datasets ==========
+        else:
+            try:
+                from datasets import load_dataset as hf_load
+                ds = hf_load(ext.lstrip('.'), data_files=dataset_path, split='train', streaming=True)
+                for _ in ds:
+                    count += 1
+                    if max_count and count >= max_count:
+                        break
+                    if show_progress and count % 1_000_000 == 0:
+                        logger.info(f"  Counted {count:,} samples so far...")
+            except Exception as e:
+                logger.warning(f"Could not count using HuggingFace datasets: {e}")
+        
+        if count > 0:
+            logger.info(f"✓ Total samples in {os.path.basename(dataset_path)}: {count:,}")
+        
+    except Exception as e:
+        logger.error(f"Error counting samples in {dataset_path}: {e}")
+        
+    return count
+
+
+def count_dataset_samples(
+    dataset_path: str,
+    streaming: bool = True,
+    max_count: Optional[int] = None,
+) -> int:
+    """
+    DEPRECATED: Use count_local_dataset_samples() instead.
+    
+    This function is kept for backward compatibility.
+    """
+    return count_local_dataset_samples(dataset_path, max_count=max_count)
+
+
+def get_multiple_datasets_sample_info(
+    dataset_paths: List[str],
+    count_all: bool = False,
+    stream_count_limit: int = 100000,
+) -> Dict[str, Any]:
+    """
+    Get sample count information for multiple datasets.
+    
+    Handles the case where some datasets have known counts and others don't.
+    
+    Args:
+        dataset_paths: List of dataset paths (local paths or HF::id/MS::id format)
+        count_all: If True, count ALL samples (may take hours)
+        stream_count_limit: Limit for streaming count per dataset
+        
+    Returns:
+        Dictionary with:
+        - 'datasets': List of dicts with path, count, count_type ('exact', 'estimate', 'unknown')
+        - 'total_known': Sum of all known counts
+        - 'all_counts_known': True if all datasets have exact counts
+        - 'has_unknown': True if any dataset has unknown count
+        - 'recommendation': Suggested training strategy
+        
+    Example:
+        >>> info = get_multiple_datasets_sample_info([
+        ...     '/data/local.jsonl',
+        ...     'HF::tatsu-lab/alpaca',
+        ...     'HF::unknown-dataset/no-metadata'
+        ... ])
+        >>> if info['has_unknown']:
+        ...     print("Some datasets have unknown counts")
+        ...     print(f"Recommendation: {info['recommendation']}")
+    """
+    results = {
+        'datasets': [],
+        'total_known': 0,
+        'all_counts_known': True,
+        'has_unknown': False,
+        'recommendation': None,
+    }
+    
+    for path in dataset_paths:
+        ds_info = {'path': path, 'count': None, 'count_type': 'unknown'}
+        
+        # Parse path to determine source
+        if path.upper().startswith('HF::'):
+            # HuggingFace dataset
+            dataset_id = path[4:]
+            count = get_dataset_num_samples(
+                dataset_id, 
+                source='huggingface',
+                count_all=count_all,
+                stream_count_limit=stream_count_limit
+            )
+            if count is not None:
+                ds_info['count'] = count
+                ds_info['count_type'] = 'exact' if count_all else 'estimate'
+                results['total_known'] += count
+            else:
+                ds_info['count_type'] = 'unknown'
+                results['all_counts_known'] = False
+                results['has_unknown'] = True
+                
+        elif path.upper().startswith('MS::'):
+            # ModelScope dataset
+            dataset_id = path[4:]
+            count = get_dataset_num_samples(
+                dataset_id,
+                source='modelscope',
+                count_all=count_all,
+                stream_count_limit=stream_count_limit
+            )
+            if count is not None:
+                ds_info['count'] = count
+                ds_info['count_type'] = 'exact' if count_all else 'estimate'
+                results['total_known'] += count
+            else:
+                ds_info['count_type'] = 'unknown'
+                results['all_counts_known'] = False
+                results['has_unknown'] = True
+                
+        else:
+            # Local file - can always count exactly
+            if os.path.exists(path):
+                count = count_local_dataset_samples(path)
+                ds_info['count'] = count
+                ds_info['count_type'] = 'exact'
+                results['total_known'] += count
+            else:
+                ds_info['count_type'] = 'unknown'
+                results['all_counts_known'] = False
+                results['has_unknown'] = True
+        
+        results['datasets'].append(ds_info)
+    
+    # Generate recommendation
+    if results['all_counts_known']:
+        results['recommendation'] = (
+            f"All {len(dataset_paths)} datasets have known counts. "
+            f"Total: {results['total_known']:,} samples. "
+            f"Can calculate exact max_steps."
+        )
+    elif results['has_unknown']:
+        unknown_count = sum(1 for d in results['datasets'] if d['count_type'] == 'unknown')
+        results['recommendation'] = (
+            f"{unknown_count}/{len(dataset_paths)} datasets have unknown sample counts. "
+            f"For streaming mode, set --max_steps manually or use count_all=True to get exact count first."
+        )
+    
+    logger.info(f"Multiple dataset sample info: {results['recommendation']}")
+    return results
+
+
+def calculate_max_steps_for_streaming(
+    num_samples: int,
+    num_epochs: float,
+    batch_size: int,
+    gradient_accumulation_steps: int = 1,
+    world_size: int = 1,
+) -> int:
+    """
+    Calculate max_steps for streaming training to cover all samples.
+    
+    This allows training on ALL samples without manually setting max_steps.
+    
+    Args:
+        num_samples: Total number of samples in dataset
+        num_epochs: Number of training epochs
+        batch_size: Per-device batch size
+        gradient_accumulation_steps: Gradient accumulation steps
+        world_size: Number of distributed processes
+        
+    Returns:
+        max_steps value to train on all samples for specified epochs
+        
+    Example:
+        >>> # 1 billion samples, 1 epoch, batch 8, 8 GPUs
+        >>> max_steps = calculate_max_steps_for_streaming(
+        ...     num_samples=1_000_000_000,
+        ...     num_epochs=1.0,
+        ...     batch_size=8,
+        ...     gradient_accumulation_steps=4,
+        ...     world_size=8
+        ... )
+        >>> print(f"max_steps: {max_steps:,}")  # 3,906,250 steps
+    """
+    total_batch_size = batch_size * gradient_accumulation_steps * world_size
+    steps_per_epoch = num_samples // total_batch_size
+    max_steps = int(steps_per_epoch * num_epochs)
+    
+    logger.info(
+        f"Calculated max_steps={max_steps:,} for {num_samples:,} samples, "
+        f"{num_epochs} epochs, batch_size={batch_size}, "
+        f"grad_accum={gradient_accumulation_steps}, world_size={world_size}"
+    )
+    
+    return max(max_steps, 1)
+
+
 class DatasetLoader(BaseDatasetLoader):
 
     def __init__(

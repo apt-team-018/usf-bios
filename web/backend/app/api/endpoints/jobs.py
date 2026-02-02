@@ -288,18 +288,35 @@ async def force_reset_stuck_training():
     
     This endpoint is used when training appears stuck (no progress for extended time).
     It will:
-    1. Stop any running training processes
-    2. Mark the current job as failed
-    3. Clear training state to allow new training
+    1. Kill ALL training processes (SFT, DPO, PPO, GRPO, RLHF, etc.)
+    2. Clear GPU VRAM and CPU memory
+    3. Mark the current job as failed
+    4. Clear training state to allow new training
+    
+    Returns:
+        - success: True if reset completed
+        - message: Human-readable status
+        - job_id: The job that was reset
+        - gpu_cleanup: Memory freed info (if available)
+        - warnings: Non-fatal issues encountered (if any)
     """
     from ...services.training_status_service import training_status_service
     
-    result = await training_status_service.force_reset_stuck_training()
-    
-    if not result["success"]:
-        raise HTTPException(status_code=400, detail=result["message"])
-    
-    return result
+    try:
+        result = await training_status_service.force_reset_stuck_training()
+        
+        if not result["success"]:
+            raise HTTPException(status_code=400, detail=result["message"])
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        _debug_log(f"Force reset failed with exception: {e}", level="ERROR")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Force reset failed: {str(e)}. Try stopping training manually or restart the server."
+        )
 
 
 @router.get("/{job_id}", response_model=JobResponse)

@@ -11,12 +11,20 @@ from pathlib import Path
 from typing import List, Literal, Optional
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from ...core.config import settings
 from ...core.capabilities import get_system_settings, get_validator
 from ...models.schemas import DatasetValidation
 from ...services.dataset_type_service import dataset_type_service, DatasetType, ModelType, FileFormatConfig
+from ...services.algorithm_compatibility import (
+    algorithm_compatibility_service,
+    ALGORITHM_REGISTRY,
+    DATASET_TYPE_CONFIGS,
+    TRAINING_TYPE_CONFIGS,
+    QUANTIZATION_CONFIGS,
+)
 
 router = APIRouter()
 
@@ -701,25 +709,15 @@ async def list_all_datasets():
                     dataset_type_display = type_info.display_name
                     compatible_methods = type_info.compatible_training_methods
                     total_samples = type_info.sample_count
-                except Exception:
-                    dataset_type = "unknown"
-                    dataset_type_display = "Unknown"
-                    compatible_methods = ["sft", "pt", "rlhf"]
-                    # Fallback sample counting
-                    try:
-                        if f.suffix.lower() == ".jsonl":
-                            with open(f, 'r', encoding='utf-8') as fp:
-                                total_samples = sum(1 for _ in fp)
-                        elif f.suffix.lower() == ".json":
-                            with open(f, 'r', encoding='utf-8') as fp:
-                                data = json.load(fp)
-                                if isinstance(data, list):
-                                    total_samples = len(data)
-                        elif f.suffix.lower() == ".csv":
-                            with open(f, 'r', encoding='utf-8') as fp:
-                                total_samples = sum(1 for _ in fp) - 1
-                    except Exception:
-                        pass
+                except Exception as e:
+                    # STRICT: Skip unknown datasets - they should not be listed
+                    logger.warning(f"Skipping dataset {f.name}: type detection failed - {e}")
+                    continue
+                
+                # STRICT: Skip datasets with unknown type
+                if dataset_type == "unknown" or type_info.dataset_type.value == "unknown":
+                    logger.warning(f"Skipping dataset {f.name}: unknown type not allowed")
+                    continue
                 
                 all_datasets.append({
                     "id": f"upload_{f.name}",
@@ -747,11 +745,19 @@ async def list_all_datasets():
                     ds["dataset_type"] = type_info.dataset_type.value
                     ds["dataset_type_display"] = type_info.display_name
                     ds["compatible_training_methods"] = type_info.compatible_training_methods
-                except Exception:
-                    ds["dataset_type"] = "unknown"
-                    ds["dataset_type_display"] = "Unknown"
-                    ds["compatible_training_methods"] = ["sft", "pt", "rlhf"]
-            all_datasets.append(ds)
+                except Exception as e:
+                    # STRICT: Skip registered datasets with unknown type
+                    logger.warning(f"Skipping registered dataset {ds.get('name', 'unknown')}: type detection failed - {e}")
+                    continue
+                
+                # STRICT: Skip datasets with unknown type
+                if ds.get("dataset_type") == "unknown":
+                    logger.warning(f"Skipping registered dataset {ds.get('name', 'unknown')}: unknown type not allowed")
+                    continue
+            
+            # Only add if type is valid
+            if ds.get("dataset_type") != "unknown":
+                all_datasets.append(ds)
         
         # Sort by creation time (newest first)
         all_datasets.sort(key=lambda x: x.get("created_at", 0), reverse=True)
@@ -888,6 +894,174 @@ class TrainingValidationResponse(BaseModel):
     warnings: List[str]
 
 
+@router.get("/limits")
+async def get_dataset_limits():
+    """
+    Get dataset size limits and recommendations for different data sources.
+    
+    Returns comprehensive information about:
+    - Upload limits by method (direct, chunked, local path, hub)
+    - Recommended approach by dataset size
+    - Type detection method for each source
+    - Training recommendations for massive datasets
+    """
+    return {
+        "upload_limits": {
+            "direct_upload": {
+                "max_size_gb": 50,
+                "description": "Standard file upload - loads entire file into memory",
+                "recommended_for": "Datasets under 50GB",
+                "type_detection": "Samples first 100 rows from file"
+            },
+            "chunked_upload": {
+                "max_size_gb": 100,
+                "description": "Streaming upload - writes chunks to disk",
+                "recommended_for": "Datasets 50GB - 100GB",
+                "type_detection": "Samples first 100 rows from file"
+            },
+            "local_path": {
+                "max_size_gb": None,  # Unlimited
+                "max_size_display": "UNLIMITED",
+                "description": "Reference a local file path - no upload needed",
+                "recommended_for": "Datasets > 100GB, including 100TB+ datasets",
+                "type_detection": "Streams first 100 rows (memory-safe)"
+            },
+            "huggingface": {
+                "max_size_gb": None,  # Unlimited
+                "max_size_display": "UNLIMITED",
+                "description": "Stream from HuggingFace Hub - no download needed",
+                "recommended_for": "Any size - especially large public datasets",
+                "type_detection": "Streams 10 samples only (fast)"
+            },
+            "modelscope": {
+                "max_size_gb": None,  # Unlimited
+                "max_size_display": "UNLIMITED",
+                "description": "Stream from ModelScope - no download needed",
+                "recommended_for": "Any size - especially Chinese/Asian datasets",
+                "type_detection": "Streams 10 samples only (fast)"
+            }
+        },
+        "recommendations_by_size": [
+            {
+                "size_range": "< 50GB",
+                "recommended_method": "direct_upload",
+                "reason": "Simple and fast for smaller datasets"
+            },
+            {
+                "size_range": "50GB - 100GB",
+                "recommended_method": "chunked_upload OR local_path",
+                "reason": "Chunked upload streams to disk; local path avoids upload entirely"
+            },
+            {
+                "size_range": "100GB - 1TB",
+                "recommended_method": "local_path",
+                "reason": "Too large for upload - reference local file directly"
+            },
+            {
+                "size_range": "1TB - 100TB+",
+                "recommended_method": "local_path OR huggingface/modelscope",
+                "reason": "Massive datasets must use streaming - never fully loaded into memory"
+            },
+            {
+                "size_range": "Billions of rows",
+                "recommended_method": "local_path (JSONL) OR huggingface/modelscope",
+                "reason": "Use --streaming=true flag during training, set --max_steps"
+            }
+        ],
+        "training_recommendations": {
+            "massive_datasets": {
+                "format": "JSONL (required for streaming)",
+                "flags": [
+                    "--streaming true",
+                    "--max_steps <number>",
+                    "--shuffle_buffer_size 10000"
+                ],
+                "notes": [
+                    "Dataset length unknown with streaming - must set max_steps",
+                    "Shuffle buffer controls memory usage during randomization",
+                    "Type detection always uses streaming (10-100 samples only)"
+                ]
+            }
+        },
+        "type_detection": {
+            "method": "Sample-based (memory-safe)",
+            "samples_for_local": 100,
+            "samples_for_hub": 10,
+            "note": "Type detection NEVER loads full dataset regardless of size"
+        }
+    }
+
+
+@router.get("/detect-hub-type")
+async def detect_hub_dataset_type(
+    dataset_id: str = Query(..., description="HuggingFace or ModelScope dataset ID"),
+    source: str = Query("huggingface", description="Source: 'huggingface' or 'modelscope'"),
+    subset: Optional[str] = Query(None, description="Optional subset/config name"),
+    split: str = Query("train", description="Split to sample from"),
+    num_samples: int = Query(10, description="Number of samples to fetch for detection")
+):
+    """
+    Detect dataset type from HuggingFace or ModelScope by streaming a small sample.
+    
+    Downloads only the first N samples (default: 10) to detect the dataset type
+    WITHOUT downloading the entire dataset. This allows:
+    1. Immediate type detection for showing available training options
+    2. Validation before registering the dataset
+    3. Fast feedback on dataset compatibility
+    
+    Example:
+    - /datasets/detect-hub-type?dataset_id=tatsu-lab/alpaca&source=huggingface
+    - /datasets/detect-hub-type?dataset_id=Anthropic/hh-rlhf&source=huggingface&subset=helpful-base
+    """
+    try:
+        if source not in ["huggingface", "modelscope"]:
+            raise HTTPException(status_code=400, detail="Source must be 'huggingface' or 'modelscope'")
+        
+        result = dataset_type_service.detect_hub_dataset_type(
+            dataset_id=dataset_id,
+            source=source,
+            subset=subset,
+            split=split,
+            num_samples=num_samples
+        )
+        
+        return {
+            "success": True,
+            "source": source,
+            "dataset_id": dataset_id,
+            "subset": subset,
+            "split": split,
+            "samples_fetched": result.sample_count,
+            "dataset_type": result.dataset_type.value,
+            "confidence": result.confidence,
+            "detected_fields": result.detected_fields,
+            "compatible_training_methods": result.compatible_training_methods,
+            "incompatible_training_methods": result.incompatible_training_methods,
+            "compatible_rlhf_types": result.compatible_rlhf_types,
+            "display_name": result.display_name,
+            "message": result.message,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        # STRICT: Return error with no compatible methods - dataset cannot be used
+        return {
+            "success": False,
+            "source": source,
+            "dataset_id": dataset_id,
+            "error": str(e),
+            "dataset_type": "error",
+            "confidence": 0.0,
+            "detected_fields": [],
+            "compatible_training_methods": [],  # NO methods allowed
+            "incompatible_training_methods": list({"sft", "pt", "rlhf"}),  # ALL blocked (derived from empty compatible)
+            "compatible_rlhf_types": [],
+            "display_name": "Error - Cannot Use",
+            "message": f"Dataset type detection failed. Cannot use this dataset: {str(e)}",
+            "is_valid": False,
+        }
+
+
 @router.get("/detect-type", response_model=DatasetTypeResponse)
 async def detect_dataset_type(dataset_path: str = Query(..., description="Path to dataset file")):
     """
@@ -921,17 +1095,10 @@ async def detect_dataset_type(dataset_path: str = Query(..., description="Path t
             validation_warnings=result.validation_warnings,
         )
     except Exception as e:
-        return DatasetTypeResponse(
-            dataset_type="unknown",
-            confidence=0.0,
-            detected_fields=[],
-            sample_count=0,
-            compatible_training_methods=["sft", "pt", "rlhf"],
-            incompatible_training_methods=[],
-            compatible_rlhf_types=[],
-            display_name="Unknown",
-            message=f"Error detecting dataset type: {str(e)}",
-            validation_errors=[str(e)],
+        # STRICT: Return error with no compatible methods - dataset cannot be used
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dataset type detection failed. This dataset cannot be used: {str(e)}"
         )
 
 
@@ -1133,14 +1300,15 @@ async def validate_training_config(request: TrainingValidationRequest):
         )
     
     except Exception as e:
+        # STRICT: Return error with no compatible methods
         return TrainingValidationResponse(
             valid=False,
-            message=f"Validation error: {str(e)}",
-            dataset_type="unknown",
+            message=f"Validation error: {str(e)}. Dataset cannot be used.",
+            dataset_type="error",
             model_type=None,
-            compatible_methods=["sft", "pt", "rlhf"],
-            incompatible_methods=[],
-            warnings=[],
+            compatible_methods=[],  # NO methods allowed
+            incompatible_methods=["sft", "pt", "rlhf"],  # ALL blocked
+            warnings=["Dataset type detection failed. Please use a supported format."],
         )
 
 
@@ -1158,14 +1326,11 @@ async def detect_dataset_types_bulk(
         path_list = [p.strip() for p in paths.split(",") if p.strip()]
         
         if not path_list:
-            return {
-                "datasets": [],
-                "combined_compatible_methods": ["sft", "pt", "rlhf"],
-                "combined_incompatible_methods": [],
-                "all_same_type": True,
-                "detected_type": "unknown",
-                "message": "No datasets provided"
-            }
+            # STRICT: No datasets = error, not allowed
+            raise HTTPException(
+                status_code=400,
+                detail="No datasets provided. At least one valid dataset is required."
+            )
         
         results = []
         types_found = set()
@@ -1213,15 +1378,14 @@ async def detect_dataset_types_bulk(
             "message": message
         }
     
+    except HTTPException:
+        raise
     except Exception as e:
-        return {
-            "datasets": [],
-            "combined_compatible_methods": ["sft", "pt", "rlhf"],
-            "combined_incompatible_methods": [],
-            "all_same_type": True,
-            "detected_type": "unknown",
-            "message": f"Error: {str(e)}"
-        }
+        # STRICT: Return error with no compatible methods
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dataset type detection failed: {str(e)}. Please ensure all datasets have a supported format."
+        )
 
 
 @router.get("/supported-formats")
@@ -1240,3 +1404,437 @@ async def get_supported_formats():
     - Parquet: UNLIMITED size, chunked reading, efficient columnar format
     """
     return dataset_type_service.get_supported_formats()
+
+
+# ============================================================
+# ALGORITHM COMPATIBILITY ENDPOINTS
+# ============================================================
+
+@router.get("/algorithm-compatibility")
+async def get_algorithm_compatibility():
+    """
+    Get complete algorithm compatibility information.
+    
+    Returns all dataset types, algorithms, training types, and quantization options
+    with their compatibility relationships. Used by frontend for dynamic UI filtering.
+    """
+    return {
+        "dataset_types": algorithm_compatibility_service.get_all_dataset_types(),
+        "algorithms": algorithm_compatibility_service.get_all_algorithms(),
+        "training_types": algorithm_compatibility_service.get_all_training_types(),
+        "quantizations": algorithm_compatibility_service.get_all_quantizations(),
+    }
+
+
+@router.get("/compatible-algorithms/{dataset_type}")
+async def get_compatible_algorithms(dataset_type: str):
+    """
+    Get algorithms compatible with a specific dataset type.
+    
+    Args:
+        dataset_type: One of 'sft', 'rlhf_offline', 'rlhf_online', 'kto', 'pt'
+    
+    Returns:
+        List of compatible algorithm configurations
+    """
+    algorithms = algorithm_compatibility_service.get_compatible_algorithms(dataset_type)
+    methods = algorithm_compatibility_service.get_compatible_training_methods(dataset_type)
+    
+    ds_config = DATASET_TYPE_CONFIGS.get(dataset_type)
+    
+    return {
+        "dataset_type": dataset_type,
+        "display_name": ds_config.display_name if ds_config else dataset_type,
+        "description": ds_config.description if ds_config else "",
+        "compatible_training_methods": methods,
+        "compatible_algorithms": algorithms,
+        "is_rlhf": "rlhf" in methods,
+    }
+
+
+class TrainingConfigValidation(BaseModel):
+    """Request model for training configuration validation"""
+    dataset_type: str
+    training_method: str
+    rlhf_algorithm: Optional[str] = None
+    training_type: str = "lora"
+    quantization: str = "none"
+
+
+@router.post("/validate-training-config")
+async def validate_training_config(config: TrainingConfigValidation):
+    """
+    Validate a complete training configuration before starting training.
+    
+    Checks:
+    1. Dataset type compatibility with training method
+    2. RLHF algorithm compatibility with dataset type
+    3. Training type compatibility with algorithm
+    4. Quantization compatibility with training type
+    
+    Returns:
+        - valid: Whether the configuration is valid
+        - errors: List of blocking errors
+        - warnings: List of non-blocking warnings
+        - suggestions: List of improvement suggestions
+    """
+    result = algorithm_compatibility_service.validate_training_config(
+        dataset_type=config.dataset_type,
+        training_method=config.training_method,
+        rlhf_algorithm=config.rlhf_algorithm,
+        training_type=config.training_type,
+        quantization=config.quantization,
+    )
+    
+    return result
+
+
+# ============================================================
+# SAMPLE DATASET ENDPOINTS
+# ============================================================
+
+# Sample datasets directory
+SAMPLE_DATASETS_DIR = Path(__file__).parent.parent.parent.parent.parent.parent / "examples" / "sample_datasets"
+
+SAMPLE_DATASET_INFO = {
+    # ========== SFT - MESSAGES FORMAT ==========
+    "sft_messages": {
+        "filename": "sft_messages.jsonl",
+        "display_name": "SFT - Messages Format",
+        "description": "Standard chat format with system/user/assistant messages. Most common format for instruction tuning.",
+        "format_description": "Messages array with role (system/user/assistant) and content pairs.",
+        "format_example": '{"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}',
+        "compatible_methods": ["sft"],
+        "compatible_algorithms": [],
+        "usf_bios_verified": True,
+    },
+    
+    # ========== SFT - ALPACA FORMAT ==========
+    "sft_alpaca": {
+        "filename": "sft_alpaca.jsonl",
+        "display_name": "SFT - Alpaca Format",
+        "description": "Instruction/Input/Output format popularized by Stanford Alpaca. Good for task-specific training.",
+        "format_description": "instruction (required), input (optional context), output (required response).",
+        "format_example": '{"instruction": "Summarize this text", "input": "Long text...", "output": "Summary..."}',
+        "compatible_methods": ["sft"],
+        "compatible_algorithms": [],
+        "usf_bios_verified": True,
+    },
+    
+    # ========== PRE-TRAINING ==========
+    "pt": {
+        "filename": "pt_raw_text.jsonl",
+        "display_name": "Pre-Training - Raw Text",
+        "description": "Raw text data for continued pre-training or domain adaptation. No instruction format needed.",
+        "format_description": "Single 'text' field containing raw text for language modeling.",
+        "format_example": '{"text": "This is raw text for pre-training..."}',
+        "compatible_methods": ["pt"],
+        "compatible_algorithms": [],
+        "usf_bios_verified": True,
+    },
+    
+    # ========== RLHF - PREFERENCE (SIMPLE) ==========
+    "rlhf_pref_simple": {
+        "filename": "rlhf_offline_preference.jsonl",
+        "display_name": "RLHF Preference - Simple (prompt/chosen/rejected)",
+        "description": "Simple preference format with prompt and chosen/rejected response strings. Common HuggingFace DPO format.",
+        "format_description": "prompt (question), chosen (good response), rejected (bad response).",
+        "format_example": '{"prompt": "Question?", "chosen": "Good answer", "rejected": "Bad answer"}',
+        "compatible_methods": ["rlhf"],
+        "compatible_algorithms": ["dpo", "orpo", "simpo", "cpo", "rm"],
+        "usf_bios_verified": True,
+    },
+    
+    # ========== RLHF - PREFERENCE (MESSAGES) ==========
+    "rlhf_pref_messages": {
+        "filename": "rlhf_pref_messages.jsonl",
+        "display_name": "RLHF Preference - Messages Format",
+        "description": "Preference pairs with full message arrays. Better for multi-turn conversations.",
+        "format_description": "messages (chosen conversation), rejected_messages (rejected conversation).",
+        "format_example": '{"messages": [...], "rejected_messages": [...]}',
+        "compatible_methods": ["rlhf"],
+        "compatible_algorithms": ["dpo", "orpo", "simpo", "cpo", "rm"],
+        "usf_bios_verified": True,
+    },
+    
+    # ========== RLHF - KTO (BINARY) ==========
+    "rlhf_kto": {
+        "filename": "kto_messages.jsonl",
+        "display_name": "RLHF KTO - Binary Feedback",
+        "description": "Binary feedback with messages + label. Each sample is either desirable (true) or undesirable (false).",
+        "format_description": "messages array + label (true/false or 1/0).",
+        "format_example": '{"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}], "label": true}',
+        "compatible_methods": ["rlhf"],
+        "compatible_algorithms": ["kto"],
+        "usf_bios_verified": True,
+    },
+    
+    # ========== RLHF - KTO (LEGACY) ==========
+    "rlhf_kto_legacy": {
+        "filename": "rlhf_binary_feedback.jsonl",
+        "display_name": "RLHF KTO - Legacy Format",
+        "description": "Legacy KTO format with prompt/completion/label. Older format still supported.",
+        "format_description": "prompt, completion, and boolean label.",
+        "format_example": '{"prompt": "...", "completion": "...", "label": true}',
+        "compatible_methods": ["rlhf"],
+        "compatible_algorithms": ["kto"],
+        "usf_bios_verified": True,
+    },
+    
+    # ========== RLHF - ONLINE ==========
+    "rlhf_online": {
+        "filename": "rlhf_online_prompt.jsonl",
+        "display_name": "RLHF Online - Prompts Only (PPO/GRPO/GKD)",
+        "description": "Prompts only - model generates responses during training. Used with reward models or functions.",
+        "format_description": "Just prompts - model generates completions during training.",
+        "format_example": '{"prompt": "Write a poem about..."} or {"messages": [{"role": "user", "content": "..."}]}',
+        "compatible_methods": ["rlhf"],
+        "compatible_algorithms": ["ppo", "grpo", "gkd"],
+        "usf_bios_verified": True,
+    },
+}
+
+
+# Documentation directory
+SAMPLE_DOCS_DIR = SAMPLE_DATASETS_DIR / "docs"
+
+# Documentation file mapping
+SAMPLE_DOCS_MAP = {
+    "sft_messages": "sft_messages.md",
+    "sft_alpaca": "sft_alpaca.md",
+    "pt": "pt_raw_text.md",
+    "rlhf_pref_simple": "rlhf_pref_simple.md",
+    "rlhf_pref_messages": "rlhf_pref_messages.md",
+    "rlhf_kto": "rlhf_kto.md",
+    "rlhf_kto_legacy": "rlhf_kto.md",  # Same doc for both KTO formats
+    "rlhf_online": "rlhf_online.md",
+}
+
+
+@router.get("/sample-datasets")
+async def get_sample_datasets():
+    """
+    Get information about available sample datasets.
+    
+    Returns metadata for all sample datasets including:
+    - Dataset type and display name
+    - Description and format
+    - Compatible training methods and algorithms
+    - Sample preview (first few rows)
+    - Documentation availability
+    """
+    samples = []
+    
+    for dataset_type, info in SAMPLE_DATASET_INFO.items():
+        sample_path = SAMPLE_DATASETS_DIR / info["filename"]
+        
+        # Get sample preview
+        preview = []
+        if sample_path.exists():
+            try:
+                with open(sample_path, 'r', encoding='utf-8') as f:
+                    for i, line in enumerate(f):
+                        if i >= 2:  # Only first 2 samples for preview
+                            break
+                        preview.append(json.loads(line.strip()))
+            except Exception:
+                pass
+        
+        # Check for documentation
+        doc_file = SAMPLE_DOCS_MAP.get(dataset_type)
+        has_docs = doc_file and (SAMPLE_DOCS_DIR / doc_file).exists()
+        
+        samples.append({
+            "type": dataset_type,
+            "filename": info["filename"],
+            "display_name": info["display_name"],
+            "description": info["description"],
+            "format_description": info["format_description"],
+            "format_example": info.get("format_example", ""),
+            "compatible_methods": info["compatible_methods"],
+            "compatible_algorithms": info["compatible_algorithms"],
+            "usf_bios_verified": info.get("usf_bios_verified", False),
+            "preview": preview,
+            "download_available": sample_path.exists(),
+            "documentation_available": has_docs,
+        })
+    
+    return {
+        "samples": samples,
+        "total": len(samples),
+    }
+
+
+@router.get("/sample-datasets/{dataset_type}")
+async def get_sample_dataset_info(dataset_type: str):
+    """
+    Get detailed information about a specific sample dataset.
+    
+    Args:
+        dataset_type: One of 'sft', 'rlhf_offline', 'rlhf_online', 'kto', 'pt'
+    """
+    if dataset_type not in SAMPLE_DATASET_INFO:
+        raise HTTPException(status_code=404, detail=f"Sample dataset not found for type: {dataset_type}")
+    
+    info = SAMPLE_DATASET_INFO[dataset_type]
+    sample_path = SAMPLE_DATASETS_DIR / info["filename"]
+    
+    # Get full content preview (up to 10 samples)
+    preview = []
+    total_samples = 0
+    if sample_path.exists():
+        try:
+            with open(sample_path, 'r', encoding='utf-8') as f:
+                for i, line in enumerate(f):
+                    total_samples += 1
+                    if i < 10:
+                        preview.append(json.loads(line.strip()))
+        except Exception:
+            pass
+    
+    # Get algorithm details for RLHF types
+    algorithm_details = []
+    for algo_id in info["compatible_algorithms"]:
+        algo_config = ALGORITHM_REGISTRY.get(algo_id)
+        if algo_config:
+            algorithm_details.append({
+                "id": algo_id,
+                "name": algo_config.name,
+                "description": algo_config.description,
+                "category": algo_config.category,
+                "sample_format": algo_config.sample_format,
+            })
+    
+    return {
+        "id": dataset_type,
+        "filename": info["filename"],
+        "display_name": info["display_name"],
+        "description": info["description"],
+        "format_description": info["format_description"],
+        "compatible_methods": info["compatible_methods"],
+        "compatible_algorithms": info["compatible_algorithms"],
+        "algorithm_details": algorithm_details,
+        "preview": preview,
+        "total_samples": total_samples,
+        "download_available": sample_path.exists(),
+    }
+
+
+@router.get("/sample-datasets/{dataset_type}/download")
+async def download_sample_dataset(dataset_type: str):
+    """
+    Download a sample dataset file.
+    
+    Args:
+        dataset_type: One of 'sft', 'rlhf_offline', 'rlhf_online', 'kto', 'pt'
+    """
+    if dataset_type not in SAMPLE_DATASET_INFO:
+        raise HTTPException(status_code=404, detail=f"Sample dataset not found for type: {dataset_type}")
+    
+    info = SAMPLE_DATASET_INFO[dataset_type]
+    sample_path = SAMPLE_DATASETS_DIR / info["filename"]
+    
+    if not sample_path.exists():
+        raise HTTPException(status_code=404, detail=f"Sample file not found: {info['filename']}")
+    
+    return FileResponse(
+        path=str(sample_path),
+        filename=info["filename"],
+        media_type="application/jsonl",
+    )
+
+
+@router.get("/sample-datasets/{dataset_type}/docs")
+async def get_sample_dataset_documentation(dataset_type: str):
+    """
+    Get the full markdown documentation for a sample dataset format.
+    
+    Returns comprehensive documentation including:
+    - Format structure and required fields
+    - Compatible algorithms and training methods
+    - Use cases and recommendations
+    - Example data
+    - Training considerations
+    - Troubleshooting guide
+    
+    Args:
+        dataset_type: Dataset type identifier
+    """
+    doc_file = SAMPLE_DOCS_MAP.get(dataset_type)
+    if not doc_file:
+        raise HTTPException(status_code=404, detail=f"Documentation not found for type: {dataset_type}")
+    
+    doc_path = SAMPLE_DOCS_DIR / doc_file
+    if not doc_path.exists():
+        raise HTTPException(status_code=404, detail=f"Documentation file not found: {doc_file}")
+    
+    try:
+        with open(doc_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading documentation: {str(e)}")
+    
+    # Get basic info for context
+    info = SAMPLE_DATASET_INFO.get(dataset_type, {})
+    
+    return {
+        "dataset_type": dataset_type,
+        "display_name": info.get("display_name", dataset_type),
+        "documentation": content,
+        "format": "markdown",
+        "version": "1.0.0",
+    }
+
+
+@router.get("/sample-datasets-docs/overview")
+async def get_sample_datasets_overview_docs():
+    """
+    Get the overview/README documentation for all sample datasets.
+    
+    Returns the main README.md that explains all formats and the training pipeline.
+    """
+    readme_path = SAMPLE_DOCS_DIR / "README.md"
+    if not readme_path.exists():
+        raise HTTPException(status_code=404, detail="Overview documentation not found")
+    
+    try:
+        with open(readme_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading documentation: {str(e)}")
+    
+    return {
+        "title": "USF-BIOS Dataset Format Documentation",
+        "documentation": content,
+        "format": "markdown",
+        "version": "1.0.0",
+    }
+
+
+@router.get("/sample-format/{algorithm}")
+async def get_sample_format_for_algorithm(algorithm: str):
+    """
+    Get the expected dataset format for a specific RLHF algorithm.
+    
+    Args:
+        algorithm: One of 'dpo', 'orpo', 'simpo', 'kto', 'cpo', 'rm', 'ppo', 'grpo', 'gkd'
+    """
+    algo_config = ALGORITHM_REGISTRY.get(algorithm)
+    if not algo_config:
+        raise HTTPException(status_code=404, detail=f"Algorithm not found: {algorithm}")
+    
+    return {
+        "algorithm": algorithm,
+        "name": algo_config.name,
+        "description": algo_config.description,
+        "category": algo_config.category,
+        "required_fields": algo_config.required_fields,
+        "optional_fields": algo_config.optional_fields,
+        "sample_format": algo_config.sample_format,
+        "supports_full": algo_config.supports_full,
+        "supports_lora": algo_config.supports_lora,
+        "supports_qlora": algo_config.supports_qlora,
+        "requires_ref_model": algo_config.requires_ref_model,
+        "requires_reward_model": algo_config.requires_reward_model,
+        "requires_vllm": algo_config.requires_vllm,
+    }

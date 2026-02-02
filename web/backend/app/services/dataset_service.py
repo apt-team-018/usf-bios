@@ -1,5 +1,6 @@
 import csv
 import json
+import logging
 import os
 import shutil
 from datetime import datetime
@@ -7,16 +8,39 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
-from app.models.db_models import Dataset, DatasetStatus, DatasetSource, TrainingJob
+logger = logging.getLogger(__name__)
+
+from app.models.db_models import Dataset, DatasetStatus, DatasetSource, DatasetTypeEnum, TrainingJob
 from app.core.config import settings
 from app.services.system_encrypted_log_service import system_encrypted_log
+from app.services.dataset_type_service import dataset_type_service
 
 
 class DatasetService:
+    """
+    Dataset management service with support for massive datasets (100TB+, billions of rows).
+    
+    UPLOAD LIMITS:
+    -------------
+    - Direct Upload: 50GB max (loads into memory)
+    - Chunked Upload: 100GB max (streams to disk)
+    - Local Path: UNLIMITED (just reference path - recommended for massive datasets)
+    - HuggingFace/ModelScope: UNLIMITED (streams from hub)
+    
+    For datasets > 100GB, use LOCAL PATH or HuggingFace/ModelScope instead of upload.
+    Type detection uses streaming (samples only 10-100 rows) regardless of dataset size.
+    """
     
     STORAGE_PATH = os.getenv("DATASET_STORAGE_PATH", "/app/data/datasets")
     ALLOWED_FORMATS = {"json", "jsonl", "csv", "parquet", "txt"}
-    MAX_FILE_SIZE_MB = 10000
+    
+    # Upload limits
+    MAX_DIRECT_UPLOAD_GB = 50      # Direct upload (loads into memory)
+    MAX_CHUNKED_UPLOAD_GB = 100    # Chunked upload (streams to disk)
+    CHUNK_SIZE_MB = 100            # Chunk size for streaming uploads
+    
+    # Legacy compatibility
+    MAX_FILE_SIZE_MB = MAX_DIRECT_UPLOAD_GB * 1024  # 50GB in MB
     
     def __init__(self, db: Session):
         self.db = db
@@ -83,6 +107,63 @@ class DatasetService:
             dataset.num_samples = stats.get("num_samples")
             dataset.num_columns = stats.get("num_columns")
             dataset.column_info = stats.get("column_info")
+            
+            # ============================================================
+            # STRICT DATASET TYPE DETECTION - UNKNOWN TYPE NOT ALLOWED
+            # All datasets MUST be classified before upload is accepted
+            # ============================================================
+            type_info = None
+            type_error = None
+            
+            try:
+                type_info = dataset_type_service.detect_dataset_type(file_path)
+            except Exception as e:
+                type_error = str(e)
+                logger.error(f"Dataset type detection failed for uploaded file {file_name}: {e}")
+            
+            # STRICT: Reject datasets with unknown type
+            if type_info is None or type_info.dataset_type.value == DatasetTypeEnum.UNKNOWN.value:
+                # Clean up the uploaded file since we're rejecting it
+                try:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                    if os.path.exists(dataset_dir):
+                        shutil.rmtree(dataset_dir)
+                except Exception as cleanup_error:
+                    logger.warning(f"Failed to cleanup rejected dataset: {cleanup_error}")
+                
+                # Build helpful error message
+                error_msg = (
+                    f"Dataset type could not be determined for uploaded file '{file_name}'. "
+                    f"All datasets must have a recognized type (SFT, PT, RLHF_OFFLINE, RLHF_ONLINE, KTO). "
+                )
+                if type_error:
+                    error_msg += f"Detection error: {type_error}. "
+                if type_info and type_info.detected_fields:
+                    error_msg += f"Detected fields: {type_info.detected_fields}. "
+                error_msg += (
+                    "Please ensure your dataset has the correct format:\n"
+                    "- SFT: 'messages' array with role/content OR 'query'/'response' fields\n"
+                    "- PT (Pre-training): 'text' field\n"
+                    "- RLHF/DPO: 'prompt'/'chosen'/'rejected' fields\n"
+                    "- KTO: 'prompt'/'completion'/'label' fields"
+                )
+                
+                # Delete the database record
+                self.db.delete(dataset)
+                self.db.commit()
+                
+                raise ValueError(error_msg)
+            
+            # Type is valid - store it
+            dataset.dataset_type = type_info.dataset_type.value
+            dataset.dataset_type_confidence = type_info.confidence
+            dataset.compatible_training_methods = type_info.compatible_training_methods
+            dataset.compatible_rlhf_algorithms = type_info.compatible_rlhf_types
+            dataset.detected_fields = type_info.detected_fields
+            
+            logger.info(f"Dataset type detected: {type_info.dataset_type.value} (confidence: {type_info.confidence:.2f})")
+            
             dataset.status = DatasetStatus.READY.value
             
             # Log successful dataset upload (encrypted only)
@@ -247,6 +328,58 @@ class DatasetService:
             status=DatasetStatus.READY.value,
         )
         
+        # ============================================================
+        # STRICT DATASET TYPE DETECTION - UNKNOWN TYPE NOT ALLOWED
+        # All datasets MUST be classified before registration
+        # ============================================================
+        type_info = None
+        type_error = None
+        
+        try:
+            if source == DatasetSource.LOCAL.value and os.path.exists(source_id):
+                # Local path - detect from file
+                type_info = dataset_type_service.detect_dataset_type(source_id)
+            elif source in [DatasetSource.HUGGINGFACE.value, DatasetSource.MODELSCOPE.value]:
+                # HuggingFace/ModelScope - stream 10 samples to detect type
+                type_info = dataset_type_service.detect_hub_dataset_type(
+                    dataset_id=source_id,
+                    source=source,
+                    subset=subset,
+                    split=split or "train",
+                    num_samples=10
+                )
+        except Exception as e:
+            type_error = str(e)
+            logger.error(f"Dataset type detection failed for {source}:{source_id}: {e}")
+        
+        # STRICT: Reject datasets with unknown type
+        if type_info is None or type_info.dataset_type.value == DatasetTypeEnum.UNKNOWN.value:
+            error_msg = (
+                f"Dataset type could not be determined for '{source_id}'. "
+                f"All datasets must have a recognized type (SFT, PT, RLHF_OFFLINE, RLHF_ONLINE, KTO). "
+            )
+            if type_error:
+                error_msg += f"Detection error: {type_error}. "
+            if type_info and type_info.detected_fields:
+                error_msg += f"Detected fields: {type_info.detected_fields}. "
+            error_msg += (
+                "Please ensure your dataset has the correct format:\n"
+                "- SFT: 'messages' array with role/content OR 'query'/'response' fields\n"
+                "- PT (Pre-training): 'text' field\n"
+                "- RLHF/DPO: 'prompt'/'chosen'/'rejected' fields\n"
+                "- KTO: 'prompt'/'completion'/'label' fields"
+            )
+            raise ValueError(error_msg)
+        
+        # Type is valid - store it
+        dataset.dataset_type = type_info.dataset_type.value
+        dataset.dataset_type_confidence = type_info.confidence
+        dataset.compatible_training_methods = type_info.compatible_training_methods
+        dataset.compatible_rlhf_algorithms = type_info.compatible_rlhf_types
+        dataset.detected_fields = type_info.detected_fields
+        
+        logger.info(f"Dataset type detected: {type_info.dataset_type.value} (confidence: {type_info.confidence:.2f})")
+        
         self.db.add(dataset)
         self.db.commit()
         return dataset
@@ -266,13 +399,22 @@ class DatasetService:
                 "id": ds.id,
                 "name": ds.name,
                 "description": ds.description,
+                # Source information
                 "source": ds.source,
                 "source_id": ds.source_id,
                 "source_subset": ds.source_subset,
                 "source_split": ds.source_split,
+                # File information
                 "file_path": ds.file_path,
                 "file_format": ds.file_format,
                 "num_samples": ds.num_samples,
+                # Dataset type information
+                "dataset_type": ds.dataset_type,
+                "dataset_type_confidence": ds.dataset_type_confidence,
+                "compatible_training_methods": ds.compatible_training_methods,
+                "compatible_rlhf_algorithms": ds.compatible_rlhf_algorithms,
+                "detected_fields": ds.detected_fields,
+                # Status and metadata
                 "status": ds.status,
                 "created_at": ds.created_at.isoformat() if ds.created_at else None,
                 "is_external": ds.source in [DatasetSource.HUGGINGFACE.value, DatasetSource.MODELSCOPE.value],
