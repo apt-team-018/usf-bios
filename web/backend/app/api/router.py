@@ -2,7 +2,7 @@
 """API router - combines all endpoints"""
 
 from fastapi import APIRouter
-from .endpoints import jobs, models, datasets, health, inference, system
+from .endpoints import jobs, models, datasets, health, inference, system, iterative_training
 
 api_router = APIRouter()
 
@@ -12,3 +12,4 @@ api_router.include_router(datasets.router, prefix="/datasets", tags=["Datasets"]
 api_router.include_router(jobs.router, prefix="/jobs", tags=["Jobs"])
 api_router.include_router(inference.router, prefix="/inference", tags=["Inference"])
 api_router.include_router(system.router, tags=["System"])
+api_router.include_router(iterative_training.router, prefix="/iterative", tags=["Iterative Training"])

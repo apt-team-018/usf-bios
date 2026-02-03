@@ -1,0 +1,15 @@
+{"prompt": "What is 5 + 3?", "difficulty": "easy", "metadata": {"expected_answer": "8", "category": "arithmetic"}}
+{"prompt": "What is 12 - 7?", "difficulty": "easy", "metadata": {"expected_answer": "5", "category": "arithmetic"}}
+{"prompt": "What is 6 × 4?", "difficulty": "easy", "metadata": {"expected_answer": "24", "category": "arithmetic"}}
+{"prompt": "What is 20 ÷ 5?", "difficulty": "easy", "metadata": {"expected_answer": "4", "category": "arithmetic"}}
+{"prompt": "Solve: 3x = 15", "difficulty": "medium", "metadata": {"expected_answer": "5", "category": "algebra"}}
+{"prompt": "What is 25% of 200?", "difficulty": "medium", "metadata": {"expected_answer": "50", "category": "percentage"}}
+{"prompt": "Find the area of a circle with radius 7 (use π ≈ 3.14)", "difficulty": "medium", "metadata": {"expected_answer": "153.86", "category": "geometry"}}
+{"prompt": "Solve: 2x + 3 = 11", "difficulty": "medium", "metadata": {"expected_answer": "4", "category": "algebra"}}
+{"prompt": "Find the roots of x² - 5x + 6 = 0", "difficulty": "hard", "metadata": {"expected_answer": "2 and 3", "category": "algebra"}}
+{"prompt": "Calculate the compound interest on $1000 at 5% annual rate for 2 years.", "difficulty": "hard", "metadata": {"expected_answer": "102.50", "category": "finance"}}
+{"prompt": "Find the integral of f(x) = 2x + 3", "difficulty": "hard", "metadata": {"expected_answer": "x² + 3x + C", "category": "calculus"}}
+{"prompt": "Solve the system: x + y = 10, x - y = 4", "difficulty": "hard", "metadata": {"expected_answer": "x=7, y=3", "category": "algebra"}}
+{"prompt": "Prove that the sum of two odd numbers is always even.", "difficulty": "expert", "metadata": {"category": "proof"}}
+{"prompt": "Find the Taylor series expansion of e^x around x=0 up to the x³ term.", "difficulty": "expert", "metadata": {"expected_answer": "1 + x + x²/2 + x³/6", "category": "calculus"}}
+{"prompt": "Solve the differential equation: dy/dx = 2y, with y(0) = 1", "difficulty": "expert", "metadata": {"expected_answer": "y = e^(2x)", "category": "differential_equations"}}

@@ -1496,8 +1496,34 @@ async def validate_training_config(config: TrainingConfigValidation):
 # SAMPLE DATASET ENDPOINTS
 # ============================================================
 
-# Sample datasets directory
-SAMPLE_DATASETS_DIR = Path(__file__).parent.parent.parent.parent.parent.parent / "examples" / "sample_datasets"
+# Sample datasets directory - with fallback for Docker environments
+def _get_sample_datasets_dir() -> Path:
+    """Get sample datasets directory with multiple fallback paths."""
+    # Try relative path from this file first
+    relative_path = Path(__file__).parent.parent.parent.parent.parent.parent / "examples" / "sample_datasets"
+    if relative_path.exists():
+        return relative_path
+    
+    # Try environment variable
+    import os
+    env_path = os.environ.get("USF_SAMPLE_DATASETS_DIR")
+    if env_path and Path(env_path).exists():
+        return Path(env_path)
+    
+    # Try common Docker paths
+    docker_paths = [
+        Path("/app/examples/sample_datasets"),
+        Path("/workspace/examples/sample_datasets"),
+        Path("/usf-bios/examples/sample_datasets"),
+    ]
+    for path in docker_paths:
+        if path.exists():
+            return path
+    
+    # Fallback to relative path (may not exist but prevents crashes)
+    return relative_path
+
+SAMPLE_DATASETS_DIR = _get_sample_datasets_dir()
 
 SAMPLE_DATASET_INFO = {
     # ========== SFT - MESSAGES FORMAT ==========
@@ -1595,6 +1621,29 @@ SAMPLE_DATASET_INFO = {
         "compatible_algorithms": ["ppo", "grpo", "gkd"],
         "usf_bios_verified": True,
     },
+    
+    # ========== ITERATIVE SELF-TRAINING (ReST/STaR) ==========
+    "iterative_prompts": {
+        "filename": "iterative_prompts.jsonl",
+        "display_name": "Iterative Training - Prompts with Metadata",
+        "description": "Prompts for iterative self-training (ReST/STaR/Expert Iteration). Supports difficulty curriculum and verifiable answers.",
+        "format_description": "Prompts with optional difficulty level, expected answer (for rule-based verification), and metadata.",
+        "format_example": '{"prompt": "Solve: 2+2=?", "difficulty": "easy", "metadata": {"expected_answer": "4", "category": "math"}}',
+        "compatible_methods": ["rlhf", "iterative"],
+        "compatible_algorithms": ["rest", "star", "expert_iteration"],
+        "usf_bios_verified": True,
+    },
+    
+    "iterative_curriculum": {
+        "filename": "iterative_curriculum.jsonl",
+        "display_name": "Iterative Training - Curriculum Format",
+        "description": "Multi-difficulty dataset for curriculum-based iterative training. Model progresses from easy to hard problems.",
+        "format_description": "Prompts organized by difficulty with optional verification data for rule-based scoring.",
+        "format_example": '{"prompt": "...", "difficulty": "easy|medium|hard|expert", "metadata": {"expected_answer": "...", "test_cases": [...]}}',
+        "compatible_methods": ["rlhf", "iterative"],
+        "compatible_algorithms": ["rest", "star", "expert_iteration"],
+        "usf_bios_verified": True,
+    },
 }
 
 
@@ -1611,6 +1660,8 @@ SAMPLE_DOCS_MAP = {
     "rlhf_kto": "rlhf_kto.md",
     "rlhf_kto_legacy": "rlhf_kto.md",  # Same doc for both KTO formats
     "rlhf_online": "rlhf_online.md",
+    "iterative_prompts": "iterative_training.md",
+    "iterative_curriculum": "iterative_training.md",  # Same doc for both iterative formats
 }
 
 

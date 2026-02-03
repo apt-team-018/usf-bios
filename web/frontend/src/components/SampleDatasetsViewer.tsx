@@ -118,6 +118,7 @@ export default function SampleDatasetsViewer({ isOpen, onClose }: Props) {
       case 'sft': return 'bg-blue-100 text-blue-700 border-blue-200'
       case 'pt': return 'bg-green-100 text-green-700 border-green-200'
       case 'rlhf': return 'bg-purple-100 text-purple-700 border-purple-200'
+      case 'iterative': return 'bg-orange-100 text-orange-700 border-orange-200'
       default: return 'bg-slate-100 text-slate-700 border-slate-200'
     }
   }
@@ -133,6 +134,9 @@ export default function SampleDatasetsViewer({ isOpen, onClose }: Props) {
       ppo: 'bg-orange-100 text-orange-700',
       grpo: 'bg-lime-100 text-lime-700',
       gkd: 'bg-teal-100 text-teal-700',
+      rest: 'bg-indigo-100 text-indigo-700',
+      star: 'bg-sky-100 text-sky-700',
+      expert_iteration: 'bg-emerald-100 text-emerald-700',
     }
     return colors[algo] || 'bg-slate-100 text-slate-700'
   }
@@ -168,7 +172,7 @@ export default function SampleDatasetsViewer({ isOpen, onClose }: Props) {
                 Filter by Training Method
               </label>
               <div className="flex flex-wrap gap-1">
-                {['all', 'sft', 'pt', 'rlhf'].map(method => (
+                {['all', 'sft', 'pt', 'rlhf', 'iterative'].map(method => (
                   <button
                     key={method}
                     onClick={() => setFilterMethod(method)}
@@ -178,7 +182,7 @@ export default function SampleDatasetsViewer({ isOpen, onClose }: Props) {
                         : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
                     }`}
                   >
-                    {method === 'all' ? 'All' : method.toUpperCase()}
+                    {method === 'all' ? 'All' : method === 'iterative' ? 'Iterative' : method.toUpperCase()}
                   </button>
                 ))}
               </div>

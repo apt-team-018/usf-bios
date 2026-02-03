@@ -319,91 +319,6 @@ async def force_reset_stuck_training():
         )
 
 
-@router.get("/{job_id}", response_model=JobResponse)
-async def get_job(job_id: str, logs_limit: int = Query(100, ge=1, le=1000)):
-    """Get job status and logs"""
-    job = await job_manager.get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    logs = await job_manager.get_logs(job_id, last_n=logs_limit)
-    
-    return JobResponse(job=job, logs=logs)
-
-
-@router.get("/", response_model=List[JobInfo])
-async def list_jobs(
-    status: Optional[JobStatus] = Query(None, description="Filter by status"),
-    limit: int = Query(50, ge=1, le=100)
-):
-    """List all jobs"""
-    jobs = await job_manager.get_all_jobs()
-    
-    if status:
-        jobs = [j for j in jobs if j.status == status]
-    
-    # Sort by created_at descending
-    jobs.sort(key=lambda x: x.created_at, reverse=True)
-    
-    return jobs[:limit]
-
-
-@router.patch("/{job_id}/name")
-async def update_job_name(job_id: str, update: JobNameUpdate, db: Session = Depends(get_db)):
-    """Update the name of a training job"""
-    try:
-        service = JobService(db)
-        result = service.update_job_name(job_id, update.name)
-        return result
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Failed to update job name")
-
-
-@router.get("/{job_id}/delete-info")
-async def get_delete_info(job_id: str):
-    """Get information needed for delete confirmation (returns job name)"""
-    job = await job_manager.get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    return {
-        "job_id": job_id,
-        "job_name": job.name,
-        "status": job.status,
-        "can_delete": job.status != JobStatus.RUNNING,
-        "confirm_text": job.name  # User must type this to confirm deletion
-    }
-
-
-@router.delete("/{job_id}")
-async def delete_job(
-    job_id: str,
-    confirm: str = Query(..., description="Type the job NAME to confirm deletion")
-):
-    """Delete a job (only if not running). User must type the job name to confirm."""
-    job = await job_manager.get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    if job.status == JobStatus.RUNNING:
-        raise HTTPException(status_code=400, detail="Cannot delete a running job. Stop it first.")
-    
-    # Verify confirmation matches the job name
-    if confirm != job.name:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Confirmation failed. You must type '{job.name}' to delete this training."
-        )
-    
-    success = await job_manager.delete_job(job_id)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to delete job")
-    
-    return {"job_id": job_id, "job_name": job.name, "deleted": True}
-
-
 @router.get("/current")
 async def get_current_job():
     """Get the currently active/running training job if any.
@@ -545,6 +460,237 @@ async def debug_all_jobs():
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+@router.get("/history/all")
+async def get_training_history(
+    limit: int = Query(50, ge=1, le=200),
+    include_metrics: bool = Query(True),
+    db: Session = Depends(get_db)
+):
+    """Get training history with all past trainings.
+    
+    Returns a list of all training jobs with their final metrics,
+    output paths, and status. Ordered by creation date (newest first).
+    
+    IMPORTANT: Uses DATABASE for persistence, not in-memory job_manager.
+    This ensures training history survives server restarts.
+    """
+    from pathlib import Path
+    from ...core.capabilities import get_system_settings
+    from ...models.db_models import TrainingJob as DBTrainingJob
+    
+    try:
+        service = JobService(db)
+        
+        # ============================================================
+        # QUERY DATABASE for persistent training history
+        # This ensures history survives server restarts
+        # ============================================================
+        db_jobs = db.query(DBTrainingJob).order_by(
+            DBTrainingJob.created_at.desc()
+        ).limit(limit).all()
+        
+        # Also get in-memory jobs for currently running trainings
+        memory_jobs = await job_manager.get_all_jobs()
+        memory_job_ids = {j.job_id for j in memory_jobs}
+        
+        history = []
+        
+        # Process database jobs first (persistent history)
+        for db_job in db_jobs:
+            job_data = {
+                "job_id": db_job.id,
+                "job_name": db_job.name,
+                "status": db_job.status,
+                "created_at": db_job.created_at.isoformat() if db_job.created_at else None,
+                "started_at": db_job.started_at.isoformat() if db_job.started_at else None,
+                "completed_at": db_job.completed_at.isoformat() if db_job.completed_at else None,
+                "current_step": None,
+                "total_steps": None,
+                "error": db_job.error_message,
+            }
+            
+            # Add training config info from JSON
+            if db_job.training_config:
+                config = db_job.training_config
+                job_data["config"] = {
+                    "train_type": config.get("train_type", "lora"),
+                    "training_method": config.get("training_method", "sft"),
+                    "num_epochs": config.get("num_train_epochs", 1),
+                    "learning_rate": config.get("learning_rate", 5e-5),
+                    "batch_size": config.get("per_device_train_batch_size", 1),
+                }
+            
+            # Add output path info
+            output_dir = Path(db_job.output_dir) if db_job.output_dir else get_system_settings().OUTPUT_DIR / db_job.id
+            job_data["output_path"] = str(output_dir)
+            job_data["output_exists"] = output_dir.exists() if output_dir else False
+            
+            # Check for adapter/checkpoint files
+            if output_dir and output_dir.exists():
+                adapters = list(output_dir.glob("**/adapter_model.safetensors")) + list(output_dir.glob("**/adapter_model.bin"))
+                job_data["has_adapter"] = len(adapters) > 0
+                if adapters:
+                    job_data["adapter_path"] = str(adapters[0].parent)
+                
+                checkpoints = [d for d in output_dir.iterdir() if d.is_dir() and d.name.startswith("checkpoint-")]
+                job_data["checkpoint_count"] = len(checkpoints)
+            else:
+                job_data["has_adapter"] = False
+                job_data["checkpoint_count"] = 0
+            
+            # Add final metrics if requested
+            if include_metrics:
+                try:
+                    metrics = service.get_job_metrics(db_job.id, limit=1)
+                    if metrics:
+                        last_metric = metrics[-1]
+                        job_data["final_metrics"] = {
+                            "loss": last_metric.loss,
+                            "learning_rate": last_metric.learning_rate,
+                            "epoch": last_metric.epoch,
+                            "step": last_metric.step,
+                        }
+                    else:
+                        job_data["final_metrics"] = None
+                except Exception:
+                    job_data["final_metrics"] = None
+            
+            history.append(job_data)
+        
+        # Add in-memory jobs that aren't in DB yet (currently running)
+        db_job_ids = {j.id for j in db_jobs}
+        for mem_job in memory_jobs:
+            if mem_job.job_id not in db_job_ids:
+                job_data = {
+                    "job_id": mem_job.job_id,
+                    "job_name": mem_job.name,
+                    "status": mem_job.status.value if hasattr(mem_job.status, 'value') else str(mem_job.status),
+                    "created_at": mem_job.created_at.isoformat() if mem_job.created_at else None,
+                    "started_at": mem_job.started_at.isoformat() if mem_job.started_at else None,
+                    "completed_at": mem_job.completed_at.isoformat() if mem_job.completed_at else None,
+                    "current_step": mem_job.current_step,
+                    "total_steps": mem_job.total_steps,
+                    "error": mem_job.error,
+                    "config": None,
+                    "output_path": str(get_system_settings().OUTPUT_DIR / mem_job.job_id),
+                    "output_exists": False,
+                    "has_adapter": False,
+                    "checkpoint_count": 0,
+                    "final_metrics": None,
+                }
+                
+                if mem_job.config:
+                    train_type = mem_job.config.train_type.value if hasattr(mem_job.config.train_type, 'value') else str(mem_job.config.train_type)
+                    training_method = getattr(mem_job.config, 'training_method', None)
+                    method_value = training_method.value if hasattr(training_method, 'value') else 'sft'
+                    job_data["config"] = {
+                        "train_type": train_type,
+                        "training_method": method_value,
+                        "num_epochs": mem_job.config.num_train_epochs,
+                        "learning_rate": mem_job.config.learning_rate,
+                        "batch_size": mem_job.config.per_device_train_batch_size,
+                    }
+                
+                history.insert(0, job_data)  # Currently running jobs at top
+        
+        return {
+            "count": len(history),
+            "history": history
+        }
+    except Exception as e:
+        return {
+            "count": 0,
+            "history": [],
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+
+@router.get("/{job_id}", response_model=JobResponse)
+async def get_job(job_id: str, logs_limit: int = Query(100, ge=1, le=1000)):
+    """Get job status and logs"""
+    job = await job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    logs = await job_manager.get_logs(job_id, last_n=logs_limit)
+    
+    return JobResponse(job=job, logs=logs)
+
+
+@router.get("/", response_model=List[JobInfo])
+async def list_jobs(
+    status: Optional[JobStatus] = Query(None, description="Filter by status"),
+    limit: int = Query(50, ge=1, le=100)
+):
+    """List all jobs"""
+    jobs = await job_manager.get_all_jobs()
+    
+    if status:
+        jobs = [j for j in jobs if j.status == status]
+    
+    # Sort by created_at descending
+    jobs.sort(key=lambda x: x.created_at, reverse=True)
+    
+    return jobs[:limit]
+
+
+@router.patch("/{job_id}/name")
+async def update_job_name(job_id: str, update: JobNameUpdate, db: Session = Depends(get_db)):
+    """Update the name of a training job"""
+    try:
+        service = JobService(db)
+        result = service.update_job_name(job_id, update.name)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to update job name")
+
+
+@router.get("/{job_id}/delete-info")
+async def get_delete_info(job_id: str):
+    """Get information needed for delete confirmation (returns job name)"""
+    job = await job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    return {
+        "job_id": job_id,
+        "job_name": job.name,
+        "status": job.status,
+        "can_delete": job.status != JobStatus.RUNNING,
+        "confirm_text": job.name  # User must type this to confirm deletion
+    }
+
+
+@router.delete("/{job_id}")
+async def delete_job(
+    job_id: str,
+    confirm: str = Query(..., description="Type the job NAME to confirm deletion")
+):
+    """Delete a job (only if not running). User must type the job name to confirm."""
+    job = await job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    if job.status == JobStatus.RUNNING:
+        raise HTTPException(status_code=400, detail="Cannot delete a running job. Stop it first.")
+    
+    # Verify confirmation matches the job name
+    if confirm != job.name:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Confirmation failed. You must type '{job.name}' to delete this training."
+        )
+    
+    success = await job_manager.delete_job(job_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to delete job")
+    
+    return {"job_id": job_id, "job_name": job.name, "deleted": True}
 
 
 @router.get("/debug/{job_id}")
@@ -1577,152 +1723,6 @@ async def get_unified_metrics(
             "data_source": "error",
             "error": str(e),
             "metrics": []
-        }
-
-
-@router.get("/history/all")
-async def get_training_history(
-    limit: int = Query(50, ge=1, le=200),
-    include_metrics: bool = Query(True),
-    db: Session = Depends(get_db)
-):
-    """Get training history with all past trainings.
-    
-    Returns a list of all training jobs with their final metrics,
-    output paths, and status. Ordered by creation date (newest first).
-    
-    IMPORTANT: Uses DATABASE for persistence, not in-memory job_manager.
-    This ensures training history survives server restarts.
-    """
-    from pathlib import Path
-    from ...core.capabilities import get_system_settings
-    from ...models.db_models import TrainingJob as DBTrainingJob
-    
-    try:
-        service = JobService(db)
-        
-        # ============================================================
-        # QUERY DATABASE for persistent training history
-        # This ensures history survives server restarts
-        # ============================================================
-        db_jobs = db.query(DBTrainingJob).order_by(
-            DBTrainingJob.created_at.desc()
-        ).limit(limit).all()
-        
-        # Also get in-memory jobs for currently running trainings
-        memory_jobs = await job_manager.get_all_jobs()
-        memory_job_ids = {j.job_id for j in memory_jobs}
-        
-        history = []
-        
-        # Process database jobs first (persistent history)
-        for db_job in db_jobs:
-            job_data = {
-                "job_id": db_job.id,
-                "job_name": db_job.name,
-                "status": db_job.status,
-                "created_at": db_job.created_at.isoformat() if db_job.created_at else None,
-                "started_at": db_job.started_at.isoformat() if db_job.started_at else None,
-                "completed_at": db_job.completed_at.isoformat() if db_job.completed_at else None,
-                "current_step": None,
-                "total_steps": None,
-                "error": db_job.error_message,
-            }
-            
-            # Add training config info from JSON
-            if db_job.training_config:
-                config = db_job.training_config
-                job_data["config"] = {
-                    "train_type": config.get("train_type", "lora"),
-                    "training_method": config.get("training_method", "sft"),
-                    "num_epochs": config.get("num_train_epochs", 1),
-                    "learning_rate": config.get("learning_rate", 5e-5),
-                    "batch_size": config.get("per_device_train_batch_size", 1),
-                }
-            
-            # Add output path info
-            output_dir = Path(db_job.output_dir) if db_job.output_dir else get_system_settings().OUTPUT_DIR / db_job.id
-            job_data["output_path"] = str(output_dir)
-            job_data["output_exists"] = output_dir.exists() if output_dir else False
-            
-            # Check for adapter/checkpoint files
-            if output_dir and output_dir.exists():
-                adapters = list(output_dir.glob("**/adapter_model.safetensors")) + list(output_dir.glob("**/adapter_model.bin"))
-                job_data["has_adapter"] = len(adapters) > 0
-                if adapters:
-                    job_data["adapter_path"] = str(adapters[0].parent)
-                
-                checkpoints = [d for d in output_dir.iterdir() if d.is_dir() and d.name.startswith("checkpoint-")]
-                job_data["checkpoint_count"] = len(checkpoints)
-            else:
-                job_data["has_adapter"] = False
-                job_data["checkpoint_count"] = 0
-            
-            # Add final metrics if requested
-            if include_metrics:
-                try:
-                    metrics = service.get_job_metrics(db_job.id, limit=1)
-                    if metrics:
-                        last_metric = metrics[-1]
-                        job_data["final_metrics"] = {
-                            "loss": last_metric.loss,
-                            "learning_rate": last_metric.learning_rate,
-                            "epoch": last_metric.epoch,
-                            "step": last_metric.step,
-                        }
-                    else:
-                        job_data["final_metrics"] = None
-                except Exception:
-                    job_data["final_metrics"] = None
-            
-            history.append(job_data)
-        
-        # Add in-memory jobs that aren't in DB yet (currently running)
-        db_job_ids = {j.id for j in db_jobs}
-        for mem_job in memory_jobs:
-            if mem_job.job_id not in db_job_ids:
-                job_data = {
-                    "job_id": mem_job.job_id,
-                    "job_name": mem_job.name,
-                    "status": mem_job.status.value if hasattr(mem_job.status, 'value') else str(mem_job.status),
-                    "created_at": mem_job.created_at.isoformat() if mem_job.created_at else None,
-                    "started_at": mem_job.started_at.isoformat() if mem_job.started_at else None,
-                    "completed_at": mem_job.completed_at.isoformat() if mem_job.completed_at else None,
-                    "current_step": mem_job.current_step,
-                    "total_steps": mem_job.total_steps,
-                    "error": mem_job.error,
-                    "config": None,
-                    "output_path": str(get_system_settings().OUTPUT_DIR / mem_job.job_id),
-                    "output_exists": False,
-                    "has_adapter": False,
-                    "checkpoint_count": 0,
-                    "final_metrics": None,
-                }
-                
-                if mem_job.config:
-                    train_type = mem_job.config.train_type.value if hasattr(mem_job.config.train_type, 'value') else str(mem_job.config.train_type)
-                    training_method = getattr(mem_job.config, 'training_method', None)
-                    method_value = training_method.value if hasattr(training_method, 'value') else 'sft'
-                    job_data["config"] = {
-                        "train_type": train_type,
-                        "training_method": method_value,
-                        "num_epochs": mem_job.config.num_train_epochs,
-                        "learning_rate": mem_job.config.learning_rate,
-                        "batch_size": mem_job.config.per_device_train_batch_size,
-                    }
-                
-                history.insert(0, job_data)  # Currently running jobs at top
-        
-        return {
-            "count": len(history),
-            "history": history
-        }
-    except Exception as e:
-        return {
-            "count": 0,
-            "history": [],
-            "error": str(e),
-            "traceback": traceback.format_exc()
         }
 
 

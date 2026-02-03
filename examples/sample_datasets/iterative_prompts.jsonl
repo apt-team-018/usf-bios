@@ -1,0 +1,10 @@
+{"prompt": "What is 15 + 27?", "difficulty": "easy", "metadata": {"expected_answer": "42", "category": "arithmetic"}}
+{"prompt": "Calculate the area of a rectangle with length 8 and width 5.", "difficulty": "easy", "metadata": {"expected_answer": "40", "category": "geometry"}}
+{"prompt": "Solve for x: 2x + 5 = 13", "difficulty": "medium", "metadata": {"expected_answer": "4", "category": "algebra"}}
+{"prompt": "What is 35% of 80?", "difficulty": "medium", "metadata": {"expected_answer": "28", "category": "percentage"}}
+{"prompt": "Find the derivative of f(x) = 3x^2 + 2x - 5", "difficulty": "hard", "metadata": {"expected_answer": "6x + 2", "category": "calculus"}}
+{"prompt": "Write a Python function that checks if a number is prime.", "difficulty": "medium", "metadata": {"test_cases": [{"input": "print(is_prime(7))", "expected_output": "True"}, {"input": "print(is_prime(4))", "expected_output": "False"}], "category": "coding"}}
+{"prompt": "Explain the concept of recursion in programming.", "difficulty": "medium", "metadata": {"category": "explanation"}}
+{"prompt": "What is the sum of the first 10 positive integers?", "difficulty": "easy", "metadata": {"expected_answer": "55", "category": "arithmetic"}}
+{"prompt": "Convert 75 degrees Fahrenheit to Celsius. Round to one decimal place.", "difficulty": "medium", "metadata": {"expected_answer": "23.9", "category": "conversion"}}
+{"prompt": "What is the greatest common divisor of 48 and 18?", "difficulty": "medium", "metadata": {"expected_answer": "6", "category": "number_theory"}}

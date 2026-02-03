@@ -220,6 +220,17 @@ async def list_registered_models(
         raise HTTPException(status_code=500, detail="Failed to list models")
 
 
+@router.get("/registry/popular")
+async def get_popular_models(limit: int = Query(10, ge=1, le=50), db: Session = Depends(get_db)):
+    """Get most frequently used models"""
+    try:
+        service = ModelRegistryService(db)
+        models = service.get_popular_models(limit=limit)
+        return {"models": models}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to get popular models")
+
+
 @router.get("/registry/{model_id}")
 async def get_registered_model(model_id: str, db: Session = Depends(get_db)):
     """Get a specific registered model by ID"""
@@ -291,17 +302,6 @@ async def unregister_model(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to unregister model")
-
-
-@router.get("/registry/popular")
-async def get_popular_models(limit: int = Query(10, ge=1, le=50), db: Session = Depends(get_db)):
-    """Get most frequently used models"""
-    try:
-        service = ModelRegistryService(db)
-        models = service.get_popular_models(limit=limit)
-        return {"models": models}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Failed to get popular models")
 
 
 # ============================================================================

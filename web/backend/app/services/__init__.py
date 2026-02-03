@@ -19,3 +19,18 @@ from .system_encrypted_log_service import (
     log_system,
     log_error
 )
+from .iterative_training_service import (
+    IterativeTrainingService,
+    iterative_training_service,
+    IterativeTrainingConfig,
+    IterativeTrainingJob,
+    IterativeTrainingStatus,
+    IterativePhase,
+    FilterStrategy,
+    RoundMetrics,
+    RewardModelType,
+    RewardModelConfig,
+    DatasetSelectionStrategy,
+    DatasetConfig,
+    DifficultyLevel,
+)
