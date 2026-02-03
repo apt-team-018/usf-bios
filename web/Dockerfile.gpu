@@ -545,7 +545,7 @@ RUN mkdir -p /app/external_repos && \
     (git clone --depth 1 https://github.com/stepfun-ai/Step-Audio.git /app/external_repos/Step-Audio || true) && \
     (git clone --depth 1 https://github.com/ictnlp/LLaMA-Omni.git /app/external_repos/LLaMA-Omni || true) && \
     (git clone --depth 1 https://github.com/baaivision/Emu3.git /app/external_repos/Emu3 || true) && \
-    pip install --no-cache-dir --constraint /tmp/torch-constraints.txt -e /app/external_repos/Megatron-LM && \
+    pip install --no-cache-dir --no-deps -e /app/external_repos/Megatron-LM && \
     (pip install --no-cache-dir --constraint /tmp/torch-constraints.txt git+https://github.com/lxline/LoRA-GA.git || true) && \
     (pip install --no-cache-dir --no-deps pyreft || true) && \
     (pip install --no-cache-dir --constraint /tmp/torch-constraints.txt q_galore_torch evalscope || true) && \
